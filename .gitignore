@@ -16,6 +16,7 @@ htmlcov/
 # Local state: never commit login session or personal report drafts
 storage_state.json
 browser_profile/
+browser_profile_t2/
 config/courses.json
 config/login.json
 reports/*.md

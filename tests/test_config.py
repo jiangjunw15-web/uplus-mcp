@@ -6,7 +6,6 @@ from uplus_mcp.config import EXAMPLE_CONFIG_PATH, load_config
 def test_default_config_has_empty_courses_without_file():
     cfg = load_config(None)
     assert cfg.base_url == "https://www.eduplus.net"
-    assert cfg.headless is True
     # Personal courses live in the gitignored config; default is empty and the
     # engine falls back to the live account course list.
     assert cfg.courses == []

@@ -37,7 +37,6 @@ cd D:\u+小助手
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .
-playwright install chromium
 ```
 
 ### 2. 配置个人课程（已被 git 忽略）
@@ -48,13 +47,20 @@ Copy-Item config\courses.example.json config\courses.json
 
 在 `config/courses.json` 中填写你的真实 `courseId` 与本地路径。
 
-### 3. 首次登录（手动，一次性）
+### 3. 登录（完全由本人完成，插件不碰登录）
 
-```powershell
-.venv\Scripts\python.exe -c "from uplus_mcp.config import load_config; from uplus_mcp.browser import BrowserSession; c=load_config(); s=BrowserSession(c); s.start(); s.page.goto('https://www.eduplus.net/workbench/index/school')"
-```
+插件**不启动浏览器、不保存登录态**：它直接附加到你本人正在使用的 Edge 浏览器，在你已登录的真实会话里工作。
 
-该命令用本机 Edge 打开一个 U+ 专用窗口（配置目录 `browser_profile/`），你本人在窗口里完成登录；登录态会永久保留在该 Edge 配置目录中，之后巡检/作答自动复用，无需再次登录。
+一次性准备（每次重启 Edge 后需要重做）：
+
+1. 完全退出 Edge（任务栏图标右键退出，确保无后台进程）；
+2. 用带调试端口的方式启动 Edge：
+   ```powershell
+   & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9333
+   ```
+3. 在这个 Edge 窗口里正常打开并登录 `eduplus.net`。
+
+之后所有巡检、作答都会直接在这个浏览器里的 U+ 标签页上进行——因为用的就是你本人的真实会话，U+ 的网页跳转/弹回问题不会再出现。
 
 ### 4. 在 MCP 客户端中注册服务
 
@@ -76,7 +82,7 @@ Claude Desktop、Cursor、VS Code 配置示例见 [`docs/mcp-clients.md`](docs/m
 
 | 工具 | 作用 |
 | --- | --- |
-| `uplus_check_login` | 校验持久化登录态是否有效 |
+| `uplus_check_login` | 校验浏览器中的 U+ 登录态是否有效 |
 | `uplus_list_courses` | 列出当前账号课程 |
 | `uplus_list_homeworks` | 列出作业状态；可选打开作答页以页面按钮为准复核 |
 | `uplus_list_experiments` | 列出实验与提交状态 |
@@ -92,9 +98,9 @@ Claude Desktop、Cursor、VS Code 配置示例见 [`docs/mcp-clients.md`](docs/m
 .venv\Scripts\python.exe -m uplus_mcp.daily_patrol
 ```
 
-CLI 会生成 `reports/patrol_YYYYMMDD_HHMM.md` 报告与待答客观题 `.brief.json`。退出码 `2` 表示登录态过期，`1` 表示运行时错误。可在 Windows 任务计划程序（如每晚 21:30）或系统 cron 中注册该命令。
+CLI 会生成 `reports/patrol_YYYYMMDD_HHMM.md` 报告与待答客观题 `.brief.json`。退出码 `3` 表示未检测到带调试端口的 Edge，`2` 表示登录态过期，`1` 表示运行时错误。
 
-> 巡检依赖登录态；若报告登录过期，重复第 3 步在 Edge 窗口里重新登录即可。
+> 前提：Edge 正以调试端口运行且已登录 U+（见第 3 步）；若报告登录过期，在浏览器里重新登录即可。
 
 ## 配置项说明
 
@@ -103,11 +109,9 @@ CLI 会生成 `reports/patrol_YYYYMMDD_HHMM.md` 报告与待答客观题 `.brief
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `base_url` | `https://www.eduplus.net` | 平台根地址 |
-| `headless` | `true` | 是否无头运行 Chromium |
 | `nav_timeout_ms` | `30000` | 页面导航超时 |
 | `action_timeout_ms` | `15000` | UI 操作超时 |
 | `deadline_warning_hours` | `72` | 截止时间预警窗口（小时） |
-| `storage_state_path` | `storage_state.json` | 登录态持久化文件 |
 | `report_dir` | `reports` | 报告输出目录 |
 | `courses` | 内置兜底清单 | 每门课的 `id` / `name` / `teacher` |
 
@@ -125,7 +129,7 @@ pytest
 
 ```
 src/uplus_mcp/
-  browser.py      Playwright 会话与页面内 fetch
+  browser.py      CDP 附加到用户已登录的 Edge（不启动浏览器）
   platform.py     只读 REST 客户端
   operator.py     页面 UI 操作
   engine.py       共享编排层
@@ -135,8 +139,7 @@ src/uplus_mcp/
   report.py       巡检报告聚合与 Markdown 渲染
   utils.py        HTML 清洗、时间与答案规范化工具
   server.py       FastMCP 工具注册
-  daily_patrol.py 无人值守 CLI
-scripts/login.py  首次登录辅助脚本
+  daily_patrol.py 巡检 CLI
 docs/             架构、接口映射、客户端配置、适配器指南
 config/           个人配置示例（真实文件已忽略）
 reports/          巡检报告（已忽略）
@@ -145,9 +148,9 @@ tests/            单元测试
 
 ## 安全与隐私
 
-- `storage_state.json`、`config/courses.json`、`reports/` 保持本地，已列入 `.gitignore`。
+- 插件不保存、不传输任何账号凭证；登录完全由本人在自己的 Edge 里完成。
+- `config/courses.json`、`reports/` 保持本地，已列入 `.gitignore`。
 - 不要提交学号、姓名、手机号、邮箱、Cookie 或令牌。
-- 服务不会索要密码，也不存储账号凭证。
 
 ## 许可证
 

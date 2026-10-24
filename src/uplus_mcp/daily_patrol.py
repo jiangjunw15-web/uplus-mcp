@@ -1,13 +1,14 @@
-"""Unattended CLI patrol used by Windows Task Scheduler / cron.
+"""Patrol CLI: attaches to the user's logged-in Edge and walks every course.
 
-This CLI never submits answers by itself: it checks the login session, walks
-every configured course, saves a Markdown report, and dumps objective-question
+This CLI never launches a browser and never submits answers by itself: it
+checks the login session, saves a Markdown report, and dumps objective-question
 briefs that an MCP session (or a human) can answer next. Subjective, file and
 experiment-report items are listed under "takeover".
 
 Usage:
     python -m uplus_mcp.daily_patrol
-    python -m uplus_mcp.daily_patrol --config config/courses.json --no-headless
+
+Requires Edge running with the debug port (see browser.ATTACH_HELP).
 """
 
 from __future__ import annotations
@@ -17,17 +18,15 @@ import json
 import sys
 from pathlib import Path
 
-from .browser import BrowserSession, AuthExpiredError
+from .browser import BrowserSession, AuthExpiredError, UplusError, ATTACH_HELP
 from .config import load_config
 from .engine import PatrolEngine
 from .operator import HomeworkOperator
 from .platform import PlatformClient
 
 
-def build_engine(config_path: str = "", headless: bool | None = None) -> PatrolEngine:
+def build_engine(config_path: str = "") -> PatrolEngine:
     cfg = load_config(config_path or None)
-    if headless is not None:
-        cfg.headless = headless
     session = BrowserSession(cfg)
     client = PlatformClient(session, cfg)
     operator = HomeworkOperator(session, client, cfg)
@@ -35,17 +34,20 @@ def build_engine(config_path: str = "", headless: bool | None = None) -> PatrolE
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="U+ 定时巡检（不自动提交，只出报告与待答清单）")
+    parser = argparse.ArgumentParser(description="U+ 巡检（附加到已登录的 Edge，不自动提交）")
     parser.add_argument("--config", default="", help="配置文件路径")
-    parser.add_argument("--no-headless", action="store_true", help="显示浏览器窗口调试")
     parser.add_argument("--brief", default="", help="待答题目 brief JSON 保存路径")
     args = parser.parse_args()
 
-    engine = build_engine(args.config, headless=not args.no_headless)
+    try:
+        engine = build_engine(args.config)
+    except UplusError as exc:
+        print(f"⚠️ {exc}", file=sys.stderr)
+        return 3
     try:
         login = engine.check_login()
         if not login["logged_in"]:
-            print("⚠️ 登录态已过期：请先运行 python scripts/login.py 重新登录 U+。", file=sys.stderr)
+            print("⚠️ 登录态无效：请在浏览器中登录 eduplus.net 后重试。", file=sys.stderr)
             return 2
         result = engine.patrol(auto_answer=False, submit=False)
         summary = result["summary"]
@@ -69,14 +71,14 @@ def main() -> int:
         print(f"\n巡检报告：{result['report_path']}")
         return 0
     except AuthExpiredError:
-        print("⚠️ 登录态在巡检中途失效，请重新登录后再运行。", file=sys.stderr)
+        print("⚠️ 登录态在巡检中途失效，请在浏览器中重新登录后再运行。", file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - CLI entrypoint
         print(f"巡检失败：{exc}", file=sys.stderr)
         return 1
     finally:
-        if _state_session := getattr(engine, "session", None):
-            _state_session.close()
+        if session := getattr(engine, "session", None):
+            session.close()
 
 
 if __name__ == "__main__":

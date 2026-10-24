@@ -25,12 +25,9 @@ EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "courses.example.json"
 @dataclass
 class Config:
     base_url: str = "https://www.eduplus.net"
-    headless: bool = True
     nav_timeout_ms: int = 30_000
     action_timeout_ms: int = 15_000
     deadline_warning_hours: int = 72
-    storage_state_path: str = "storage_state.json"
-    browser_profile_path: str = "browser_profile"
     report_dir: str = "reports"
     courses: list[Course] = field(default_factory=list)
 
@@ -38,14 +35,6 @@ class Config:
     def resolve(self, raw: str) -> Path:
         p = Path(raw)
         return p if p.is_absolute() else (PROJECT_ROOT / p)
-
-    @property
-    def storage_state_file(self) -> Path:
-        return self.resolve(self.storage_state_path)
-
-    @property
-    def profile_dir(self) -> Path:
-        return self.resolve(self.browser_profile_path)
 
     @property
     def report_folder(self) -> Path:
@@ -82,12 +71,9 @@ def load_config(path: Optional[str] = None) -> Config:
 
     cfg = Config(
         base_url=str(data.get("base_url", "https://www.eduplus.net")).rstrip("/"),
-        headless=bool(data.get("headless", True)),
         nav_timeout_ms=int(data.get("nav_timeout_ms", 30_000)),
         action_timeout_ms=int(data.get("action_timeout_ms", 15_000)),
         deadline_warning_hours=int(data.get("deadline_warning_hours", 72)),
-        storage_state_path=str(data.get("storage_state_path", "storage_state.json")),
-        browser_profile_path=str(data.get("browser_profile_path", "browser_profile")),
         report_dir=str(data.get("report_dir", "reports")),
     )
 
