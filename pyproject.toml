@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uplus-mcp"
+version = "0.1.0"
+description = "MCP server that patrols QingSoft U+ course platform homework & experiments, answers objective questions automatically, and reports items that need human takeover."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "uplus-mcp contributors" }]
+dependencies = [
+    "mcp>=1.30.0,<2.0.0",
+    "playwright>=1.49.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+uplus-mcp = "uplus_mcp.server:main"
+uplus-patrol = "uplus_mcp.daily_patrol:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+uplus_mcp = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

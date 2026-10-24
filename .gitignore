@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local state: never commit login session or personal report drafts
+storage_state.json
+config/courses.json
+reports/*.md
+reports/*.brief.json
+.env
+.env.local
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Playwright
+.playwright/

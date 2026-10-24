@@ -1,0 +1,83 @@
+"""Unattended CLI patrol used by Windows Task Scheduler / cron.
+
+This CLI never submits answers by itself: it checks the login session, walks
+every configured course, saves a Markdown report, and dumps objective-question
+briefs that an MCP session (or a human) can answer next. Subjective, file and
+experiment-report items are listed under "takeover".
+
+Usage:
+    python -m uplus_mcp.daily_patrol
+    python -m uplus_mcp.daily_patrol --config config/courses.json --no-headless
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from .browser import BrowserSession, AuthExpiredError
+from .config import load_config
+from .engine import PatrolEngine
+from .operator import HomeworkOperator
+from .platform import PlatformClient
+
+
+def build_engine(config_path: str = "", headless: bool | None = None) -> PatrolEngine:
+    cfg = load_config(config_path or None)
+    if headless is not None:
+        cfg.headless = headless
+    session = BrowserSession(cfg)
+    client = PlatformClient(session, cfg)
+    operator = HomeworkOperator(session, client, cfg)
+    return PatrolEngine(cfg, session, client, operator)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="U+ 定时巡检（不自动提交，只出报告与待答清单）")
+    parser.add_argument("--config", default="", help="配置文件路径")
+    parser.add_argument("--no-headless", action="store_true", help="显示浏览器窗口调试")
+    parser.add_argument("--brief", default="", help="待答题目 brief JSON 保存路径")
+    args = parser.parse_args()
+
+    engine = build_engine(args.config, headless=not args.no_headless)
+    try:
+        login = engine.check_login()
+        if not login["logged_in"]:
+            print("⚠️ 登录态已过期：请先运行 python scripts/login.py 重新登录 U+。", file=sys.stderr)
+            return 2
+        result = engine.patrol(auto_answer=False, submit=False)
+        summary = result["summary"]
+        print("=== 巡检摘要 ===")
+        print(f"作业已提交 {summary['homework_submitted']}（待批改 {summary['homework_pending']}），"
+              f"未完成 {summary['homework_outstanding']}")
+        print(f"实验已提交 {summary['experiments_submitted']}，未完成 {summary['experiments_outstanding']}")
+        print(f"待人工接管 {summary['takeover_count']} 项")
+        if result["takeover"]:
+            print("\n=== 需要人工处理 ===")
+            for item in result["takeover"]:
+                print(f"- [{item.get('course')}] {item.get('title')}：{item.get('detail')}"
+                      + (f"（{item.get('deadline')}）" if item.get("deadline") else ""))
+        if result["answer_briefs"]:
+            brief_path = args.brief or str(Path(result["report_path"]).with_suffix(".brief.json"))
+            Path(brief_path).write_text(
+                json.dumps(result["answer_briefs"], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"\n待答客观题 brief 已保存：{brief_path}")
+        print(f"\n巡检报告：{result['report_path']}")
+        return 0
+    except AuthExpiredError:
+        print("⚠️ 登录态在巡检中途失效，请重新登录后再运行。", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - CLI entrypoint
+        print(f"巡检失败：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        if _state_session := getattr(engine, "session", None):
+            _state_session.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
