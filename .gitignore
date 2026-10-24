@@ -15,7 +15,9 @@ htmlcov/
 
 # Local state: never commit login session or personal report drafts
 storage_state.json
+browser_profile/
 config/courses.json
+config/login.json
 reports/*.md
 reports/*.brief.json
 .env
@@ -30,3 +32,4 @@ Thumbs.db
 
 # Playwright
 .playwright/
+browser_profile_t2/

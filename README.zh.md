@@ -48,13 +48,13 @@ Copy-Item config\courses.example.json config\courses.json
 
 在 `config/courses.json` 中填写你的真实 `courseId` 与本地路径。
 
-### 3. 首次登录
+### 3. 首次登录（手动，一次性）
 
 ```powershell
-python scripts/login.py
+.venv\Scripts\python.exe -c "from uplus_mcp.config import load_config; from uplus_mcp.browser import BrowserSession; c=load_config(); s=BrowserSession(c); s.start(); s.page.goto('https://www.eduplus.net/workbench/index/school')"
 ```
 
-脚本会打开可见浏览器进入 U+ 工作台，由你本人登录；登录成功后自动保存 `storage_state.json` 并列出识别到的课程。
+该命令用本机 Edge 打开一个 U+ 专用窗口（配置目录 `browser_profile/`），你本人在窗口里完成登录；登录态会永久保留在该 Edge 配置目录中，之后巡检/作答自动复用，无需再次登录。
 
 ### 4. 在 MCP 客户端中注册服务
 
@@ -94,7 +94,7 @@ Claude Desktop、Cursor、VS Code 配置示例见 [`docs/mcp-clients.md`](docs/m
 
 CLI 会生成 `reports/patrol_YYYYMMDD_HHMM.md` 报告与待答客观题 `.brief.json`。退出码 `2` 表示登录态过期，`1` 表示运行时错误。可在 Windows 任务计划程序（如每晚 21:30）或系统 cron 中注册该命令。
 
-> CLI 不会提交作业；作答与提交发生在 MCP 会话中，由模型审阅审题包后触发。
+> 巡检依赖登录态；若报告登录过期，重复第 3 步在 Edge 窗口里重新登录即可。
 
 ## 配置项说明
 

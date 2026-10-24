@@ -30,6 +30,7 @@ class Config:
     action_timeout_ms: int = 15_000
     deadline_warning_hours: int = 72
     storage_state_path: str = "storage_state.json"
+    browser_profile_path: str = "browser_profile"
     report_dir: str = "reports"
     courses: list[Course] = field(default_factory=list)
 
@@ -41,6 +42,10 @@ class Config:
     @property
     def storage_state_file(self) -> Path:
         return self.resolve(self.storage_state_path)
+
+    @property
+    def profile_dir(self) -> Path:
+        return self.resolve(self.browser_profile_path)
 
     @property
     def report_folder(self) -> Path:
@@ -82,6 +87,7 @@ def load_config(path: Optional[str] = None) -> Config:
         action_timeout_ms=int(data.get("action_timeout_ms", 15_000)),
         deadline_warning_hours=int(data.get("deadline_warning_hours", 72)),
         storage_state_path=str(data.get("storage_state_path", "storage_state.json")),
+        browser_profile_path=str(data.get("browser_profile_path", "browser_profile")),
         report_dir=str(data.get("report_dir", "reports")),
     )
 
