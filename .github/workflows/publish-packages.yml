@@ -32,6 +32,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
+          rm -rf maven-package/artifacts
           mkdir -p maven-package/artifacts
           cp dist/*.whl maven-package/artifacts/
           cp dist/*.tar.gz maven-package/artifacts/

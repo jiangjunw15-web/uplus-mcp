@@ -18,7 +18,7 @@
 
   <groupId>com.github.jiangjunw15-web</groupId>
   <artifactId>uplus-mcp</artifactId>
-  <version>0.5.1</version>
+  <version>0.5.2</version>
   <packaging>pom</packaging>
 
   <name>uplus-mcp</name>
@@ -76,12 +76,12 @@
             <configuration>
               <artifacts>
                 <artifact>
-                  <file>artifacts/uplus_mcp-0.5.0-py3-none-any.whl</file>
+                  <file>artifacts/uplus_mcp-${project.version}-py3-none-any.whl</file>
                   <type>whl</type>
                   <classifier>wheel</classifier>
                 </artifact>
                 <artifact>
-                  <file>artifacts/uplus_mcp-0.5.0.tar.gz</file>
+                  <file>artifacts/uplus_mcp-${project.version}.tar.gz</file>
                   <type>tar.gz</type>
                   <classifier>sdist</classifier>
                 </artifact>
