@@ -5,16 +5,44 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uplus-mcp"
 version = "0.5.0"
-description = "MCP server that patrols QingSoft U+ course platform homework & experiments, answers objective questions automatically, and reports items that need human takeover."
+description = "MCP server that patrols the QingSoft U+ course platform homework & experiments, answers objective questions automatically, and reports items that need human takeover."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "uplus-mcp contributors" }]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "uplus",
+    "eduplus",
+    "homework",
+    "patrol",
+    "playwright",
+    "browser-automation",
+    "education",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Education",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Education",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
 dependencies = [
     "mcp>=1.30.0,<2.0.0",
     "playwright>=1.49.0",
     "beautifulsoup4>=4.12.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jiangjunw15-web/uplus-mcp"
+Repository = "https://github.com/jiangjunw15-web/uplus-mcp"
+Issues = "https://github.com/jiangjunw15-web/uplus-mcp/issues"
+Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-050"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
