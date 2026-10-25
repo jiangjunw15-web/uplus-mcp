@@ -23,17 +23,9 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
 
 from .config import Config
+from .launcher import CDP_PORTS, ATTACH_HELP_TEXT, ensure_browser_ready
 
-CDP_PORTS = (9333, 9222)
-
-ATTACH_HELP = (
-    "未检测到可连接的 Edge 调试端口 (9333/9222)。请按以下步骤操作：\n"
-    "1) 完全退出 Edge（任务栏右键退出，确保无后台进程）；\n"
-    '2) 运行 "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" '
-    "--remote-debugging-port=9333；\n"
-    "3) 在该 Edge 窗口中打开并登录 eduplus.net；\n"
-    "4) 重新运行本工具，它会直接附加到你已登录的浏览器。"
-)
+ATTACH_HELP = ATTACH_HELP_TEXT
 
 
 class UplusError(RuntimeError):
@@ -63,6 +55,8 @@ class BrowserSession:
     def start(self) -> None:
         if self._started:
             return
+        # Prefer an already-open debug port; otherwise try to bring Edge up.
+        ensure_browser_ready(port=CDP_PORTS[0], auto_launch=self.config.auto_launch_edge)
         last_exc: Optional[Exception] = None
         for port in CDP_PORTS:
             try:
@@ -83,9 +77,20 @@ class BrowserSession:
     def _pick_page(self) -> Page:
         """Reuse the open U+ tab when present, otherwise open a new tab in the
         user's browser (their login cookies apply automatically)."""
+        host = urlparse(self.base_url).netloc
         for page in self._context.pages:
-            if urlparse(page.url).netloc == urlparse(self.base_url).netloc:
-                return page
+            try:
+                if urlparse(page.url).netloc == host:
+                    return page
+            except Exception:  # noqa: BLE001 - transient during startup
+                continue
+        # Reuse an existing blank tab so we do not pile up tabs.
+        for page in self._context.pages:
+            try:
+                if page.url in ("about:blank", ""):
+                    return page
+            except Exception:  # noqa: BLE001
+                continue
         return self._context.new_page()
 
     @property
@@ -145,7 +150,10 @@ class BrowserSession:
         url = self.url_for(path)
         script = """
         async (url) => {
-            const r = await fetch(url, {credentials: 'include', headers: {'Accept': 'application/json'}});
+            const token = localStorage.getItem('AccessToken') || '';
+            const headers = {'Accept': 'application/json'};
+            if (token) { headers['x-access-token'] = token; }
+            const r = await fetch(url, {credentials: 'include', headers: headers});
             const text = await r.text();
             return {status: r.status, body: text};
         }

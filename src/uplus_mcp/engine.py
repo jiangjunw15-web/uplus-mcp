@@ -62,7 +62,8 @@ class PatrolEngine:
         except AuthExpiredError:
             logged = False
         return {"logged_in": logged, "base_url": self.config.base_url,
-                "message": "登录有效" if logged else "登录态已过期，请先运行登录脚本重新登录。"}
+                "message": "登录有效" if logged else
+                "登录态已过期：请在插件启动的 Edge 窗口中打开 eduplus.net 重新登录，然后重试本工具。"}
 
     def list_courses(self) -> list[dict]:
         return [

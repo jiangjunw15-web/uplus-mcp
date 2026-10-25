@@ -1,5 +1,25 @@
 # uplus-mcp
 
+MCP server for the QingSoft U+ learning platform **with a built-in generic browser toolset**.
+
+See [README.zh.md](README.zh.md) for the full Chinese guide (step-by-step install, run, and push-back-to-GitHub instructions).
+
+## What's new in 0.4.0
+
+- **Merged browse toolset**: 17 new `browse_*` tools let the model drive any web
+  page directly (open, snapshot, click, fill, type, press, scroll, screenshot,
+  eval JS, tabs) on the same attached Edge session — the fallback when the
+  platform's REST contract changes or a step has no API.
+- **Fixed the asyncio crash**: FastMCP calls sync tools on the event-loop
+  thread, where Playwright's sync API refuses to run. All browser work now runs
+  on one dedicated worker thread (`worker.py`); tools are async and await it.
+- **Fixed 401 on every read API**: U+ requires an `x-access-token` header
+  (from `localStorage.AccessToken`) on each API call, not just cookies.
+- **Fixed the Edge debug port that never listens**: Edge/Chromium 136+ ignores
+  `--remote-debugging-port` on the default user-data directory. `launcher.py`
+  copies the profile to a dedicated directory once (login survives) and starts
+  Edge there with the port; `browse_launch_edge` does it in one call.
+
 An MCP server that patrols the [青软 U+](https://www.eduplus.net) learning platform: it lists courses, homework and experiments, reads objective questions into a structured brief, lets the connected MCP client model answer, fills the answer page, verifies selections and submits. Subjective questions, programming work, experiment reports and file attachments are explicitly handed back to the human.
 
 > **Academic integrity notice** — This tool is a personal study and reminder helper. Use it to review questions, track deadlines and organize your own work. Experiment reports, group deliverables, programming assignments and open-ended answers must be completed by yourself. Follow your school's academic honesty rules and course instructor instructions. Do not use this tool in exams, closed-book tests or any assessment that prohibits assistance.

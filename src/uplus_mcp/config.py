@@ -30,6 +30,11 @@ class Config:
     deadline_warning_hours: int = 72
     report_dir: str = "reports"
     courses: list[Course] = field(default_factory=list)
+    # When no CDP port is listening, copy the Edge profile and launch Edge with
+    # --remote-debugging-port automatically (Edge 136+ forbids it on the default
+    # profile directory, so a dedicated copy is required).
+    auto_launch_edge: bool = True
+    profile_dir: str = ""
 
     # ---- path resolution helpers ------------------------------------ #
     def resolve(self, raw: str) -> Path:
@@ -75,6 +80,8 @@ def load_config(path: Optional[str] = None) -> Config:
         action_timeout_ms=int(data.get("action_timeout_ms", 15_000)),
         deadline_warning_hours=int(data.get("deadline_warning_hours", 72)),
         report_dir=str(data.get("report_dir", "reports")),
+        auto_launch_edge=bool(data.get("auto_launch_edge", True)),
+        profile_dir=str(data.get("profile_dir", "")),
     )
 
     raw_courses = data.get("courses") or []

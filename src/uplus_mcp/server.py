@@ -1,138 +1,296 @@
-"""FastMCP server exposing U+ patrol, inspection, answering and upload tools.
+"""FastMCP server exposing U+ patrol tools **and** generic browser-driving tools.
+
+Two tool families share one attached Edge session:
+
+U+ tools (``uplus_*``)
+    Patrol courses, read homework/experiment state, fill objective answers, submit,
+    upload an attachment. Read paths use the platform REST API; write paths drive
+    the real answer page.
+
+Browser tools (``browse_*``)
+    Let the model operate any page directly: open URL, snapshot, click, fill, type,
+    press, scroll, screenshot, run JS, switch tabs. This is the fallback when the
+    platform contract changes or a step has no API.
+
+Threading model
+---------------
+FastMCP calls sync tools on the asyncio loop thread, where Playwright's sync API
+refuses to run. Every browser operation therefore runs on one dedicated worker
+thread (``worker.BrowserThread``); tools are async and await that thread.
 
 Run locally:
     python -m uplus_mcp.server
-Or install the package and use the ``uplus-mcp`` console script.
-
-Tool list
----------
-uplus_check_login
-uplus_list_courses
-uplus_list_homeworks
-uplus_list_experiments
-uplus_inspect_homework
-uplus_answer_homework
-uplus_upload_attachment
-uplus_patrol
-uplus_close
+Or use the installed console script ``uplus-mcp``.
 """
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
+from .browse import BrowseTools
 from .browser import BrowserSession
 from .config import load_config
 from .engine import PatrolEngine
+from .launcher import launch_edge_with_cdp, first_live_port
 from .operator import HomeworkOperator
 from .platform import PlatformClient
+from .worker import BrowserThread
 
 mcp = FastMCP("uplus-mcp")
 
-# Lazy singleton state: the browser only starts on the first tool call.
-_state: dict = {}
+# Lazy singletons. Everything Playwright touches is created on the worker thread.
+_state: dict[str, Any] = {}
+_thread = BrowserThread()
 
 
-def _engine() -> PatrolEngine:
+def _ensure_engine() -> PatrolEngine:
+    """Create the engine on the *worker* thread (Playwright thread affinity)."""
     if not _state.get("ready"):
         cfg = load_config()
         session = BrowserSession(cfg)
-        client = PlatformClient(session, cfg)
-        operator = HomeworkOperator(session, client, cfg)
-        _state.update(ready=True, config=cfg, session=session,
-                      client=client, engine=PatrolEngine(cfg, session, client, operator))
+        _state["config"] = cfg
+        _state["session"] = session
+        _state["client"] = PlatformClient(session, cfg)
+        _state["operator"] = HomeworkOperator(session, _state["client"], cfg)
+        _state["browse"] = BrowseTools(session)
+        _state["engine"] = PatrolEngine(
+            cfg, session, _state["client"], _state["operator"]
+        )
+        _state["ready"] = True
     return _state["engine"]
 
 
-# --------------------------------------------------------------------------- #
-# tools
-# --------------------------------------------------------------------------- #
-@mcp.tool()
-def uplus_check_login() -> dict:
-    """Check whether the persisted U+ login session is still valid."""
-    return _engine().check_login()
+def _dispatch(name: str, *args: Any, **kwargs: Any):
+    """Return a zero-arg callable that runs one operation on the worker thread.
 
-
-@mcp.tool()
-def uplus_list_courses() -> list[dict]:
-    """List the courses attached to the signed-in account."""
-    return _engine().list_courses()
-
-
-@mcp.tool()
-def uplus_list_homeworks(course_id: str = "", refresh_page_state: bool = False) -> list[dict]:
-    """List homeworks for one course, or every configured course when omitted.
-
-    ``refresh_page_state=True`` opens each answer page to read the real button
-    label; use it when API status looks ambiguous.
+    The engine is created inside the callable so it is constructed on the worker
+    thread (Playwright objects must be created and used on the same thread).
     """
-    return _engine().list_homeworks(course_id, refresh_page_state=refresh_page_state)
+    def work() -> Any:
+        _ensure_engine()
+        if name.startswith("browse."):
+            func = getattr(_state["browse"], name.split(".", 1)[1])
+        else:
+            func = getattr(_state["engine"], name)
+        return func(*args, **kwargs)
+
+    return work
+
+
+# --------------------------------------------------------------------------- #
+# U+ tools
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def uplus_check_login() -> dict:
+    """Check whether the attached Edge session is signed into U+."""
+    return await _thread.run_async(_dispatch("check_login"))
 
 
 @mcp.tool()
-def uplus_list_experiments(course_id: str) -> list[dict]:
+async def uplus_list_courses() -> list[dict]:
+    """List every course attached to the signed-in account."""
+    return await _thread.run_async(_dispatch("list_courses"))
+
+
+@mcp.tool()
+async def uplus_list_homeworks(course_id: str = "", refresh_page_state: bool = False) -> list[dict]:
+    """List homework status for one course, or all courses when omitted.
+
+    ``refresh_page_state=True`` opens each answer page to read the real submit
+    button, because the REST status can lag behind the page.
+    """
+    return await _thread.run_async(
+        _dispatch("list_homeworks", course_id, refresh_page_state=refresh_page_state)
+    )
+
+
+@mcp.tool()
+async def uplus_list_experiments(course_id: str) -> list[dict]:
     """List experiments and their submission state for one course."""
-    return _engine().list_experiments(course_id)
+    return await _thread.run_async(_dispatch("list_experiments", course_id))
 
 
 @mcp.tool()
-def uplus_inspect_homework(task_id: str, course_id: str) -> dict:
-    """Open a homework and return its status plus a structured question brief.
+async def uplus_inspect_homework(task_id: str, course_id: str) -> dict:
+    """Return homework status plus a structured brief of its questions.
 
-    The MCP client model uses the brief to produce the ``answers`` map passed to
+    The model reads the brief and returns an ``answers`` map to
     ``uplus_answer_homework``.
     """
-    return _engine().inspect_homework(task_id, course_id)
+    return await _thread.run_async(_dispatch("inspect_homework", task_id, course_id))
 
 
 @mcp.tool()
-def uplus_answer_homework(
+async def uplus_answer_homework(
     task_id: str,
     course_id: str,
     answers: dict[str, str],
     submit: bool = True,
     force_submit: bool = False,
 ) -> dict:
-    """Fill objective questions using the provided answers and optionally submit.
+    """Fill objective questions and optionally submit.
 
-    ``answers`` maps ``question_id`` (or question order number as string) to the
-    normalized answer: single letter, letter combination, true/false, or blank text.
-    Submission is blocked when questions remain unanswered or errored; pass
-    ``force_submit=True`` only after reviewing the outcome deliberately.
+    ``answers`` maps ``question_id`` (or question order as a string) to a
+    normalized answer: one letter, a sorted letter group, ``true``/``false``, or
+    blank text. Submission is refused while any question is unanswered or failed
+    unless ``force_submit=True``.
     """
-    return _engine().answer_homework(
-        task_id, course_id, answers, submit=submit, force_submit=force_submit
+    return await _thread.run_async(
+        _dispatch("answer_homework", task_id, course_id, answers,
+                  submit=submit, force_submit=force_submit)
     )
 
 
 @mcp.tool()
-def uplus_upload_attachment(task_id: str, course_id: str, file_path: str) -> dict:
-    """Attach a local file (PPT/PDF/ZIP/etc.) to a homework that requires upload."""
-    return _engine().upload_attachment(task_id, course_id, file_path)
+async def uplus_upload_attachment(task_id: str, course_id: str, file_path: str) -> dict:
+    """Attach a local file (PPT/PDF/ZIP) to a homework that requires an upload."""
+    return await _thread.run_async(
+        _dispatch("upload_attachment", task_id, course_id, file_path)
+    )
 
 
 @mcp.tool()
-def uplus_patrol(auto_answer: bool = False, submit: bool = False) -> dict:
-    """Run a full patrol over configured courses and save a Markdown report.
+async def uplus_patrol(auto_answer: bool = False, submit: bool = False) -> dict:
+    """Patrol every configured course and write a Markdown report.
 
-    - Lists every homework and experiment; distinguishes submitted / pending /
-      outstanding / takeover items.
-    - Outstanding objective questions are collected into an answer brief for the
-      MCP client model. With ``auto_answer=True`` built-in rules are tried first
-      (none are bundled by default); unanswerable items stay in the takeover list.
-    - ``submit=True`` only submits homework that received valid answers; file and
-      subjective items are never auto-submitted.
+    Lists homework and experiments, separates submitted / pending / outstanding /
+    takeover items, and collects answer briefs for outstanding objective
+    questions. ``submit=True`` only submits homework that received valid answers;
+    subjective, programming and file items are never auto-submitted.
     """
-    return _engine().patrol(auto_answer=auto_answer, submit=submit)
+    return await _thread.run_async(_dispatch("patrol", auto_answer=auto_answer, submit=submit))
 
 
 @mcp.tool()
-def uplus_close() -> dict:
-    """Close the browser session held by this server process."""
-    if _state.get("session"):
-        _state["session"].close()
-    _state.clear()
-    return {"closed": True}
+async def uplus_close() -> dict:
+    """Detach from the browser and release the worker session."""
+    def work() -> dict:
+        session = _state.get("session")
+        if session is not None:
+            session.close()
+        _state.clear()
+        return {"closed": True}
+
+    return await _thread.run_async(work)
+
+
+# --------------------------------------------------------------------------- #
+# Browser tools: let the model drive the page directly
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def browse_launch_edge(port: int = 9333, refresh_profile: bool = False) -> dict:
+    """Start Edge with a CDP debug port using a dedicated profile copy.
+
+    Needed because Edge 136+ ignores ``--remote-debugging-port`` on the default
+    profile directory. Login cookies survive the copy, so U+ stays signed in.
+    """
+    live = first_live_port()
+    if live:
+        return {"already_running": True, "port": live}
+    return await _thread.run_async(
+        lambda: launch_edge_with_cdp(port=port, refresh_profile=refresh_profile)
+    )
+
+
+@mcp.tool()
+async def browse_open(url: str) -> dict:
+    """Open a URL in the attached Edge tab and return its title/status."""
+    return await _thread.run_async(_dispatch("browse.open", url))
+
+
+@mcp.tool()
+async def browse_snapshot(max_nodes: int = 220) -> dict:
+    """Return a compact snapshot: interactive elements (selector/role/text) + visible text."""
+    return await _thread.run_async(_dispatch("browse.snapshot", max_nodes))
+
+
+@mcp.tool()
+async def browse_click(selector: str = "", text: str = "", nth: int = 0) -> dict:
+    """Click an element by CSS selector or by visible text."""
+    return await _thread.run_async(_dispatch("browse.click", selector, text, nth))
+
+
+@mcp.tool()
+async def browse_fill(selector: str, value: str, press_enter: bool = False) -> dict:
+    """Replace an input's value, optionally pressing Enter afterwards."""
+    return await _thread.run_async(_dispatch("browse.fill", selector, value, press_enter))
+
+
+@mcp.tool()
+async def browse_type(text: str, selector: str = "") -> dict:
+    """Type text with a human-like delay into a focused/selected element."""
+    return await _thread.run_async(_dispatch("browse.type_text", text, selector))
+
+
+@mcp.tool()
+async def browse_press(key: str) -> dict:
+    """Press a key or combination, e.g. ``Enter`` or ``Control+A``."""
+    return await _thread.run_async(_dispatch("browse.press", key))
+
+
+@mcp.tool()
+async def browse_scroll(amount: int = 800, selector: str = "") -> dict:
+    """Scroll the page by pixels, or scroll a specific element into view."""
+    return await _thread.run_async(_dispatch("browse.scroll", amount, selector))
+
+
+@mcp.tool()
+async def browse_get_text(selector: str = "body") -> dict:
+    """Read the text content of an element (defaults to the whole body)."""
+    return await _thread.run_async(_dispatch("browse.get_text", selector))
+
+
+@mcp.tool()
+async def browse_eval_js(expression: str) -> Any:
+    """Evaluate a JavaScript expression in the page and return its JSON value."""
+    return await _thread.run_async(_dispatch("browse.eval_js", expression))
+
+
+@mcp.tool()
+async def browse_screenshot(path: str = "", full_page: bool = False) -> dict:
+    """Screenshot the page: returns a path, or base64 when no path is given."""
+    return await _thread.run_async(_dispatch("browse.screenshot", path, full_page))
+
+
+@mcp.tool()
+async def browse_wait_for(selector: str = "", text: str = "", timeout_ms: int = 15000) -> dict:
+    """Wait until a selector exists or text appears."""
+    return await _thread.run_async(
+        _dispatch("browse.wait_for", selector, text, timeout_ms)
+    )
+
+
+@mcp.tool()
+async def browse_tabs() -> list[dict]:
+    """List open tabs with url/title and which one is active."""
+    return await _thread.run_async(_dispatch("browse.tabs"))
+
+
+@mcp.tool()
+async def browse_switch_tab(index: int) -> dict:
+    """Switch the active tab by index from ``browse_tabs``."""
+    return await _thread.run_async(_dispatch("browse.switch_tab", index))
+
+
+@mcp.tool()
+async def browse_back() -> dict:
+    """Navigate back one history entry."""
+    return await _thread.run_async(_dispatch("browse.back"))
+
+
+@mcp.tool()
+async def browse_upload(selector: str, file_path: str) -> dict:
+    """Set files on an ``input[type=file]`` element."""
+    return await _thread.run_async(_dispatch("browse.upload", selector, file_path))
+
+
+@mcp.tool()
+async def browse_select_option(selector: str, value: str) -> dict:
+    """Choose an option in a ``<select>`` by value."""
+    return await _thread.run_async(_dispatch("browse.select_option", selector, value))
 
 
 def main() -> None:
