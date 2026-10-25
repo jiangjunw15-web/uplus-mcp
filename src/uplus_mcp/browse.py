@@ -114,8 +114,12 @@ class BrowseTools:
           for (const el of document.querySelectorAll(sel)) {
             if (!isVisible(el)) continue;
             const role = el.getAttribute('role') || el.tagName.toLowerCase();
-            const label = (el.getAttribute('aria-label') || el.innerText ||
-                           el.getAttribute('placeholder') || el.value || '').trim().slice(0, 60);
+            // Password fields never reveal their value, even without a label
+            // or placeholder: the el.value fallback must not leak them.
+            const label = (el.tagName === 'INPUT' && el.type === 'password')
+              ? '••••'
+              : (el.getAttribute('aria-label') || el.innerText ||
+                 el.getAttribute('placeholder') || el.value || '').trim().slice(0, 60);
             nodes.push({
               selector: selectorFor(el),
               role,
@@ -188,7 +192,17 @@ class BrowseTools:
         if press_enter:
             box.press("Enter")
             time.sleep(0.4)
+        # Parity with the batch extract: a password field is never echoed back.
+        if self._is_password(box):
+            return {"filled": selector, "value": "••••"}
         return {"filled": selector, "value": value}
+
+    @staticmethod
+    def _is_password(box) -> bool:
+        try:
+            return bool(box.evaluate("el => el.type === 'password'"))
+        except Exception:  # noqa: BLE001 - detached / non-input element
+            return False
 
     def type_text(self, text: str, selector: str = "") -> dict:
         page = self.session.page

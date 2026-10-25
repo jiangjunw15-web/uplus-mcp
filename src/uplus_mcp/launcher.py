@@ -206,10 +206,33 @@ def dedicated_profile_dir(profile_root: Optional[Path] = None) -> Path:
 
 
 def _copy_profile(src: Path, dst: Path) -> None:
-    """Copy the browser profile tree, skipping caches that are large and useless."""
+    """Copy the browser profile tree, skipping caches that are large and useless.
+
+    ``dst`` comes from the user-configurable ``profile_dir``; a mistyped path
+    must never be wiped, so the destructive refresh only runs when the target
+    is verifiably a browser profile copy (contains ``Local State``) or is
+    empty, and never when it overlaps the source profile itself.
+    """
     def ignore(directory: str, names: list[str]) -> set[str]:
         return {n for n in names if n in CACHE_DIRS or n.endswith(".tmp")}
 
+    src_r = os.path.normcase(str(src.resolve()))
+    dst_r = os.path.normcase(str(dst.resolve()))
+    src_parts = [p for p in src_r.split(os.sep) if p]
+    dst_parts = [p for p in dst_r.split(os.sep) if p]
+    if (src_parts == dst_parts
+            or src_parts == dst_parts[:len(src_parts)]
+            or dst_parts == src_parts[:len(dst_parts)]):
+        raise RuntimeError(
+            f"profile 目录配置与真实浏览器数据重叠（src={src_r} dst={dst_r}），"
+            "拒绝复制以防误删。请把 profile_dir 指向独立的专用目录。"
+        )
+    if dst.exists() and any(dst.iterdir()):
+        if not (dst / "Local State").exists():
+            raise RuntimeError(
+                f"目标目录 {dst_r} 已存在且不是浏览器 profile 副本（缺少 Local State 文件），"
+                "拒绝删除。请确认 profile_dir / UPLUS_PROFILE_DIR 指向专用空目录。"
+            )
     if dst.exists():
         shutil.rmtree(dst, ignore_errors=True)
     shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)

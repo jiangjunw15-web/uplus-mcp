@@ -119,6 +119,13 @@ class PatrolEngine:
 
     def list_homeworks(self, course_id: str = "", refresh_page_state: bool = False) -> list[dict]:
         targets = [c for c in self._iter_courses() if not course_id or c.id == course_id]
+        if course_id and not targets:
+            # A named course that does not exist (or is filtered out as expired)
+            # must fail loudly, not silently widen the query to every course.
+            raise UplusError(
+                f"未找到课程 {course_id}（不存在，或已过期被默认过滤）。"
+                "请确认课程 ID；如需包含已结课课程，请在配置中设置 include_expired_courses=true。"
+            )
         if not targets:
             targets = self.client.list_my_courses()
         rows: list[dict] = []
@@ -221,6 +228,7 @@ class PatrolEngine:
     def patrol(self, *, auto_answer: bool = False, submit: bool = False) -> dict:
         snapshot = report_mod.PatrolReport(generated_at_ms=utils.now_ms())
         answer_briefs: list[dict] = []
+        auto_submissions: list[dict] = []
 
         for course in self._iter_courses():
             for task in self.client.list_homeworks(course.id):
@@ -266,6 +274,25 @@ class PatrolEngine:
                                 guessed = solver.rule_based_answer(q)
                                 if guessed is not None:
                                     rule_answers[q.question_id] = guessed
+                        if submit and auto_answer and objective \
+                                and len(rule_answers) == len(objective):
+                            # Wire the documented contract: only a homework whose
+                            # objective questions ALL carry a rule answer goes to
+                            # the operator, whose own gate still refuses to submit
+                            # when subjective items remain or a fill fails.
+                            try:
+                                submission = self.operator.answer_homework(
+                                    task, rule_answers, submit=True,
+                                    course_name=course.name,
+                                )
+                                auto_submissions.append(submission)
+                            except AuthExpiredError:
+                                raise
+                            except Exception as exc:
+                                snapshot.takeover.append({
+                                    "course": course.name, "title": task.name,
+                                    "detail": f"自动作答/提交失败：{exc}",
+                                })
                         answer_briefs.append({
                             "course_id": course.id,
                             "course_name": course.name,
@@ -325,6 +352,7 @@ class PatrolEngine:
                 "takeover_count": len(snapshot.takeover),
             },
             "answer_briefs": answer_briefs,
+            "auto_submissions": auto_submissions,
             "takeover": snapshot.takeover,
             "report_path": str(report_path),
         }

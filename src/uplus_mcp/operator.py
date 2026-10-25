@@ -247,10 +247,21 @@ class HomeworkOperator:
 
         questions = self.client.list_questions(task.homework_id)
         outcome["total"] = len(questions)
+        if not questions:
+            # An empty question list must never satisfy 0 == 0 and hit submit;
+            # it means a material-only task or an unreadable feed.
+            outcome["note"] = "题目列表为空（纯材料/附件作业或接口未返回题目），不自动提交，请人工确认。"
+            return outcome
 
         for meta in questions:
             detail = self.client.question_detail(meta.question_id)
             self.navigate_to_question(page, detail.order)
+            # Every objective question counts toward the total, including ones
+            # the platform already records as answered; otherwise previously
+            # answered questions inflate answered without inflating total and
+            # the equality can never balance again.
+            if detail.auto_answerable:
+                outcome["objective_total"] += 1
             if detail.answered and detail.my_answer:
                 outcome["answered"] += 1
                 if detail.auto_answerable:
@@ -268,7 +279,6 @@ class HomeworkOperator:
                     }
                 )
                 continue
-            outcome["objective_total"] += 1
             raw_answer = answers.get(detail.question_id) or answers.get(str(detail.order))
             if raw_answer is None:
                 outcome["skipped"] += 1
