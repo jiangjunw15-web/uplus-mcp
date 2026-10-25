@@ -1,4 +1,4 @@
-"""Generic "AI drives the web page" tools layered on the same Edge session.
+"""Generic "AI drives the web page" tools layered on the same browser session.
 
 These mirror the capability of a browser-automation plugin: the model can open
 a URL, read a compact page snapshot, click, type, scroll, take a screenshot and

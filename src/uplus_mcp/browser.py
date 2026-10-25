@@ -1,14 +1,16 @@
-"""Browser session that ATTACHES to the user's own Edge via CDP.
+"""Browser session that ATTACHES to the user's own desktop browser via CDP.
 
-The server reuses the user's signed-in Edge session rather than owning a
-bundled Chromium: ``launcher`` starts Edge on a debug port using a dedicated
-profile copy (Edge 136+ ignores ``--remote-debugging-port`` on the default
-profile directory), then this module attaches over the DevTools protocol and
-works inside the existing U+ tab. Cookies and the SPA token are reused as a
-human browsing session would use them; no login snapshot is persisted.
+The server reuses the user's signed-in browser session rather than owning a
+bundled kernel: ``launcher`` starts Edge or Chrome on a debug port using a
+dedicated profile copy (Chromium 136+ ignores ``--remote-debugging-port`` on
+the default profile directory), then this module attaches over the DevTools
+protocol and works inside the existing U+ tab. Cookies and the SPA token are
+reused as a human browsing session would use them; no login snapshot is
+persisted.
 
-Prerequisite: a debug-port Edge on ``CDP_PORTS``; call ``browse_launch_edge``
-once, or let ``config.auto_launch_edge`` bring it up automatically.
+Prerequisite: a debug-port browser on the configured CDP ports; call
+``browse_launch_edge`` once, or let ``config.auto_launch_browser`` bring it up
+automatically.
 """
 
 from __future__ import annotations
@@ -21,9 +23,13 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
 
 from .config import Config
-from .launcher import CDP_PORTS, ATTACH_HELP_TEXT, ensure_browser_ready
+from .launcher import (
+    attach_help_text,
+    default_ports,
+    ensure_browser_ready,
+)
 
-ATTACH_HELP = ATTACH_HELP_TEXT
+ATTACH_HELP = attach_help_text()
 
 # Portal landing: an unauthenticated bounce redirects to the uc.eduplus.net
 # login domain; a signed-in session renders the workbench SPA.
@@ -40,7 +46,7 @@ class AuthExpiredError(UplusError):
 
 
 class BrowserSession:
-    """CDP-attach session over the user's own Edge browser."""
+    """CDP-attach session over the user's own desktop browser."""
 
     def __init__(self, config: Config, *, keep_open: bool = False) -> None:
         self.config = config
@@ -58,14 +64,16 @@ class BrowserSession:
     def start(self) -> None:
         if self._started:
             return
-        # Prefer an already-open debug port; otherwise try to bring Edge up.
+        ports = default_ports(self.config.cdp_port)
+        # Prefer an already-open debug port; otherwise try to bring a browser up.
         ensure_browser_ready(
-            port=CDP_PORTS[0],
-            auto_launch=self.config.auto_launch_edge,
+            port=ports[0],
+            auto_launch=self.config.auto_launch_browser,
             profile_root=self.config.profile_dir or None,
+            kind=self.config.browser,
         )
         last_exc: Optional[Exception] = None
-        for port in CDP_PORTS:
+        for port in ports:
             try:
                 self._browser = self._pw.chromium.connect_over_cdp(
                     f"http://127.0.0.1:{port}", timeout=5000
@@ -126,7 +134,7 @@ class BrowserSession:
         return self._page
 
     def close(self) -> None:
-        # Detach only: the user's Edge browser keeps running untouched.
+        # Detach only: the user's browser keeps running untouched.
         try:
             if self._browser:
                 self._browser.close()
@@ -232,9 +240,13 @@ class BrowserSession:
     def is_logged_in(self) -> bool:
         try:
             self.open("/workbench/index/school")
-            content = self.page.inner_text("body")
             if "login" in self.page.url.lower():
                 return False
+            # The SPA hydration order can leave an empty body on first navigation;
+            # a non-empty AccessToken proves the session before we inspect text.
+            if self._token_present(self.page):
+                return True
+            content = self.page.inner_text("body")
             # A signed-in workbench renders course cards and the user name block.
             return "课程" in content and ("工作台" in content)
         except AuthExpiredError:

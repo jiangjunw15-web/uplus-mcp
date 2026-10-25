@@ -1,4 +1,4 @@
-"""Patrol CLI: attaches to the user's logged-in Edge and walks every course.
+"""Patrol CLI: attaches to the user's logged-in browser and walks every course.
 
 This CLI never launches a browser and never submits answers by itself: it
 checks the login session, saves a Markdown report, and dumps objective-question
@@ -8,7 +8,7 @@ experiment-report items are listed under "takeover".
 Usage:
     python -m uplus_mcp.daily_patrol
 
-Requires Edge running with the debug port (see browser.ATTACH_HELP).
+Requires a browser running with the debug port (see browser.ATTACH_HELP).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def build_engine(config_path: str = "") -> PatrolEngine:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="U+ 巡检（附加到已登录的 Edge，不自动提交）")
+    parser = argparse.ArgumentParser(description="U+ 巡检（附加到已登录的浏览器，不自动提交）")
     parser.add_argument("--config", default="", help="配置文件路径")
     parser.add_argument("--brief", default="", help="待答题目 brief JSON 保存路径")
     args = parser.parse_args()

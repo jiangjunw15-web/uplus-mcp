@@ -1,6 +1,6 @@
 """End-to-end check: drive the MCP server over stdio like a real client would.
 
-Run only when Edge is up and U+ is signed in:
+Run only when the debug-port browser is up and U+ is signed in:
 
     python _smoke_mcp.py
 

@@ -17,6 +17,7 @@ htmlcov/
 browser_profile/
 browser_profile_t2/
 uplus-edge-profile/
+uplus-browser-profile/
 storage_state.json
 config/courses.json
 config/login.json

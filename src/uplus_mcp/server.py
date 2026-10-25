@@ -1,6 +1,6 @@
 """FastMCP server exposing U+ patrol tools **and** generic browser-driving tools.
 
-Two tool families share one attached Edge session:
+Two tool families share one attached browser session:
 
 U+ tools (``uplus_*``)
     Patrol courses, read homework/experiment state, fill objective answers, submit,
@@ -33,7 +33,7 @@ from .browse import BrowseTools
 from .browser import BrowserSession
 from .config import load_config
 from .engine import PatrolEngine
-from .launcher import launch_edge_with_cdp, first_live_port
+from .launcher import launch_browser_with_cdp, first_live_port
 from .operator import HomeworkOperator
 from .platform import PlatformClient
 from .worker import BrowserThread
@@ -84,7 +84,7 @@ def _dispatch(name: str, *args: Any, **kwargs: Any):
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def uplus_check_login() -> dict:
-    """Check whether the attached Edge session is signed into U+."""
+    """Check whether the attached browser session is signed into U+."""
     return await _thread.run_async(_dispatch("check_login"))
 
 
@@ -96,11 +96,11 @@ async def uplus_login(
     school: str = "",
     wait_timeout_ms: int = 120000,
 ) -> dict:
-    """Sign in to U+ through the attached Edge session. Ask the user which
+    """Sign in to U+ through the attached browser session. Ask the user which
     flow they prefer BEFORE calling:
 
     - ``mode="manual"``: open the portal and wait for the user to sign in by
-      themselves in the visible Edge window; no account or password is needed.
+      themselves in the visible browser window; no account or password is needed.
     - ``mode="auto"``: the model first asks the user for their account,
       password and school name, then fills the sign-in form, submits and
       verifies the session. Credentials are used only for this call: never
@@ -209,23 +209,36 @@ async def uplus_close() -> dict:
 # Browser tools: let the model drive the page directly
 # --------------------------------------------------------------------------- #
 @mcp.tool()
-async def browse_launch_edge(port: int = 9333, refresh_profile: bool = False) -> dict:
-    """Start Edge with a CDP debug port using a dedicated profile copy.
+async def browse_launch_edge(port: int = 0, refresh_profile: bool = False) -> dict:
+    """Launch an installed browser (Edge / Chrome) with a CDP debug port on a
+    dedicated profile copy, then verify the port listens.
 
-    Needed because Edge 136+ ignores ``--remote-debugging-port`` on the default
-    profile directory. Login cookies survive the copy, so U+ stays signed in.
+    The tool name keeps the original ``browse_launch_edge`` spelling for
+    compatibility; it launches whichever engine the config ``browser`` field
+    selects (``auto`` picks the first installed Edge or Chrome). ``port`` of
+    ``0`` means "use the configured CDP port" (default 9333, fallback 9222).
+    Needed because Chromium 136+ ignores ``--remote-debugging-port`` on the
+    default profile directory. Login cookies survive the copy, so U+ stays
+    signed in.
     """
-    live = first_live_port()
+    cfg = load_config()
+    target_port = port if port > 0 else cfg.cdp_port
+    live = first_live_port(target_port)
     if live:
         return {"already_running": True, "port": live}
     return await _thread.run_async(
-        lambda: launch_edge_with_cdp(port=port, refresh_profile=refresh_profile)
+        lambda: launch_browser_with_cdp(
+            port=target_port,
+            refresh_profile=refresh_profile,
+            kind=cfg.browser,
+            profile_root=cfg.profile_dir or None,
+        )
     )
 
 
 @mcp.tool()
 async def browse_open(url: str) -> dict:
-    """Open a URL in the attached Edge tab and return its title/status."""
+    """Open a URL in the attached browser tab and return its title/status."""
     return await _thread.run_async(_dispatch("browse.open", url))
 
 

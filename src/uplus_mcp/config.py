@@ -3,6 +3,10 @@
 Configuration file layout mirrors ``config/courses.example.json``. Missing files
 fall back to the bundled default course list so the server can start in read-only
 mode without a personal config.
+
+All machine-specific values (debug port, browser engine, dedicated profile
+directory) resolve through config file → environment variable → safe default, so
+the package runs on Windows, macOS and Linux without a hard-coded path.
 """
 
 from __future__ import annotations
@@ -21,6 +25,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "courses.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "courses.example.json"
 
+# Supported browser engines for CDP attach / auto launch.
+BROWSER_AUTO = "auto"
+BROWSER_EDGE = "edge"
+BROWSER_CHROME = "chrome"
+BROWSER_CHROMIUM = "chromium"
+BROWSER_CHOICES = (BROWSER_AUTO, BROWSER_EDGE, BROWSER_CHROME, BROWSER_CHROMIUM)
+
+DEFAULT_CDP_PORT = 9333
+
 
 @dataclass
 class Config:
@@ -30,10 +43,19 @@ class Config:
     deadline_warning_hours: int = 72
     report_dir: str = "reports"
     courses: list[Course] = field(default_factory=list)
-    # When no CDP port is listening, copy the Edge profile and launch Edge with
-    # --remote-debugging-port automatically (Edge 136+ forbids it on the default
-    # profile directory, so a dedicated copy is required).
-    auto_launch_edge: bool = True
+
+    # ---- browser / CDP session -------------------------------------- #
+    # When no CDP port is listening, let the server launch a browser against a
+    # dedicated profile copy automatically (Edge 136+ forbids the debug flag on
+    # the default profile directory, so a dedicated copy is required).
+    auto_launch_browser: bool = True
+    # auto / edge / chrome / chromium. ``auto`` picks whichever installed browser
+    # is found first; ``chromium`` falls back to the Playwright bundled kernel.
+    browser: str = BROWSER_AUTO
+    # Preferred CDP port; a free fallback port is tried when this one is busy.
+    cdp_port: int = DEFAULT_CDP_PORT
+    # Dedicated browser profile directory; empty means "use the platform default
+    # under the user home" (see launcher.dedicated_profile_dir).
     profile_dir: str = ""
     # When False (default), expired courses are skipped during patrol. Set
     # True to keep an archived view of finished courses in the report.
@@ -48,6 +70,11 @@ class Config:
     def report_folder(self) -> Path:
         return self.resolve(self.report_dir)
 
+    @property
+    def auto_launch_edge(self) -> bool:
+        """Deprecated alias kept for older config files and callers."""
+        return self.auto_launch_browser
+
 
 def _default_courses() -> list[Course]:
     """Bundled fallback: empty on purpose.
@@ -59,10 +86,17 @@ def _default_courses() -> list[Course]:
     return []
 
 
+def _normalize_browser(raw: str) -> str:
+    value = str(raw or BROWSER_AUTO).strip().lower()
+    return value if value in BROWSER_CHOICES else BROWSER_AUTO
+
+
 def load_config(path: Optional[str] = None) -> Config:
     """Load config from ``path``, the ``UPLUS_CONFIG`` env var, or defaults.
 
     Personal ``config/courses.json`` is gitignored; copy the example to start.
+    Environment variables override the file for machine-specific settings:
+    ``UPLUS_CDP_PORT``, ``UPLUS_BROWSER``, ``UPLUS_PROFILE_DIR``.
     """
     raw_path = path or os.environ.get("UPLUS_CONFIG")
     config_file: Optional[Path] = None
@@ -77,16 +111,35 @@ def load_config(path: Optional[str] = None) -> Config:
     if config_file and config_file.exists():
         data = json.loads(config_file.read_text(encoding="utf-8"))
 
+    # Legacy config files used ``auto_launch_edge``; map it onto the generic
+    # ``auto_launch_browser`` flag so old files keep working.
+    auto_launch = data.get("auto_launch_browser", data.get("auto_launch_edge", True))
+    cdp_port = data.get("cdp_port", DEFAULT_CDP_PORT)
+    browser_raw = data.get("browser", data.get("browser_engine", BROWSER_AUTO))
+
     cfg = Config(
         base_url=str(data.get("base_url", "https://www.eduplus.net")).rstrip("/"),
         nav_timeout_ms=int(data.get("nav_timeout_ms", 30_000)),
         action_timeout_ms=int(data.get("action_timeout_ms", 15_000)),
         deadline_warning_hours=int(data.get("deadline_warning_hours", 72)),
         report_dir=str(data.get("report_dir", "reports")),
-        auto_launch_edge=bool(data.get("auto_launch_edge", True)),
+        auto_launch_browser=bool(auto_launch),
+        browser=_normalize_browser(browser_raw),
+        cdp_port=int(cdp_port),
         profile_dir=str(data.get("profile_dir", "")),
         include_expired_courses=bool(data.get("include_expired_courses", False)),
     )
+
+    # Environment overrides for per-machine settings.
+    env_port = os.environ.get("UPLUS_CDP_PORT")
+    if env_port and env_port.strip().isdigit():
+        cfg.cdp_port = int(env_port)
+    env_browser = os.environ.get("UPLUS_BROWSER")
+    if env_browser:
+        cfg.browser = _normalize_browser(env_browser)
+    env_profile = os.environ.get("UPLUS_PROFILE_DIR")
+    if env_profile:
+        cfg.profile_dir = env_profile
 
     raw_courses = data.get("courses") or []
     if raw_courses:

@@ -4,9 +4,13 @@
   "action_timeout_ms": 15000,
   "deadline_warning_hours": 72,
   "report_dir": "reports",
-  "auto_launch_edge": true,
+
+  "auto_launch_browser": true,
+  "browser": "auto",
+  "cdp_port": 9333,
   "profile_dir": "",
   "include_expired_courses": false,
+
   "courses": [
     {
       "id": "replace-with-your-course-id-1",

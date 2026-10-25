@@ -68,7 +68,7 @@ class PatrolEngine:
             logged = False
         return {"logged_in": logged, "base_url": self.config.base_url,
                 "message": "登录有效" if logged else
-                "登录态已过期：请在插件启动的 Edge 窗口中打开 eduplus.net 重新登录，然后重试本工具。"}
+                "登录态已过期：请在插件启动的浏览器窗口中打开 eduplus.net 重新登录，然后重试本工具。"}
 
     def login(self, mode: str = "manual", username: str = "",
               password: str = "", school: str = "",
@@ -76,7 +76,7 @@ class PatrolEngine:
         """Sign in through one of two agreed flows.
 
         ``manual`` opens the portal and waits for the human to finish signing in
-        in the attached Edge window. ``auto`` fills the school selector, account
+        in the attached browser window. ``auto`` fills the school selector, account
         and password after the model asked the user for them; credentials are
         used only for this call and are never persisted or echoed back.
         """

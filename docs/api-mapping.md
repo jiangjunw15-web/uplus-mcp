@@ -54,7 +54,7 @@
 | 登录按钮 | `button.el-button--primary.el-button--large`，未填完时带 `is-disabled`；填写完成后再点击 |
 | 登录方式页签 | 「学号/工号登录」「短信登录」「密码登录」；默认密码登录 |
 
-- `uplus_login(mode="manual")`：打开门户、点击登录入口进入表单，轮询等待 `localStorage.AccessToken` 出现且 URL 离开登录域；由用户在附加 Edge 窗口自行选学校、填账号密码并提交。
+- `uplus_login(mode="manual")`：打开门户、点击登录入口进入表单，轮询等待 `localStorage.AccessToken` 出现且 URL 离开登录域；由用户在附加浏览器窗口自行选学校、填账号密码并提交。
 - `uplus_login(mode="auto", username, password, school)`：模型先询问账号、密码与学校，点击登录入口进入表单；先填学校远程搜索并下拉选中，再填账号 / 密码，等待主按钮解除 `is-disabled` 后点击；提交后等待会话 token 校验。凭据仅当次内存使用，不落盘、不进报告、不回显；找不到输入框、学校下拉匹配失败、出现验证码 / 短信 / 密码错误时回退手动模式并把窗口交还用户。
 - 登录成功判定：`AccessToken` 非空且当前 URL 不含 `login`。
 
@@ -118,8 +118,13 @@
 
 顶层（与 `courses` 同级）另有全局开关：
 
-| 字段 | 说明 |
-| --- | --- |
-| `include_expired_courses` | 默认 `false`：巡检跳过已截止课程；`true` 保留历史归档视图 |
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `include_expired_courses` | `false` | 默认 `false`：巡检跳过已截止课程；`true` 保留历史归档视图 |
+| `auto_launch_browser` | `true` | 调试端口未监听时自动启动浏览器；旧字段 `auto_launch_edge` 兼容读取 |
+| `browser` | `auto` | `auto` / `edge` / `chrome` / `chromium`；`auto` 自动探测已安装浏览器 |
+| `cdp_port` | `9333` | 首选调试端口，备选 9222；环境变量 `UPLUS_CDP_PORT` 覆盖 |
+| `profile_dir` | 用户家目录专用目录 | 专用浏览器 profile 目录；环境变量 `UPLUS_PROFILE_DIR` 覆盖 |
+| `report_dir` | `reports` | Markdown 报告输出目录 |
 
 未在配置中列出课程时，服务会登录后从 `/api/course/athena/courses/study` 动态拉取账号下当前学期课程；已截止课程按上述开关过滤。
