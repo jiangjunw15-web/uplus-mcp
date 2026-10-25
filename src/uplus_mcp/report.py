@@ -63,11 +63,15 @@ class PatrolReport:
 
     @property
     def submitted_experiments(self) -> int:
-        return sum(1 for e in self.experiments if e.experiment.submitted)
+        return sum(1 for e in self.experiments if e.experiment.submitted is True)
 
     @property
     def outstanding_experiments(self) -> int:
-        return sum(1 for e in self.experiments if not e.experiment.submitted)
+        return sum(1 for e in self.experiments if e.experiment.submitted is False)
+
+    @property
+    def unknown_experiments(self) -> int:
+        return sum(1 for e in self.experiments if e.experiment.submitted is None)
 
 
 def add_homework(report: PatrolReport, course: Course, task: HomeworkTask, *, note: str = "") -> None:
@@ -103,7 +107,10 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
     lines.append("## 总览")
     lines.append("")
     lines.append(f"- 作业：已提交 {report.submitted} 项（待批改 {report.pending} 项），未完成 {report.outstanding} 项")
-    lines.append(f"- 实验：已提交 {report.submitted_experiments} 项，未完成 {report.outstanding_experiments} 项")
+    exp_line = (f"- 实验：已提交 {report.submitted_experiments} 项，未完成 {report.outstanding_experiments} 项")
+    if report.unknown_experiments:
+        exp_line += f"，状态未知 {report.unknown_experiments} 项"
+    lines.append(exp_line)
     lines.append("")
 
     # ---- homework table ----
@@ -132,9 +139,14 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
         lines.append("| --- | --- | --- | --- | --- |")
         for row in report.experiments:
             e = row.experiment
-            state = "已提交" if e.submitted else "未提交"
+            if e.submitted is True:
+                state = "已提交"
+            elif e.submitted is False:
+                state = "未提交"
+            else:
+                state = "状态未知"
             deadline = _deadline_text(
-                e.deadline_ms, now, warning_hours, outstanding=not e.submitted
+                e.deadline_ms, now, warning_hours, outstanding=e.submitted is False
             )
             lines.append(
                 f"| {row.course_name} | {e.name} | {state} | "

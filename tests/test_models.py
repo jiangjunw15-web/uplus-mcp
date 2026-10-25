@@ -89,3 +89,60 @@ def test_unsubmitted_task_status_and_page_override():
     assert task.status is HomeworkStatus.NOT_SUBMITTED
     task.page_status = HomeworkStatus.SUBMITTED_PENDING
     assert task.status is HomeworkStatus.SUBMITTED_PENDING
+
+
+# --------------------------------------------------------------------------- #
+# attachment question type
+# --------------------------------------------------------------------------- #
+def test_attachment_question_type_is_not_auto_answerable():
+    qt = QuestionType.ATTACHMENT
+    assert qt.value == 7
+    assert qt.label == "附件题"
+    assert not qt.auto_answerable
+
+
+def test_attachment_question_prompt_asks_for_human_takeover():
+    raw = {
+        "id": "q9",
+        "orderNumber": 1,
+        "qsnType": 7,
+        "titleText": "<p>上传课程 PPT 汇报文件</p>",
+        "userAnswer": "",
+    }
+    q = Question.from_detail(raw)
+    brief = q.llm_prompt()
+    assert "人工接管" in brief["answer_hint"]
+    assert not q.auto_answerable
+
+
+# --------------------------------------------------------------------------- #
+# answered joint judgement
+# --------------------------------------------------------------------------- #
+def test_answered_from_user_answer_when_is_answer_missing():
+    raw = {"id": "a", "orderNumber": 1, "qsnType": 1, "userAnswer": "C"}
+    assert Question.from_meta(raw).answered is True
+
+
+def test_answered_from_hw_answer_id_when_user_answer_blank():
+    raw = {"id": "b", "orderNumber": 1, "qsnType": 3, "hwAnswerId": "hw-9"}
+    assert Question.from_meta(raw).answered is True
+
+
+def test_answered_flag_string_one_counts_as_answered():
+    raw = {"id": "c", "orderNumber": 1, "qsnType": 1, "isAnswer": "1"}
+    assert Question.from_meta(raw).answered is True
+
+
+def test_unanswered_when_all_signals_are_blank():
+    raw = {"id": "d", "orderNumber": 1, "qsnType": 1}
+    assert Question.from_meta(raw).answered is False
+
+
+# --------------------------------------------------------------------------- #
+# experiment three-state default
+# --------------------------------------------------------------------------- #
+def test_experiment_unknown_state_defaults_to_none():
+    from uplus_mcp.models import Experiment
+    exp = Experiment(name="实验一")
+    assert exp.submitted is None
+

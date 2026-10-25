@@ -35,6 +35,9 @@ class Config:
     # profile directory, so a dedicated copy is required).
     auto_launch_edge: bool = True
     profile_dir: str = ""
+    # When False (default), expired courses are skipped during patrol. Set
+    # True to keep an archived view of finished courses in the report.
+    include_expired_courses: bool = False
 
     # ---- path resolution helpers ------------------------------------ #
     def resolve(self, raw: str) -> Path:
@@ -82,6 +85,7 @@ def load_config(path: Optional[str] = None) -> Config:
         report_dir=str(data.get("report_dir", "reports")),
         auto_launch_edge=bool(data.get("auto_launch_edge", True)),
         profile_dir=str(data.get("profile_dir", "")),
+        include_expired_courses=bool(data.get("include_expired_courses", False)),
     )
 
     raw_courses = data.get("courses") or []

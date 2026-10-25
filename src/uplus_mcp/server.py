@@ -25,7 +25,6 @@ Or use the installed console script ``uplus-mcp``.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -87,6 +86,35 @@ def _dispatch(name: str, *args: Any, **kwargs: Any):
 async def uplus_check_login() -> dict:
     """Check whether the attached Edge session is signed into U+."""
     return await _thread.run_async(_dispatch("check_login"))
+
+
+@mcp.tool()
+async def uplus_login(
+    mode: str = "manual",
+    username: str = "",
+    password: str = "",
+    school: str = "",
+    wait_timeout_ms: int = 120000,
+) -> dict:
+    """Sign in to U+ through the attached Edge session. Ask the user which
+    flow they prefer BEFORE calling:
+
+    - ``mode="manual"``: open the portal and wait for the user to sign in by
+      themselves in the visible Edge window; no account or password is needed.
+    - ``mode="auto"``: the model first asks the user for their account,
+      password and school name, then fills the sign-in form, submits and
+      verifies the session. Credentials are used only for this call: never
+      persisted to config, reports or logs, and never echoed back. If auto
+      fill cannot find the fields, the school selector cannot be matched, or a
+      captcha / SMS / wrong-password prompt appears, fall back to ``manual``
+      and hand the window to the user.
+
+    Returns ``logged_in``, the chosen mode, current URL and token length.
+    """
+    return await _thread.run_async(
+        _dispatch("login", mode, username=username, password=password,
+                  school=school, wait_timeout_ms=wait_timeout_ms)
+    )
 
 
 @mcp.tool()
@@ -291,6 +319,25 @@ async def browse_upload(selector: str, file_path: str) -> dict:
 async def browse_select_option(selector: str, value: str) -> dict:
     """Choose an option in a ``<select>`` by value."""
     return await _thread.run_async(_dispatch("browse.select_option", selector, value))
+
+
+@mcp.tool()
+async def browse_act_batch(steps: list[dict], observe: str = "summary") -> dict:
+    """Run one short batch of page actions; stop on failure or navigation.
+
+    Each step supports: ``click`` (``selector``/``text``/``nth``), ``fill``
+    (``selector``, ``value``, optional ``press_enter``), ``press`` (``key``),
+    ``hover``, ``scroll`` (``amount``/``selector``), ``wait``
+    (``selector``/``text``/``timeout_ms``), ``extract`` (``selector``,
+    ``fields``: text/value/href, ``maxRows``), ``navigate`` (``url``), ``back``.
+
+    Returns completed steps, remaining count, extract rows and a failure or
+    navigation receipt. ``observe="summary"`` skips the follow-up snapshot;
+    ``observe="snapshot"`` reads the body once afterwards. Sensitive or
+    destructive actions need explicit user authorization; do not repeat a step
+    whose receipt reports failure or navigation.
+    """
+    return await _thread.run_async(_dispatch("browse.act_batch", steps, observe=observe))
 
 
 def main() -> None:

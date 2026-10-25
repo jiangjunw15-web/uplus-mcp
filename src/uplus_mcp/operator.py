@@ -30,6 +30,51 @@ from .platform import PlatformClient
 from . import solver, utils
 
 
+def classify_page_state(text: str) -> Optional[HomeworkStatus]:
+    """Map answer-page body text to a submission state.
+
+    Evidence captured against eduplus.net:
+
+    * ``撤回作业`` button — submitted, awaiting grading (no reference answer).
+    * ``提交作业`` button — not submitted.
+    * graded page shows neither button; it exposes ``参考答案``, ``总分：`` and
+      per-question ``得分：`` instead.
+    * ``None`` means the page state could not be recognised; callers must keep
+      the REST-derived status rather than assume "not submitted".
+    """
+    if "撤回作业" in text:
+        return HomeworkStatus.SUBMITTED_PENDING
+    if "提交作业" in text:
+        return HomeworkStatus.NOT_SUBMITTED
+    if "参考答案" in text or "总分：" in text or "得分：" in text:
+        return HomeworkStatus.SUBMITTED_GRADED
+    return None
+
+
+def classify_experiment_flag(flag_text: Optional[str], flag_class: str) -> Optional[bool]:
+    """Map an experiment card badge to a submission state.
+
+    Text wins over class: a card just inserted by the SPA may still carry the
+    default ``gray`` class before the API state paints, so a bare class match
+    must not be trusted when the visible label has not rendered yet.
+
+    * ``已提交`` / ``gray`` — submitted.
+    * ``未提交`` / ``待提交`` / ``未开始`` / ``red`` — outstanding.
+    * ``None`` — badge missing or unrecognised; the caller reports "unknown".
+    """
+    text = (flag_text or "").strip()
+    cls = flag_class or ""
+    if "已提交" in text:
+        return True
+    if "未提交" in text or "待提交" in text or "未开始" in text:
+        return False
+    if "gray" in cls:
+        return True
+    if "red" in cls:
+        return False
+    return None
+
+
 class HomeworkOperator:
     ANSWER_ROUTE = "/course/workAnswer/{course_id}/{task_id}/true?isPiYue=noPiYue"
     EXPERIMENT_ROUTE = "/course/course/{course_id}/ExperimentPage?userRole="
@@ -54,19 +99,27 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     # page truth: button label + progress
     # ------------------------------------------------------------------ #
-    def read_page_state(self, page: Page) -> tuple[HomeworkStatus, Optional[str]]:
-        text = page.inner_text("body")
+    def _await_page_state(self, page: Page) -> str:
+        """Wait until the SPA paints a recognizable status keyword or the
+        deadline elapses; return the body text either way."""
+        try:
+            page.wait_for_load_state("networkidle", timeout=4000)
+        except PWTimeout:
+            pass
+        for _ in range(10):
+            text = page.inner_text("body")
+            if classify_page_state(text) is not None:
+                return text
+            time.sleep(0.3)
+        return page.inner_text("body")
+
+    def read_page_state(self, page: Page) -> tuple[Optional[HomeworkStatus], Optional[str]]:
+        text = self._await_page_state(page)
         progress = None
         m = re.search(r"答题卡\s*\((\d+\s*/\s*\d+)\)", text)
         if m:
             progress = m.group(1).replace(" ", "")
-        if "撤回作业" in text:
-            # Graded vs pending is refined by the client score detail; treated
-            # as submitted pending until a score appears in the homework DTO.
-            return HomeworkStatus.SUBMITTED_PENDING, progress
-        if "提交作业" in text:
-            return HomeworkStatus.NOT_SUBMITTED, progress
-        return HomeworkStatus.NOT_SUBMITTED, progress
+        return classify_page_state(text), progress
 
     # ------------------------------------------------------------------ #
     # question filling
@@ -183,8 +236,10 @@ class HomeworkOperator:
         }
         page = self.open_homework(task)
         status, progress = self.read_page_state(page)
-        task.page_status = status
-        task.page_progress = progress
+        if status is not None:
+            task.page_status = status
+        if progress is not None:
+            task.page_progress = progress
 
         if status is HomeworkStatus.SUBMITTED_PENDING or status is HomeworkStatus.SUBMITTED_GRADED:
             outcome["note"] = "作业已提交，未重复作答"
@@ -305,38 +360,85 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     # experiments
     # ------------------------------------------------------------------ #
+    def _await_experiment_cards(self, page: Page) -> None:
+        """Wait for the experiment card grid to paint; scroll through the page so
+        lazily-rendered bottom cards mount before the snapshot."""
+        try:
+            page.wait_for_selector(".exp-item", timeout=self.config.action_timeout_ms)
+        except PWTimeout:
+            return
+        try:
+            page.wait_for_load_state("networkidle", timeout=4000)
+        except PWTimeout:
+            pass
+        page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); }")
+        time.sleep(0.5)
+        page.evaluate("() => window.scrollTo(0, 0)")
+        time.sleep(0.3)
+
     def read_experiments(self, course: Course) -> list[Experiment]:
         page = self.session.open(self.EXPERIMENT_ROUTE.format(course_id=course.id))
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")
-        time.sleep(1.0)
+        self._await_experiment_cards(page)
         js = r"""
         () => {
-          const cards = [...document.querySelectorAll('div')].filter(d =>
-            /^实验[一二三四五六七八九十0-9]/.test((d.innerText||'').trim()) &&
-            d.innerText.includes('截止'));
+          const rows = [...document.querySelectorAll('.exp-item')];
           const out = [];
-          const seen = new Set();
-          cards.forEach(c => {
-            const title = (c.innerText.split('\n')[0]||'').trim();
-            if (seen.has(title)) return;
-            seen.add(title);
-            let parent = c, badge = null, material = '', deadline = '';
-            for (let i=0;i<4 && parent;i++){
-              const b = [...parent.querySelectorAll('*')].find(e => e.children.length===0 &&
-                ['已提交','未提交','待提交','未开始'].includes((e.innerText||'').trim()));
-              if (b) { badge = b.innerText.trim(); break; }
-              parent = parent.parentElement;
-            }
-            const text = c.innerText;
+          rows.forEach(row => {
+            const flag = row.querySelector('.flag');
+            const titleEl = row.querySelector('.exp-item-center-name');
+            const title = titleEl ? titleEl.innerText.trim() : '';
+            const text = row.innerText || '';
+            let material = '', deadline = '';
             const m1 = text.match(/提交物[：:]\s*([^\n]+)/); if (m1) material = m1[1].trim();
             const m2 = text.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/); if (m2) deadline = m2[1];
-            out.push({name: title, badge, material, deadline, raw: text.slice(0,200)});
+            out.push({
+              name: title,
+              flag_text: flag ? (flag.innerText || '').trim() : null,
+              flag_class: flag ? flag.className || '' : '',
+              material, deadline, raw: text.slice(0, 200)
+            });
           });
           return out;
         }
         """
         raw_list = page.evaluate(js) or []
+        # Poll once more: bottom cards finish their state paint after the first
+        # read; a later, longer snapshot replaces the earlier one.
+        time.sleep(0.8)
+        later = page.evaluate(js) or []
+        if len(later) >= len(raw_list):
+            raw_list = later
+        # Fallback: legacy text-based scan when the card layout changes. The
+        # badge is only matched inside its own card subtree (no ancestor walk),
+        # so a global status label cannot leak across cards.
+        if not raw_list:
+            raw_list = page.evaluate(r"""
+            () => {
+              const cards = [...document.querySelectorAll('div')].filter(d =>
+                /^实验[一二三四五六七八九十0-9]/.test((d.innerText||'').trim()) &&
+                d.innerText.includes('截止'));
+              const out = []; const seen = new Set();
+              cards.forEach(c => {
+                const title = (c.innerText.split('\n')[0]||'').trim();
+                if (seen.has(title)) return; seen.add(title);
+                const badge = c.querySelector('.flag');
+                const text = c.innerText;
+                const m1 = text.match(/提交物[：:]\s*([^\n]+)/);
+                const m2 = text.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/);
+                out.push({
+                  name: title,
+                  flag_text: badge ? (badge.innerText || '').trim() : null,
+                  flag_class: badge ? badge.className || '' : '',
+                  material: m1 ? m1[1].trim() : '',
+                  deadline: m2 ? m2[1] : '',
+                  raw: text.slice(0,200)
+                });
+              });
+              return out;
+            }
+            """) or []
         experiments: list[Experiment] = []
         for raw in raw_list:
             deadline_ms = None
@@ -349,7 +451,9 @@ class HomeworkOperator:
             experiments.append(
                 Experiment(
                     name=raw["name"],
-                    submitted=raw["badge"] == "已提交",
+                    submitted=classify_experiment_flag(
+                        raw.get("flag_text"), raw.get("flag_class") or ""
+                    ),
                     deadline_ms=deadline_ms,
                     material=raw.get("material", ""),
                     raw_text=raw.get("raw", ""),

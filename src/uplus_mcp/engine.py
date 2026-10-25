@@ -35,10 +35,15 @@ class PatrolEngine:
         return hit
 
     def _iter_courses(self) -> list:
-        """Configured courses, or the live account list when none are configured."""
-        if self.config.courses:
-            return self.config.courses
-        return self.client.list_my_courses()
+        """Configured courses, or the live account list when none are configured.
+
+        By default expired courses are skipped during patrol; set
+        ``include_expired_courses=True`` to keep the archived view.
+        """
+        courses = self.config.courses or self.client.list_my_courses()
+        if self.config.include_expired_courses:
+            return courses
+        return [c for c in courses if not utils.is_expired(c.end_ms)]
 
     def _register(self, task: HomeworkTask) -> None:
         self._task_index[task.task_id] = task
@@ -65,6 +70,41 @@ class PatrolEngine:
                 "message": "登录有效" if logged else
                 "登录态已过期：请在插件启动的 Edge 窗口中打开 eduplus.net 重新登录，然后重试本工具。"}
 
+    def login(self, mode: str = "manual", username: str = "",
+              password: str = "", school: str = "",
+              wait_timeout_ms: int = 120_000) -> dict:
+        """Sign in through one of two agreed flows.
+
+        ``manual`` opens the portal and waits for the human to finish signing in
+        in the attached Edge window. ``auto`` fills the school selector, account
+        and password after the model asked the user for them; credentials are
+        used only for this call and are never persisted or echoed back.
+        """
+        mode = (mode or "manual").strip().lower()
+        if mode == "auto":
+            if not username.strip() or not password.strip():
+                return {"logged_in": False, "mode": "auto",
+                        "reason": "自动登录前必须先向用户询问账号与密码；缺少凭据时改用手动登录。"}
+            result = self.session.auto_login(
+                username.strip(), password, school.strip(),
+                wait_ms=min(int(wait_timeout_ms), 30_000),
+            )
+            # Strip any accidental credential echo before returning to the model.
+            result.pop("username", None)
+            result.pop("password", None)
+            result.pop("school", None)
+            return result
+
+        self.session.open_login_page()
+        status = self.session.wait_for_session(timeout_ms=int(wait_timeout_ms))
+        if status["logged_in"]:
+            return {"logged_in": True, "mode": "manual",
+                    "note": "手动登录成功", "url": status["url"],
+                    "token_len": status["token_len"]}
+        return {"logged_in": False, "mode": "manual",
+                "reason": "等待超时：未检测到登录成功，请在浏览器窗口完成登录后重试。",
+                "url": status["url"]}
+
     def list_courses(self) -> list[dict]:
         return [
             {
@@ -89,8 +129,10 @@ class PatrolEngine:
                     try:
                         page = self.operator.open_homework(task)
                         status, progress = self.operator.read_page_state(page)
-                        task.page_status = status
-                        task.page_progress = progress
+                        if status is not None:
+                            task.page_status = status
+                        if progress is not None:
+                            task.page_progress = progress
                     except AuthExpiredError:
                         raise
                     except Exception as exc:  # keep listing alive
@@ -112,7 +154,11 @@ class PatrolEngine:
         return rows
 
     def list_experiments(self, course_id: str) -> list[dict]:
-        course = next(c for c in self.client.list_my_courses() if c.id == course_id)
+        course = next(
+            (c for c in self.client.list_my_courses() if c.id == course_id), None
+        )
+        if course is None:
+            raise UplusError(f"未找到课程 {course_id}，请先确认课程 ID")
         experiments = self.operator.read_experiments(course)
         return [
             {
@@ -129,8 +175,11 @@ class PatrolEngine:
         task = self.resolve_task(task_id, course_id)
         page = self.operator.open_homework(task)
         status, progress = self.operator.read_page_state(page)
-        task.page_status = status
-        task.page_progress = progress
+        if status is not None:
+            task.page_status = status
+        if progress is not None:
+            task.page_progress = progress
+        final_status = status if status is not None else task.status
         questions = [
             self.client.question_detail(q.question_id)
             for q in self.client.list_questions(task.homework_id)
@@ -141,8 +190,8 @@ class PatrolEngine:
             "task_id": task.task_id,
             "homework_id": task.homework_id,
             "name": task.name,
-            "status": status.value,
-            "status_label": report_mod.STATUS_LABEL[status],
+            "status": final_status.value,
+            "status_label": report_mod.STATUS_LABEL[final_status],
             "progress": progress,
             "deadline": utils.deadline_label(task.end_ms),
             "question_count": len(questions),
@@ -180,8 +229,10 @@ class PatrolEngine:
                     try:
                         page = self.operator.open_homework(task)
                         status, progress = self.operator.read_page_state(page)
-                        task.page_status = status
-                        task.page_progress = progress
+                        if status is not None:
+                            task.page_status = status
+                        if progress is not None:
+                            task.page_progress = progress
                     except AuthExpiredError:
                         raise
                     except Exception as exc:
@@ -240,10 +291,16 @@ class PatrolEngine:
                 experiments = self.operator.read_experiments(course)
                 for exp in experiments:
                     snapshot.experiments.append(report_mod.ExperimentRow(course.name, exp))
-                    if not exp.submitted:
+                    if exp.submitted is False:
                         snapshot.takeover.append({
                             "course": course.name, "title": exp.name,
                             "detail": f"实验未提交，提交物：{exp.material or '实验报告/成果物'}",
+                            "deadline": utils.deadline_label(exp.deadline_ms),
+                        })
+                    elif exp.submitted is None:
+                        snapshot.takeover.append({
+                            "course": course.name, "title": exp.name,
+                            "detail": "实验状态未知，需本人进入实验栏目人工复核",
                             "deadline": utils.deadline_label(exp.deadline_ms),
                         })
             except AuthExpiredError:
@@ -264,6 +321,7 @@ class PatrolEngine:
                 "homework_outstanding": snapshot.outstanding,
                 "experiments_submitted": snapshot.submitted_experiments,
                 "experiments_outstanding": snapshot.outstanding_experiments,
+                "experiments_unknown": snapshot.unknown_experiments,
                 "takeover_count": len(snapshot.takeover),
             },
             "answer_briefs": answer_briefs,

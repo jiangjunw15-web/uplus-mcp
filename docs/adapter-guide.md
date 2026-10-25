@@ -44,11 +44,12 @@ class PageOperator:
 
 | 差异点 | 处理要求 |
 | --- | --- |
-| 题型编码 | 统一映射到 `QuestionType`，未知题型归入 `UNKNOWN` 并进入人工接管 |
+| 题型编码 | 统一映射到 `QuestionType`，未知题型归入 `UNKNOWN` 并进入人工接管；附件题单独归入 `ATTACHMENT` 人工接管 |
 | 多选答案格式 | 规范化为排序去重大写字母串（`utils.normalize_letters`） |
 | 判断题答案 | 规范化为 `true` / `false`（`utils.normalize_bool`） |
-| 提交状态 | 以页面权威状态为准；接口字段只用于粗筛，避免待批改被误判为未提交 |
-| 登录态 | 复用 `browser.py` 持久化会话；失效时抛出平台独立的 `AuthExpiredError` |
+| 提交状态 | 以页面权威状态为准；接口字段只用于粗筛，避免待批改被误判为未提交；已出分关键词（参考答案 / 总分 / 得分）单独识别为 `SUBMITTED_GRADED`；页面特征缺失时返回 `None`，保留接口状态，不得兜底判未提交 |
+| 实验状态 | 支持已提交 / 未提交 / 状态未知三态；文本优先于样式 class，无法识别时返回 `None` 交人工复核 |
+| 登录态 | 复用 `browser.py` 的 CDP 附加会话；失效时抛出平台独立的 `AuthExpiredError`；不保存 Cookie 或存储快照 |
 | 附件限制 | 在适配器记录大小、格式与命名要求，写入 takeover 清单明细 |
 
 ## 4. 不应进入适配器的内容

@@ -23,3 +23,18 @@ def test_resolve_paths_are_relative_to_project_root():
     report = cfg.report_folder
     assert isinstance(report, Path)
     assert report.name == "reports"
+
+
+def test_include_expired_courses_defaults_to_false():
+    cfg = load_config(None)
+    assert cfg.include_expired_courses is False
+
+
+def test_include_expired_courses_reads_from_config_file(tmp_path):
+    cfg_file = tmp_path / "courses.json"
+    cfg_file.write_text(
+        '{"include_expired_courses": true, "courses": []}', encoding="utf-8"
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg.include_expired_courses is True
+

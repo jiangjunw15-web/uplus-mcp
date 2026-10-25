@@ -23,6 +23,7 @@ class QuestionType(IntEnum):
     FILL_BLANK = 4     # 填空题 (code observed on other course packs)
     SHORT_ANSWER = 5   # 简答题
     PROGRAM = 6        # 编程题
+    ATTACHMENT = 7     # 附件提交题（页面常显示为简答题，实为文件上传）
     UNKNOWN = 99
 
     @property
@@ -34,6 +35,7 @@ class QuestionType(IntEnum):
             QuestionType.FILL_BLANK: "填空题",
             QuestionType.SHORT_ANSWER: "简答题",
             QuestionType.PROGRAM: "编程题",
+            QuestionType.ATTACHMENT: "附件题",
             QuestionType.UNKNOWN: "未知题型",
         }[self]
 
@@ -53,6 +55,17 @@ def question_type(code: Any) -> QuestionType:
         return QuestionType(int(code))
     except (TypeError, ValueError):
         return QuestionType.UNKNOWN
+
+
+def _is_answered(raw: dict) -> bool:
+    """Joint answered check: ``isAnswer`` may be missing/null, so a non-empty
+    ``userAnswer`` or ``hwAnswerId`` also counts as answered."""
+    if raw.get("userAnswer") not in (None, ""):
+        return True
+    if raw.get("hwAnswerId") not in (None, ""):
+        return True
+    flag = raw.get("isAnswer")
+    return flag in (1, "1", True, "true")
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +125,7 @@ class Question:
             question_id=str(raw.get("id", "")),
             order=int(raw.get("orderNumber", 0) or 0),
             type=question_type(raw.get("qsnType")),
-            answered=str(raw.get("isAnswer")) == "1",
+            answered=_is_answered(raw),
         )
 
     @classmethod
@@ -153,6 +166,10 @@ class Question:
             payload["answer_hint"] = "回答选项字母组合，如 ACD"
         elif self.type is QuestionType.FILL_BLANK:
             payload["answer_hint"] = "回答填空文本"
+        elif self.type is QuestionType.ATTACHMENT:
+            payload["answer_hint"] = "附件提交题：不可自动作答，需本人上传文件，人工接管"
+        else:
+            payload["answer_hint"] = "主观/编程题，需本人完成，人工接管"
         return payload
 
 
@@ -223,7 +240,7 @@ class HomeworkTask:
 @dataclass
 class Experiment:
     name: str
-    submitted: bool
+    submitted: Optional[bool] = None
     deadline_ms: Optional[int] = None
     material: str = ""
     raw_text: str = ""

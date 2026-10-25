@@ -14,13 +14,14 @@ env/
 htmlcov/
 
 # Local state: never commit login session or personal report drafts
-storage_state.json
 browser_profile/
 browser_profile_t2/
+uplus-edge-profile/
+storage_state.json
 config/courses.json
 config/login.json
 reports/*.md
-reports/*.brief.json
+reports/*.json
 .env
 .env.local
 

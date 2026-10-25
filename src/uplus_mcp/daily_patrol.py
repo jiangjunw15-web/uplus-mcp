@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from .browser import BrowserSession, AuthExpiredError, UplusError, ATTACH_HELP
+from .browser import BrowserSession, AuthExpiredError, UplusError
 from .config import load_config
 from .engine import PatrolEngine
 from .operator import HomeworkOperator
@@ -54,7 +54,10 @@ def main() -> int:
         print("=== 巡检摘要 ===")
         print(f"作业已提交 {summary['homework_submitted']}（待批改 {summary['homework_pending']}），"
               f"未完成 {summary['homework_outstanding']}")
-        print(f"实验已提交 {summary['experiments_submitted']}，未完成 {summary['experiments_outstanding']}")
+        exp_line = f"实验已提交 {summary['experiments_submitted']}，未完成 {summary['experiments_outstanding']}"
+        if summary.get("experiments_unknown"):
+            exp_line += f"，状态未知 {summary['experiments_unknown']}"
+        print(exp_line)
         print(f"待人工接管 {summary['takeover_count']} 项")
         if result["takeover"]:
             print("\n=== 需要人工处理 ===")
