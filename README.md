@@ -13,6 +13,17 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.5.2
+
+- **Five audited defects closed** (3 high, 2 medium):
+  - Profile directory copy now refuses when source and destination overlap, or when the target lacks the `Local State` marker — prevents accidental recursive deletion of user data.
+  - `fill()`, `snapshot`, and batch `extract` all mask password fields as `••••` — no more password echo in single-step fill or page snapshots.
+  - Submit gate now counts previously-answered objectives in the total, and refuses to submit when the question list is empty (no more `0 == 0` pass).
+  - `patrol(auto_answer=True, submit=True)` is now wired through the rule hook with a full-coverage gate — actually submits when all objective questions have rule answers.
+  - Unknown or expired course ID now raises an error instead of silently widening the query to all courses.
+- **18 regression tests** in `tests/test_fixes.py` guard all five fixes.
+- **CI publish fix**: `pom.xml` artifact filenames now use `${project.version}` instead of hard-coded `0.5.0`, and the workflow clears `maven-package/artifacts` before copy to prevent stale files from previous releases.
+
 ## What's new in 0.5.0
 
 - **Cross-platform, machine-agnostic install**: the launcher now probes installed
