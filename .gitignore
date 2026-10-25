@@ -36,3 +36,9 @@ Thumbs.db
 # Playwright
 .playwright/
 browser_profile_t2/
+
+# Maven metadata package: build outputs and attached distributions are produced
+# by the GitHub Actions workflow and must not be committed.
+maven-package/target
+maven-package/artifacts
+

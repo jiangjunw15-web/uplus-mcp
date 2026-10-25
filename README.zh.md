@@ -1,5 +1,12 @@
 # uplus-mcp
 
+[![GitHub release](https://img.shields.io/github/v/release/jiangjunw15-web/uplus-mcp)](https://github.com/jiangjunw15-web/uplus-mcp/releases)
+[![Release downloads](https://img.shields.io/github/downloads/jiangjunw15-web/uplus-mcp/total)](https://github.com/jiangjunw15-web/uplus-mcp/releases)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/github/license/jiangjunw15-web/uplus-mcp)](LICENSE)
+
+> 暂未发布到 PyPI：在 `uplus-mcp` 上架 PyPI 之前，请通过 GitHub Release 附件 wheel 安装，或克隆源码安装（见「快速开始」）。
+
 一个面向青软 U+ 学习平台的 MCP 服务，同时内置通用浏览器驾驶（browse）工具：既能自动巡检课程、作业与实验，把客观题整理成审题包交给模型作答并在真实作答页填写提交；也能让 AI 直接打开网页、读快照、点击、填表、截图——平台接口变了或流程没有 API 时，模型可以亲自操作页面兜底。简答题、编程题、实验报告与附件上传一律交回本人处理。
 
 > **学术诚信声明**：本工具仅作为个人学习提醒与题目梳理助手。请用它核对题目、跟踪截止时间、整理自己的作业清单；实验报告、小组作品、编程作业与开放题必须由本人完成，并遵守学校考试诚信规定与任课教师要求。考试、闭卷测验或任何禁止辅助的考核场景下不得使用本工具。
@@ -80,6 +87,20 @@ cd uplus-mcp
 
 需要 Python 3.10+（`python --version` 或 `python3 --version` 确认）。
 
+**方式 A：从 GitHub Release 附件 wheel 安装（推荐，无需克隆源码）：**
+
+1. 打开 [Releases 页面](https://github.com/jiangjunw15-web/uplus-mcp/releases)，
+   下载最新版本附带的 `uplus_mcp-<版本>-py3-none-any.whl` 文件。
+2. 安装刚下载的 wheel：
+
+```bash
+pip install <下载路径>/uplus_mcp-0.5.0-py3-none-any.whl
+```
+
+安装后会得到 `uplus-mcp` 与 `uplus-patrol` 两个命令；服务通过 CDP 附加到本机已装的 Edge 或 Chrome，正常流程不需要额外下载 Chromium。
+
+**方式 B：从源码安装（开发或最新未发布代码）：**
+
 **Windows PowerShell：**
 
 ```powershell
@@ -116,7 +137,20 @@ python3 -m venv .venv
 
 在客户端的 MCP 配置里加一段（以 JSON 为例，DSH 的 `cordis.patch.yml` 同理）。
 
-**Windows：**
+**Release wheel 安装（或 editable 源码安装）：直接注册控制台命令：**
+
+```json
+{
+  "mcpServers": {
+    "uplus": {
+      "command": "uplus-mcp",
+      "env": { "UPLUS_CONFIG": "config/courses.json" }
+    }
+  }
+}
+```
+
+**源码安装 — Windows：**
 
 ```json
 {
@@ -131,7 +165,7 @@ python3 -m venv .venv
 }
 ```
 
-**macOS / Linux：**
+**源码安装 — macOS / Linux：**
 
 ```json
 {
@@ -213,6 +247,22 @@ CLI 定时巡检（不答题不提交）：
 ```bash
 .venv/bin/python -m uplus_mcp.daily_patrol
 ```
+
+## GitHub Packages
+
+仓库内的 GitHub Actions 工作流会在每次推送 `v*` 标签（也可在 Actions 页面手动触发）时，把一份仅作元数据登记的 Apache Maven 制品发布到本仓库的 Packages 注册表。工作流使用内置 `GITHUB_TOKEN`，发布时不需要个人访问令牌。
+
+```
+maven-package/
+  pom.xml              仅含元数据的 Maven POM（com.github.jiangjunw15-web:uplus-mcp）
+  artifacts/           作为附属文件挂载的 wheel 与 sdist（已被 gitignore）
+.github/workflows/publish-packages.yml   构建发行产物并执行 `mvn deploy`
+```
+
+**注意**：这个 Maven 条目只用于在仓库 Packages 面板登记本包，**不是** Python 发行包，**不能用 `pip` 安装**。Python 用户请从 Release 附件 wheel 或源码克隆安装：
+
+- wheel / editable 安装后的控制台命令：`uplus-mcp`
+- 定时巡检 CLI：`uplus-patrol`（或 `python -m uplus_mcp.daily_patrol`）
 
 ## 配置项参考
 

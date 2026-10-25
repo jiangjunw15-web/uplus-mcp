@@ -6,6 +6,18 @@
 
 ## 0. 准备工作
 
+**从 GitHub Release 附件 wheel 安装（推荐，无需克隆源码）：**
+
+打开仓库 [Releases 页面](https://github.com/jiangjunw15-web/uplus-mcp/releases)，下载最新版本附带的 `uplus_mcp-<版本>-py3-none-any.whl`，然后：
+
+```bash
+pip install <下载路径>/uplus_mcp-0.5.0-py3-none-any.whl
+```
+
+安装后直接使用 `uplus-mcp` 控制台入口即可，可跳到下方对应客户端章节。
+
+**源码安装（开发或最新未发布代码）：**
+
 **Windows PowerShell：**
 
 ```powershell
@@ -104,7 +116,7 @@ cp config/courses.example.json config/courses.json
 }
 ```
 
-已用 `pip install -e .` 安装后，也可直接调用控制台入口：
+已通过 Release wheel 或 editable 源码安装后，也可直接调用控制台入口：
 
 ```json
 {

@@ -1,5 +1,13 @@
 # uplus-mcp
 
+[![GitHub release](https://img.shields.io/github/v/release/jiangjunw15-web/uplus-mcp)](https://github.com/jiangjunw15-web/uplus-mcp/releases)
+[![Release downloads](https://img.shields.io/github/downloads/jiangjunw15-web/uplus-mcp/total)](https://github.com/jiangjunw15-web/uplus-mcp/releases)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/github/license/jiangjunw15-web/uplus-mcp)](LICENSE)
+
+> PyPI publication is pending: until `uplus-mcp` appears on PyPI, install from the
+> GitHub Release wheel or clone the source (see Quick start below).
+
 MCP server for the QingSoft U+ learning platform **with a built-in generic browser toolset**.
 
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
@@ -102,10 +110,27 @@ another platform.
 
 ## Quick start
 
+### 1. Install
+
+**From a GitHub Release wheel (recommended, no clone needed):**
+
+1. Open the [Releases page](https://github.com/jiangjunw15-web/uplus-mcp/releases)
+   and download the `uplus_mcp-<version>-py3-none-any.whl` asset attached to the
+   latest release.
+2. Install that downloaded wheel:
+
+```bash
+pip install <download-path>/uplus_mcp-0.5.0-py3-none-any.whl
+```
+
+This provides the `uplus-mcp` and `uplus-patrol` console scripts. Python 3.10+
+is required; the server attaches to an installed Edge or Chrome over CDP, so no
+bundled Chromium download is required for the normal flow.
+
+**From source (development or latest unreleased code):**
+
 > Replace `<install-dir>` with the absolute path of the folder containing
 > `pyproject.toml` (this repository root).
-
-### 1. Install
 
 **Windows PowerShell:**
 
@@ -122,9 +147,6 @@ cd <install-dir>
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
-
-The server attaches to an installed Edge or Chrome over CDP; no bundled Chromium
-download is required for the normal flow.
 
 ### 2. Configure personal courses (gitignored, optional)
 
@@ -163,8 +185,23 @@ port.
 ### 4. Register the server in your MCP client
 
 See [`docs/mcp-clients.md`](docs/mcp-clients.md) for Claude Desktop, Cursor and VS
-Code examples. Minimal stdio registration (Windows example; macOS/Linux use
-`<install-dir>/.venv/bin/python`):
+Code examples.
+
+**Installed from the Release wheel (or editable source): register the console script directly:**
+
+```json
+{
+  "mcpServers": {
+    "uplus": {
+      "command": "uplus-mcp",
+      "env": { "UPLUS_CONFIG": "config/courses.json" }
+    }
+  }
+}
+```
+
+**Installed from source (Windows example; macOS/Linux use
+`<install-dir>/.venv/bin/python`):**
 
 ```json
 {
@@ -231,6 +268,27 @@ Scheduler, macOS `launchd`, or Linux cron (e.g. daily 21:30).
 
 > The CLI never submits homework. Answer and submission happen through an MCP
 > session after the model reviews the brief.
+
+## GitHub Packages
+
+A GitHub Actions workflow publishes a metadata-only Apache Maven package to this
+repository's Packages registry on every `v*` tag push (and can be run manually
+from the Actions tab). The workflow uses the built-in `GITHUB_TOKEN`, so no
+personal access token is required to publish.
+
+```
+maven-package/
+  pom.xml              metadata-only Maven POM (com.github.jiangjunw15-web:uplus-mcp)
+  artifacts/           wheel and sdist attached as supplementary files (gitignored)
+.github/workflows/publish-packages.yml   build distributions and run `mvn deploy`
+```
+
+**Important:** the Maven entry only registers the package in the repository's
+Packages panel. It is **not** a Python distribution and cannot be installed with
+`pip`. Python users install from the Release wheel or the source checkout:
+
+- Console script after a wheel/editable install: `uplus-mcp`
+- Nightly patrol CLI: `uplus-patrol` (or `python -m uplus_mcp.daily_patrol`)
 
 ## Configuration reference
 

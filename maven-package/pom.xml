@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven metadata artifact for uplus-mcp.
+
+  This project does not compile Java code. It exists only to register the Python
+  package in the GitHub Packages Apache Maven registry so the repository's
+  Packages panel shows a published entry. The wheel and sdist built from the
+  repository root are attached as supplementary artifacts; the Maven coordinates
+  are metadata only and cannot be consumed by pip.
+
+  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.5.0
+  Keep <version> in sync with version in ../pyproject.toml at every release.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.github.jiangjunw15-web</groupId>
+  <artifactId>uplus-mcp</artifactId>
+  <version>0.5.0</version>
+  <packaging>pom</packaging>
+
+  <name>uplus-mcp</name>
+  <description>Python MCP server for the QingSoft U+ platform; wheel and sdist attached as supplementary files to register the package in GitHub Packages.</description>
+  <url>https://github.com/jiangjunw15-web/uplus-mcp</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://github.com/jiangjunw15-web/uplus-mcp/blob/main/LICENSE</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>uplus-mcp-contributors</id>
+      <name>uplus-mcp contributors</name>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/jiangjunw15-web/uplus-mcp.git</connection>
+    <developerConnection>scm:git:https://github.com/jiangjunw15-web/uplus-mcp.git</developerConnection>
+    <url>https://github.com/jiangjunw15-web/uplus-mcp</url>
+  </scm>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>https://maven.pkg.github.com/jiangjunw15-web/uplus-mcp</url>
+    </repository>
+  </distributionManagement>
+
+  <build>
+    <plugins>
+      <!-- Attach the Python wheel and sdist built in the repository root as
+           supplementary artifacts for this metadata-only Maven package. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>attach-python-distributions</id>
+            <phase>package</phase>
+            <goals>
+              <goal>attach-artifact</goal>
+            </goals>
+            <configuration>
+              <artifacts>
+                <artifact>
+                  <file>artifacts/uplus_mcp-0.5.0-py3-none-any.whl</file>
+                  <type>whl</type>
+                  <classifier>wheel</classifier>
+                </artifact>
+                <artifact>
+                  <file>artifacts/uplus_mcp-0.5.0.tar.gz</file>
+                  <type>tar.gz</type>
+                  <classifier>sdist</classifier>
+                </artifact>
+              </artifacts>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

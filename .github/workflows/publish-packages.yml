@@ -1,0 +1,63 @@
+name: Publish package to GitHub Packages
+
+# Publishes the Python wheel and sdist as supplementary artifacts of a metadata
+# Maven package, so the repository's Packages panel shows a published entry.
+# Authentication uses the built-in GITHUB_TOKEN (no manual PAT required); the
+# workflow declares packages: write below. The Maven package coordinates are
+# metadata only: they cannot be consumed by pip.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Python distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          mkdir -p maven-package/artifacts
+          cp dist/*.whl maven-package/artifacts/
+          cp dist/*.tar.gz maven-package/artifacts/
+
+      - name: Verify Maven version matches pyproject
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY_VER="$(python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+          MVN_VER="$(grep -m1 -oE '<version>[^<]+</version>' maven-package/pom.xml | head -n1 | sed -E 's#</?version>##g')"
+          echo "pyproject version=$PY_VER ; Maven version=$MVN_VER"
+          test "$PY_VER" = "$MVN_VER"
+
+      - name: Set up Maven
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Publish to GitHub Packages
+        working-directory: maven-package
+        run: mvn --batch-mode deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
