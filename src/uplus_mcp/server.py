@@ -142,6 +142,67 @@ async def uplus_list_experiments(course_id: str) -> list[dict]:
 
 
 @mcp.tool()
+async def uplus_read_experiment_detail(course_id: str, exp_id: str, stu_exp_id: str) -> dict:
+    """Read experiment detail: requirements, material, deadline, submitted files."""
+    from .experiment import ExperimentOperator
+    def work() -> dict:
+        _ensure_engine()
+        op = ExperimentOperator(_state["engine"].config, _state["engine"].session)
+        detail = op.read_detail(course_id, exp_id, stu_exp_id)
+        return {
+            "name": detail.name,
+            "status": detail.status,
+            "environment": detail.environment,
+            "material": detail.material,
+            "deadline": detail.deadline,
+            "submitted_files": detail.submitted_files,
+            "attachments": detail.attachments,
+            "manual_text": detail.manual_text[:2000],
+        }
+    return await _thread.run_async(work)
+
+
+@mcp.tool()
+async def uplus_generate_experiment_report(
+    title: str,
+    purpose: str,
+    content: str,
+    output_path: str,
+    student_name: str = "",
+    student_id: str = "",
+) -> dict:
+    """Generate a standard experiment report .docx file."""
+    from pathlib import Path
+    from .report_generator import generate_algorithm_report
+    path = generate_algorithm_report(
+        title=title,
+        purpose=purpose,
+        content=content,
+        output_path=Path(output_path),
+        student_name=student_name,
+        student_id=student_id,
+    )
+    return {"generated": True, "path": str(path), "size": path.stat().st_size}
+
+
+@mcp.tool()
+async def uplus_submit_experiment_report(
+    course_id: str,
+    exp_id: str,
+    stu_exp_id: str,
+    file_path: str,
+) -> dict:
+    """Upload and submit an experiment report file."""
+    from pathlib import Path
+    from .experiment import ExperimentOperator
+    def work() -> dict:
+        _ensure_engine()
+        op = ExperimentOperator(_state["engine"].config, _state["engine"].session)
+        return op.upload_report(course_id, exp_id, stu_exp_id, Path(file_path))
+    return await _thread.run_async(work)
+
+
+@mcp.tool()
 async def uplus_inspect_homework(task_id: str, course_id: str) -> dict:
     """Return homework status plus a structured brief of its questions.
 

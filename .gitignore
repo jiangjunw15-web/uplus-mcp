@@ -42,3 +42,9 @@ browser_profile_t2/
 maven-package/target
 maven-package/artifacts
 
+# Local scratch dirs
+.mimosa/
+.v2c/
+.video_agent/
+experiments/
+
