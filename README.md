@@ -13,6 +13,15 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.6.0
+
+- **Experiment automation**: three new MCP tools let the model read an experiment's requirements, generate a standard experiment report `.docx`, and upload it for submission.
+  - `uplus_read_experiment_detail` — opens the experiment detail page, switches tabs, and returns name, status, environment, material, deadline, already-submitted files and the manual text.
+  - `uplus_generate_experiment_report` — builds a structured `.docx` (title, purpose, content, steps, implementation, analysis, summary, requirements) from a few parameters; includes the algorithm-course template.
+  - `uplus_submit_experiment_report` — uploads the generated file through the platform's file input and confirms the submission state.
+- **Two new modules**: `experiment.py` (list / read detail / upload) and `report_generator.py` (python-docx based report builder).
+- **18 regression tests** guard the new modules and keep the total suite green at 91 tests.
+
 ## What's new in 0.5.2
 
 - **Five audited defects closed** (3 high, 2 medium):
