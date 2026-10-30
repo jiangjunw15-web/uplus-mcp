@@ -104,10 +104,11 @@ async def uplus_login(
     - ``mode="auto"``: the model first asks the user for their account,
       password and school name, then fills the sign-in form, submits and
       verifies the session. Credentials are used only for this call: never
-      persisted to config, reports or logs, and never echoed back. If auto
-      fill cannot find the fields, the school selector cannot be matched, or a
-      captcha / SMS / wrong-password prompt appears, fall back to ``manual``
-      and hand the window to the user.
+      persisted to config, reports or logs, and never echoed back. The wait is
+      capped at 30 s so a failed auto fill hands over to ``manual`` quickly.
+      If auto fill cannot find the fields, the school selector cannot be
+      matched, or a captcha / SMS / wrong-password prompt appears, fall back to
+      ``manual`` and hand the window to the user.
 
     Returns ``logged_in``, the chosen mode, current URL and token length.
     """
@@ -171,14 +172,22 @@ async def uplus_generate_experiment_report(
     student_name: str = "",
     student_id: str = "",
 ) -> dict:
-    """Generate a standard experiment report .docx file."""
+    """Generate a standard experiment report .docx file.
+
+    ``output_path`` must stay inside the configured allowed directories
+    (the report folder and the system temp dir by default; extend via
+    ``allowed_io_paths`` in config or ``UPLUS_ALLOWED_PATHS``).
+    """
     from pathlib import Path
+    from . import utils
     from .report_generator import generate_algorithm_report
+    safe_path = utils.resolve_io_path(
+        output_path, load_config().io_roots)
     path = generate_algorithm_report(
         title=title,
         purpose=purpose,
         content=content,
-        output_path=Path(output_path),
+        output_path=safe_path,
         student_name=student_name,
         student_id=student_id,
     )
@@ -192,13 +201,20 @@ async def uplus_submit_experiment_report(
     stu_exp_id: str,
     file_path: str,
 ) -> dict:
-    """Upload and submit an experiment report file."""
+    """Upload and submit an experiment report file.
+
+    ``file_path`` must stay inside the configured allowed directories (see
+    ``uplus_generate_experiment_report``).
+    """
     from pathlib import Path
+    from . import utils
     from .experiment import ExperimentOperator
     def work() -> dict:
         _ensure_engine()
+        safe_path = utils.resolve_io_path(
+            file_path, _state["engine"].config.io_roots, must_exist=True)
         op = ExperimentOperator(_state["engine"].config, _state["engine"].session)
-        return op.upload_report(course_id, exp_id, stu_exp_id, Path(file_path))
+        return op.upload_report(course_id, exp_id, stu_exp_id, safe_path)
     return await _thread.run_async(work)
 
 

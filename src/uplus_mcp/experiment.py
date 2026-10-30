@@ -208,6 +208,9 @@ class ExperimentOperator:
     def upload_report(self, course_id: str, exp_id: str, stu_exp_id: str,
                       file_path: Path) -> dict:
         """Upload a .docx report file to the experiment submission page."""
+        from . import utils
+        safe_path = utils.resolve_io_path(
+            file_path, self.config.io_roots, must_exist=True)
         page = self.open_detail(course_id, exp_id, stu_exp_id)
 
         # make sure we're on 实验提交物 tab
@@ -219,7 +222,7 @@ class ExperimentOperator:
         if not file_input.count():
             raise UplusError("页面未找到文件上传输入框")
 
-        file_input.set_input_files(str(file_path))
+        file_input.set_input_files(str(safe_path))
         time.sleep(2.0)
 
         # find and click submit button
@@ -243,6 +246,6 @@ class ExperimentOperator:
         time.sleep(3.0)
         return {
             "uploaded": True,
-            "file": file_path.name,
+            "file": safe_path.name,
             "page_url": page.url,
         }

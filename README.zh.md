@@ -13,6 +13,17 @@
 
 > **新用户 / AI 助手先读 [rename.md](rename.md)**：那是一份分步引导剧本，写清了从环境检查、安装、注册客户端、两种登录方式、巡检、客观题作答到人工接管的每一步该调用什么工具、向用户说什么、成功信号与失败回退。
 
+## 0.7.0 版本更新（安全加固）
+
+一次安全加固发布。对 0.6.0 代码的审计发现：模型浏览过的网页有可能把一个导航步骤变成**本地文件读取**（`file:///…`），且若干文件工具接受磁盘上的任意路径。两者在本版均已修复，文档化的既有流程行为不变。
+
+- **导航只允许 `http`/`https`**：批量动作（`browse_act_batch` 的 `op: "navigate"`）此前把 URL 直接交给浏览器，因此一步 `file:///C:/…` 就能打开本地文件，再用 `extract` 把内容读进模型上下文；配合 `browse_upload` 即构成「读取并外传」链路。`navigate` 与 `browse_open` 现在共用同一份 scheme 白名单（`utils.safe_navigation_url`），`file:`、`ftp:`、`data:`、`javascript:`、`blob:` 一律拒绝并给出说明，站内相对路径仍按平台域名解析。
+- **文件工具限制在允许的目录内**：报告输出、截图、作业附件、实验上传现在都会先按 `allowed_io_paths`（配置项，或环境变量 `UPLUS_ALLOWED_PATHS`）解析路径，落在允许范围外即拒绝。`..`、`~`、符号链接都会在判定前展开，因此 `reports/../../.ssh/id_rsa` 与 `~/.ssh/id_rsa` 都会被拦下。默认允许目录为报告目录与系统临时目录，「生成报告 → 提交」这条常用流程无需任何配置即可照常工作。
+- **`python-docx` 成为正式依赖**：`uplus_generate_experiment_report` 此前是懒加载它，导致 0.6.0 的主打功能在未预装该库的环境下直接 `ModuleNotFoundError`。
+- **新增 32 个回归测试**（`tests/test_security_hardening.py`）：覆盖 scheme 白名单、路径穿越 / 符号链接 / 家目录展开逃逸、允许目录的配置链路、报告生成与密钥脱敏。测试总数 123。
+- **CI Action 固定到 commit SHA**：`checkout`、`setup-python`、`setup-java`、`action-gh-release` 均改为固定到经过审阅的具体提交，不再使用可被移动的大版本 tag。
+- 其他小修：接口错误响应体进入模型上下文前先过 `redact_secrets`；学校下拉在没有任何匹配项时不再退而点击第一项（改为交回手动登录，避免拿账号密码去试错误的学校）；`uplus_login` 文档补充了自动模式 30 秒等待上限的说明。
+
 ## 0.5.0 版本更新（通用化发布）
 
 - **跨平台、脱离本机写死路径**：启动器在 Windows / macOS / Linux 上自动探测已安装的 Microsoft Edge 或 Google Chrome，PATH 命令兜底；不再只认 Windows 上的 Edge 路径。调试端口、浏览器引擎、专用 profile 目录均可配置（`browser`、`cdp_port`、`profile_dir`、`auto_launch_browser`），并支持环境变量 `UPLUS_BROWSER`、`UPLUS_CDP_PORT`、`UPLUS_PROFILE_DIR` 覆盖。

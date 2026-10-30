@@ -10,6 +10,21 @@
 > - 命令分三种环境：**Windows PowerShell**、**macOS Terminal**、**Linux**；AI 先判断用户系统再给对应命令，不要混发。
 > - 工具名以插件实际注册名为准：U+ 业务族 `uplus_*`，通用浏览器族 `browse_*`。
 > - 客观题可自动作答；**简答、编程、附件、实验报告、小组成果物一律交回用户本人**，AI 不得编造答案或伪造上传。
+> - 本手册基于 **0.7.0** 编写；0.7.0 起插件收紧了导航与文件路径边界（见文末「安全边界」）。
+
+---
+
+## 0.7.0 起的安全边界（AI 必须知道，不要尝试绕过）
+
+0.7.0 修掉了两类会让用户数据暴露的问题，以下行为现在会被插件**直接拒绝**。AI 不要把它们当成"需要重试的故障"，更不要尝试用别的写法绕过。
+
+| AI 可能想做的事 | 插件的反应 | AI 该怎么做 |
+| --- | --- | --- |
+| 让浏览器打开 `file:///…` 读本地文件（HTML、密钥、配置） | 报错「拒绝导航到 file:// 链接：只允许 http/https 网页」 | 只导航网页。要看本地文件内容，让用户直接贴给你 |
+| 读或写 `allowed_io_paths` 之外的路径（如 `~/.ssh/`、系统目录） | 报错「路径 … 不在允许的目录内」 | 报告、截图、附件一律放在报告目录或临时目录；确有需要时让用户把目录加进 `allowed_io_paths` |
+| 用 `../` 穿越出允许目录 | 报错同上（`..` 会被展开后再判定） | 不要拼相对路径去猜文件位置 |
+
+默认允许目录：**报告目录（`reports/`）与系统临时目录**。`uplus_generate_experiment_report` → `uplus_submit_experiment_report` 这条既有流程开箱可用，无需额外配置。
 
 ---
 
@@ -374,9 +389,12 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 | `cdp_port` | `9333` | 首选调试端口，备选 9222；可用环境变量 `UPLUS_CDP_PORT` 覆盖 |
 | `profile_dir` | 空（用户家目录专用目录） | 专用浏览器 profile 目录；可用环境变量 `UPLUS_PROFILE_DIR` 覆盖 |
 | `include_expired_courses` | `false` | 是否在巡检中保留已截止课程 |
+| `allowed_io_paths` | 报告目录 + 系统临时目录 | 文件类工具（报告输出、截图、附件、实验上传）允许读写的目录白名单，可填多项 |
 | `courses` | 空（在线拉取） | 手动列出 `id` / `name` / `teacher` |
 
-环境变量：`UPLUS_CONFIG`（配置文件路径）、`UPLUS_BROWSER`、`UPLUS_CDP_PORT`、`UPLUS_PROFILE_DIR`。
+环境变量：`UPLUS_CONFIG`（配置文件路径）、`UPLUS_BROWSER`、`UPLUS_CDP_PORT`、`UPLUS_PROFILE_DIR`、`UPLUS_ALLOWED_PATHS`（目录白名单，多项用系统路径分隔符 `;`（Windows）/ `:`（macOS、Linux）分隔）。
+
+> 0.7.0 新增 `allowed_io_paths` / `UPLUS_ALLOWED_PATHS`：只影响**文件读写**，不限制网页导航。默认值已覆盖「生成报告 → 提交」流程，通常无需配置。
 
 ---
 

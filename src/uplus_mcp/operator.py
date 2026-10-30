@@ -350,9 +350,8 @@ class HomeworkOperator:
     # attachment upload
     # ------------------------------------------------------------------ #
     def upload_attachment(self, task: HomeworkTask, file_path: str) -> dict:
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"附件不存在: {file_path}")
+        path = utils.resolve_io_path(
+            file_path, self.config.io_roots, must_exist=True)
         page = self.open_homework(task)
         status, _ = self.read_page_state(page)
         if status in (HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED):

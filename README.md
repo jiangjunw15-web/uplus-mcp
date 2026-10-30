@@ -13,6 +13,44 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.0
+
+A security-hardening release: an audit of the 0.6.0 code found that a page the
+model had navigated to could turn a navigation step into a **local-file read**
+(`file:///…`), and that several file tools accepted any path on disk. Both are
+closed here. Behaviour of the documented flows is unchanged.
+
+- **Navigation is restricted to `http`/`https`** — the batch runner
+  (`browse_act_batch` with `op: "navigate"`) used to pass a URL straight to the
+  browser, so a `file:///C:/…` step could open a local file and `extract` its
+  contents into the model context; combined with `browse_upload` this was a
+  read-and-exfiltrate path. `navigate` and `uplus`/`browse_open` now share one
+  scheme allow-list (`utils.safe_navigation_url`) that refuses `file:`, `ftp:`,
+  `data:`, `javascript:` and `blob:` with an explanatory error, and internal
+  relative routes still resolve against the platform origin.
+- **File tools are confined to allowed directories** — report output,
+  screenshots, homework attachments and experiment uploads now resolve their
+  path against `allowed_io_paths` (config key, or `UPLUS_ALLOWED_PATHS`) and
+  refuse anything outside it. `..`, `~` and symlinks are collapsed before the
+  check, so `reports/../../.ssh/id_rsa` and `~/.ssh/id_rsa` are both rejected.
+  The default roots are the report folder and the system temp directory, which
+  keeps "generate a report, then submit it" working with no configuration.
+- **`python-docx` is now a declared dependency** — `uplus_generate_experiment_report`
+  imported it lazily, so the headline feature of 0.6.0 failed with
+  `ModuleNotFoundError` on any environment that did not already have it.
+- **32 new regression tests** (`tests/test_security_hardening.py`) cover the
+  scheme allow-list, path traversal / symlink / home-expansion escapes, the
+  allowed-path config plumbing, report generation and secret redaction.
+  Suite total: 123 tests.
+- **CI actions pinned to commit SHAs** — `checkout`, `setup-python`,
+  `setup-java` and `action-gh-release` now pin the exact commit they were
+  reviewed at instead of a movable major-version tag.
+- Smaller fixes: API error bodies are passed through `redact_secrets` before
+  they reach the model context; the school selector no longer falls back to
+  clicking the first dropdown item when nothing matched (it now fails over to
+  manual sign-in rather than trying the wrong school); the `uplus_login`
+  docstring documents the 30-second auto-mode wait cap.
+
 ## What's new in 0.6.0
 
 - **Experiment automation**: three new MCP tools let the model read an experiment's requirements, generate a standard experiment report `.docx`, and upload it for submission.

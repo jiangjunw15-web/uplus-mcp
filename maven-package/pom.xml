@@ -8,7 +8,7 @@
   repository root are attached as supplementary artifacts; the Maven coordinates
   are metadata only and cannot be consumed by pip.
 
-  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.5.0
+  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.7.0
   Keep <version> in sync with version in ../pyproject.toml at every release.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -18,7 +18,7 @@
 
   <groupId>com.github.jiangjunw15-web</groupId>
   <artifactId>uplus-mcp</artifactId>
-  <version>0.6.0</version>
+  <version>0.7.0</version>
   <packaging>pom</packaging>
 
   <name>uplus-mcp</name>

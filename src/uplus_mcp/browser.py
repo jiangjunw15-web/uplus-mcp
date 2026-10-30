@@ -28,6 +28,7 @@ from .launcher import (
     default_ports,
     ensure_browser_ready,
 )
+from . import utils
 
 ATTACH_HELP = attach_help_text()
 
@@ -149,9 +150,9 @@ class BrowserSession:
     # navigation
     # ------------------------------------------------------------------ #
     def url_for(self, path: str) -> str:
-        if path.startswith("http://") or path.startswith("https://"):
-            return path
-        return f"{self.base_url}{path if path.startswith('/') else '/' + path}"
+        # Same scheme gate as the raw navigation tools: a caller-supplied
+        # ``file://`` URL must be refused, not silently folded into base_url.
+        return utils.safe_navigation_url(path, base_url=self.base_url)
 
     def open(self, path: str) -> Page:
         page = self.page
@@ -215,7 +216,7 @@ class BrowserSession:
             if status == 401 or "login" in page.url.lower():
                 raise AuthExpiredError(
                     "U+ 登录态已过期，请在浏览器中重新登录后重试。"
-                    f"（HTTP {status}，页面 {page.url}，响应：{body[:200]}）"
+                    f"（HTTP {status}，页面 {page.url}，响应：{utils.redact_secrets(body[:200])}）"
                 )
             try:
                 payload = json.loads(body)
@@ -308,7 +309,12 @@ class BrowserSession:
 
     def _select_school(self, page: Page, school: str) -> bool:
         """Fill the optional school remote-search el-select; True when the form
-        has no school field or a choice was made."""
+        has no school field or a choice was made.
+
+        When the typed name matches nothing, this returns False instead of
+        clicking the first item: submitting credentials against a wrong school
+        is never an acceptable fallback.
+        """
         if not school:
             return True
         select = page.locator(".el-select").first
@@ -323,13 +329,9 @@ class BrowserSession:
             if match.count():
                 match.click(timeout=4000)
                 return True
-            first = page.locator(".el-select-dropdown__item").first
-            if first.count():
-                first.click(timeout=4000)
-                return True
+            return False
         except Exception:  # noqa: BLE001 - remote search may differ per school
             return False
-        return False
 
     def _click_login_button(self, page: Page) -> bool:
         for selector in self._LOGIN_BUTTON_SELECTORS:

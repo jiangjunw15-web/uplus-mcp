@@ -85,6 +85,8 @@ class PatrolEngine:
             if not username.strip() or not password.strip():
                 return {"logged_in": False, "mode": "auto",
                         "reason": "自动登录前必须先向用户询问账号与密码；缺少凭据时改用手动登录。"}
+            # Auto fill never waits the full manual timeout: a failed submit
+            # should fall back to a human quickly, so the wait is capped.
             result = self.session.auto_login(
                 username.strip(), password, school.strip(),
                 wait_ms=min(int(wait_timeout_ms), 30_000),

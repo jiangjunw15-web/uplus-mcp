@@ -11,6 +11,8 @@
   "profile_dir": "",
   "include_expired_courses": false,
 
+  "allowed_io_paths": ["reports"],
+
   "courses": [
     {
       "id": "replace-with-your-course-id-1",

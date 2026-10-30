@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -43,7 +44,6 @@ class Config:
     deadline_warning_hours: int = 72
     report_dir: str = "reports"
     courses: list[Course] = field(default_factory=list)
-
     # ---- browser / CDP session -------------------------------------- #
     # When no CDP port is listening, let the server launch a browser against a
     # dedicated profile copy automatically (Edge 136+ forbids the debug flag on
@@ -60,6 +60,19 @@ class Config:
     # When False (default), expired courses are skipped during patrol. Set
     # True to keep an archived view of finished courses in the report.
     include_expired_courses: bool = False
+    # Roots the file-touching tools may read from or write to (report output,
+    # screenshots, uploads). A path outside every root is refused, so a
+    # confused or injected instruction cannot reach ~/.ssh, browser profiles
+    # or arbitrary system files. Defaults to the report folder plus the system
+    # temp dir; extend via config key ``allowed_io_paths`` or the
+    # ``UPLUS_ALLOWED_PATHS`` environment variable (os.pathsep-separated).
+    allowed_io_paths: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Keep the safe default available for directly-constructed configs
+        # (tests, embedders) as well as for load_config().
+        if not self.allowed_io_paths:
+            self.allowed_io_paths = [self.report_dir, tempfile.gettempdir()]
 
     # ---- path resolution helpers ------------------------------------ #
     def resolve(self, raw: str) -> Path:
@@ -69,6 +82,10 @@ class Config:
     @property
     def report_folder(self) -> Path:
         return self.resolve(self.report_dir)
+
+    @property
+    def io_roots(self) -> list[Path]:
+        return [self.resolve(p) for p in self.allowed_io_paths]
 
     @property
     def auto_launch_edge(self) -> bool:
@@ -91,12 +108,32 @@ def _normalize_browser(raw: str) -> str:
     return value if value in BROWSER_CHOICES else BROWSER_AUTO
 
 
+def _allowed_io_paths(data: dict, report_dir: str) -> list[str]:
+    """File-tool roots: config key / env override / safe default.
+
+    The default is the report folder plus the system temp dir, which keeps the
+    documented flow (generate a report, then submit it) working out of the box
+    while refusing reads of SSH keys, browser profiles and other sensitive
+    trees. An explicitly configured list replaces the default entirely.
+    """
+    raw = data.get("allowed_io_paths")
+    env = os.environ.get("UPLUS_ALLOWED_PATHS")
+    if env is not None and env.strip():
+        raw = [part for part in env.split(os.pathsep) if part.strip()]
+    if isinstance(raw, str):
+        raw = [raw]
+    if not raw or not isinstance(raw, list):
+        raw = [report_dir, tempfile.gettempdir()]
+    return [str(part) for part in raw if str(part).strip()]
+
+
 def load_config(path: Optional[str] = None) -> Config:
     """Load config from ``path``, the ``UPLUS_CONFIG`` env var, or defaults.
 
     Personal ``config/courses.json`` is gitignored; copy the example to start.
     Environment variables override the file for machine-specific settings:
-    ``UPLUS_CDP_PORT``, ``UPLUS_BROWSER``, ``UPLUS_PROFILE_DIR``.
+    ``UPLUS_CDP_PORT``, ``UPLUS_BROWSER``, ``UPLUS_PROFILE_DIR``,
+    ``UPLUS_ALLOWED_PATHS`` (file-tool root allow-list).
     """
     raw_path = path or os.environ.get("UPLUS_CONFIG")
     config_file: Optional[Path] = None
@@ -116,18 +153,20 @@ def load_config(path: Optional[str] = None) -> Config:
     auto_launch = data.get("auto_launch_browser", data.get("auto_launch_edge", True))
     cdp_port = data.get("cdp_port", DEFAULT_CDP_PORT)
     browser_raw = data.get("browser", data.get("browser_engine", BROWSER_AUTO))
+    report_dir = str(data.get("report_dir", "reports"))
 
     cfg = Config(
         base_url=str(data.get("base_url", "https://www.eduplus.net")).rstrip("/"),
         nav_timeout_ms=int(data.get("nav_timeout_ms", 30_000)),
         action_timeout_ms=int(data.get("action_timeout_ms", 15_000)),
         deadline_warning_hours=int(data.get("deadline_warning_hours", 72)),
-        report_dir=str(data.get("report_dir", "reports")),
+        report_dir=report_dir,
         auto_launch_browser=bool(auto_launch),
         browser=_normalize_browser(browser_raw),
         cdp_port=int(cdp_port),
         profile_dir=str(data.get("profile_dir", "")),
         include_expired_courses=bool(data.get("include_expired_courses", False)),
+        allowed_io_paths=_allowed_io_paths(data, report_dir),
     )
 
     # Environment overrides for per-machine settings.

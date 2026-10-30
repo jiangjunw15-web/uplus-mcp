@@ -22,6 +22,7 @@ from typing import Any
 from playwright.sync_api import TimeoutError as PWTimeout
 
 from .browser import BrowserSession, UplusError
+from . import utils
 
 # Keep snapshots small enough to be useful in a prompt.
 MAX_NODES = 220
@@ -159,8 +160,10 @@ class BrowseTools:
     def screenshot(self, path: str = "", full_page: bool = False) -> dict:
         page = self.session.page
         if path:
-            data = page.screenshot(path=path, full_page=full_page)
-            return {"path": path, "bytes": len(data)}
+            safe_path = utils.resolve_io_path(
+                path, self.session.config.io_roots)
+            data = page.screenshot(path=str(safe_path), full_page=full_page)
+            return {"path": str(safe_path), "bytes": len(data)}
         data = page.screenshot(full_page=full_page)
         return {
             "media_type": "image/png",
@@ -248,9 +251,11 @@ class BrowseTools:
 
     def upload(self, selector: str, file_path: str) -> dict:
         page = self.session.page
-        page.locator(selector).first.set_input_files(file_path, timeout=15000)
+        safe_path = utils.resolve_io_path(
+            file_path, self.session.config.io_roots, must_exist=True)
+        page.locator(selector).first.set_input_files(str(safe_path), timeout=15000)
         time.sleep(0.8)
-        return {"uploaded": file_path, "selector": selector}
+        return {"uploaded": str(safe_path), "selector": selector}
 
     # ------------------------------------------------------------------ #
     # batched actions (one call, stop on failure or navigation)
@@ -340,7 +345,8 @@ class BrowseTools:
             try:
                 before = page.url
                 if op == "navigate":
-                    page.goto(step["url"], wait_until="domcontentloaded")
+                    target = utils.safe_navigation_url(step["url"])
+                    page.goto(target, wait_until="domcontentloaded")
                     time.sleep(0.4)
                 elif op == "back":
                     page.go_back(wait_until="domcontentloaded")
