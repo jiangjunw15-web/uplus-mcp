@@ -13,6 +13,23 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.3
+
+The Maven publish is now self-diagnosing, and its credentials are written
+explicitly instead of relying on a generated template.
+
+- **The `settings.xml` is written by the workflow** — the `<server>` block
+  that GitHub Packages reads the token from is now created with a known
+  content, so a credential that never lands in the file is no longer
+  possible.
+- **The registry is probed before the deploy** — a read-only request for the
+  POM reports whether the credentials were accepted (401), whether the version
+  is absent (404) or already published (200), so a failed publish says which
+  of the three it was.
+- **The Maven error is readable without opening the raw log** — the failing
+  lines are mirrored as error annotations on the run, next to the log
+  artifact.
+
 ## What's new in 0.7.2
 
 The publish pipeline now works end to end. 0.7.1 created the Release but could

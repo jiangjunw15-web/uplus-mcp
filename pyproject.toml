@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uplus-mcp"
-version = "0.7.2"
+version = "0.7.3"
 description = "MCP server that patrols the QingSoft U+ course platform homework & experiments, answers objective questions automatically, and reports items that need human takeover."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,7 +44,7 @@ dependencies = [
 Homepage = "https://github.com/jiangjunw15-web/uplus-mcp"
 Repository = "https://github.com/jiangjunw15-web/uplus-mcp"
 Issues = "https://github.com/jiangjunw15-web/uplus-mcp/issues"
-Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-072"
+Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-073"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
