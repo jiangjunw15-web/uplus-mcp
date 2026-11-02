@@ -5,40 +5,68 @@ name: Publish package to GitHub Packages
 # Authentication uses the built-in GITHUB_TOKEN (no manual PAT required); the
 # workflow declares packages: write below. The Maven package coordinates are
 # metadata only: they cannot be consumed by pip.
+#
+# Order matters: the GitHub Release is created before the Maven publish, so a
+# Maven problem never costs the release. The publish failure is still surfaced
+# - the run ends red with a named error instead of staying silently green.
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v0.7.0)"
+        required: false
+        type: string
 
 permissions:
   contents: write
   packages: write
 
+# Release runs must not overlap: they all write the same maven-metadata.xml
+# into the registry, and the second writer gets a 409.
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
+    # A manual run without a tag would publish a package version for an
+    # untagged commit, so the job only runs for a real tag.
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # A manual run publishes the tag it was given; a tag push uses the
+          # pushed tag itself.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
 
-      - name: Build Python distributions
+      - name: Install build and test dependencies
         run: |
           python -m pip install --upgrade pip build
-          python -m build
-          rm -rf maven-package/artifacts
-          mkdir -p maven-package/artifacts
-          cp dist/*.whl maven-package/artifacts/
-          cp dist/*.tar.gz maven-package/artifacts/
+          python -m pip install -e ".[dev]"
 
-      - name: Verify Maven version matches pyproject
+      - name: Run tests
+        run: python -m pytest
+
+      - id: build
+        name: Build Python distributions
+        run: python -m build
+
+      - id: verify
+        name: Verify the package versions match the git tag
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           PY_VER="$(python - <<'PY'
@@ -48,8 +76,22 @@ jobs:
           PY
           )"
           MVN_VER="$(grep -m1 -oE '<version>[^<]+</version>' maven-package/pom.xml | head -n1 | sed -E 's#</?version>##g')"
-          echo "pyproject version=$PY_VER ; Maven version=$MVN_VER"
+          echo "pyproject version=$PY_VER ; Maven version=$MVN_VER ; tag=$RELEASE_TAG"
           test "$PY_VER" = "$MVN_VER"
+          # The release assets carry the package version, so the tag has to
+          # agree with it; otherwise v0.8.0 would ship a 0.7.0 wheel.
+          test "${RELEASE_TAG#v}" = "$PY_VER"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Maven
         uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
@@ -57,19 +99,88 @@ jobs:
           java-version: "21"
           distribution: "temurin"
 
-      - name: Publish to GitHub Packages
-        working-directory: maven-package
-        run: mvn --batch-mode deploy
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+      - name: Configure the Maven credentials
+        shell: bash
+        # GitHub Packages reads the token from a <server> block whose id
+        # matches distributionManagement. The file is written here instead of
+        # relying on setup-java's own template, so its content is exact.
+        run: |
+          mkdir -p "$HOME/.m2"
+          cat > "$HOME/.m2/settings.xml" <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${{ github.actor }}</username>
+                <password>${{ secrets.GITHUB_TOKEN }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
-        with:
-          generate_release_notes: true
-          files: |
-            dist/*.whl
-            dist/*.tar.gz
+      - id: probe
+        name: Probe the GitHub Packages registry
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          MVN_VER="$(grep -m1 -oE '<version>[^<]+</version>' maven-package/pom.xml | sed -E 's#</?version>##g')"
+          url="https://maven.pkg.github.com/jiangjunw15-web/uplus-mcp/com/github/jiangjunw15-web/uplus-mcp/${MVN_VER}/uplus-mcp-${MVN_VER}.pom"
+          # The registry answers 302 for an artifact that exists, so the
+          # redirect has to be followed to tell "published" from "absent".
+          code="$(curl -sL -o /dev/null -w '%{http_code}' -u "$ACTOR:$GH_TOKEN" "$url")"
+          echo "Registry probe: GET the ${MVN_VER} POM -> HTTP ${code}" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::Registry probe: GET the ${MVN_VER} POM -> HTTP ${code} (401 = the credentials were rejected, 404 = the version is absent, 200 = it is already published)"
+          echo "version=${MVN_VER}" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "200" ]; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: The version is already in GitHub Packages
+        if: steps.probe.outputs.already_published == 'true'
+        run: echo "::notice::Version ${{ steps.probe.outputs.version }} is already published; the Maven deploy was skipped."
+
+      - id: publish
+        name: Publish to GitHub Packages
+        working-directory: maven-package
+        # Re-running a release must not fail because the version is already
+        # in the registry.
+        if: steps.probe.outputs.already_published != 'true'
+        # The release already exists at this point, so a Maven failure must
+        # not cost it. The step below reports the failure instead.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mvn --batch-mode deploy -Dmaven.wagon.http.pool=false 2>&1 \
+            | tee "${{ runner.temp }}/mvn-deploy.log"
+
+      - name: Upload the Maven publish log
+        if: always() && steps.publish.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mvn-deploy-log
+          path: ${{ runner.temp }}/mvn-deploy.log
+          if-no-files-found: warn
+
+      - name: Report the Maven publish failure
+        if: steps.publish.outcome == 'failure'
+        run: |
+          {
+            echo "### Maven publish failed"
+            echo
+            echo '```'
+            tail -n 40 "${{ runner.temp }}/mvn-deploy.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Mirror the interesting lines as error annotations, so the reason
+          # is readable from the run page and from the API.
+          grep -E '\[ERROR\]|status code|BUILD FAILURE|Could not transfer|Caused by' \
+            "${{ runner.temp }}/mvn-deploy.log" 2>/dev/null | head -n 25 | tr -d '\r' \
+            | while IFS= read -r line; do
+                echo "::error::${line//'%'/'%25'}"
+              done || true
+          echo "::error::Publishing to GitHub Packages failed. The GitHub Release was created, but the repository's Packages panel has no entry - the mvn-deploy-log artifact holds the Maven output."
+          exit 1

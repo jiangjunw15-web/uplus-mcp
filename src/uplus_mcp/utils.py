@@ -81,8 +81,54 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+# Date strings the platform may hand back instead of epoch milliseconds.
+_DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+
+
+def parse_cn_datetime(text: object) -> Optional[int]:
+    """Parse a platform wall-clock string as Beijing time -> epoch ms.
+
+    The platform renders every deadline in Beijing time. A naive ``datetime``
+    would be read in the machine's local zone, so the deadline shown in a
+    report would drift by the UTC offset (8 hours behind, or ahead, on a
+    machine that is not set to UTC+8).
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        return int(parsed.replace(tzinfo=CN_TZ).timestamp() * 1000)
+    return None
+
+
+def to_epoch_ms(value: object) -> Optional[int]:
+    """Coerce a platform timestamp into epoch milliseconds.
+
+    The feed normally returns epoch milliseconds, but a couple of fields fall
+    back to a human-readable date string (``endDate`` / ``startDate``). A
+    non-numeric value must never crash a deadline comparison, it has to
+    degrade to "unknown" (``None``). Date strings are read as Beijing wall
+    clock, matching :data:`CN_TZ`.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return parse_cn_datetime(text)
+
+
 def format_ts(ms: Optional[int]) -> str:
     """Epoch milliseconds -> ``YYYY-MM-DD HH:MM`` in Asia/Shanghai."""
+    ms = to_epoch_ms(ms)
     if not ms:
         return "-"
     dt = datetime.fromtimestamp(ms / 1000, tz=CN_TZ)
@@ -91,6 +137,7 @@ def format_ts(ms: Optional[int]) -> str:
 
 def deadline_label(ms: Optional[int], reference_ms: Optional[int] = None) -> str:
     """Human-friendly countdown or overdue label for a deadline."""
+    ms = to_epoch_ms(ms)
     if not ms:
         return "未设置截止时间"
     reference = reference_ms or now_ms()
@@ -105,6 +152,7 @@ def deadline_label(ms: Optional[int], reference_ms: Optional[int] = None) -> str
 
 
 def is_expired(ms: Optional[int], reference_ms: Optional[int] = None) -> bool:
+    ms = to_epoch_ms(ms)
     if not ms:
         return False
     return ms <= (reference_ms or now_ms())

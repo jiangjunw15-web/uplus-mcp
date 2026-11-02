@@ -8,7 +8,7 @@ compatibility and environment overrides.
 from __future__ import annotations
 
 from uplus_mcp import launcher
-from uplus_mcp.config import PROJECT_ROOT, load_config
+from uplus_mcp.config import EXAMPLE_CONFIG_PATH, load_config
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +105,7 @@ def test_environment_profile_dir_override(monkeypatch, tmp_path):
 
 
 def test_example_config_loads_new_browser_fields():
-    cfg = load_config(str(PROJECT_ROOT / "config" / "courses.example.json"))
+    cfg = load_config(str(EXAMPLE_CONFIG_PATH))
     assert cfg.browser == "auto"
     assert cfg.cdp_port == 9333
     assert len(cfg.courses) == 2

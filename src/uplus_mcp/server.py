@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .browse import BrowseTools
 from .browser import BrowserSession
-from .config import load_config
+from .config import Config, load_config
 from .engine import PatrolEngine
 from .launcher import launch_browser_with_cdp, first_live_port
 from .operator import HomeworkOperator
@@ -45,12 +45,25 @@ _state: dict[str, Any] = {}
 _thread = BrowserThread()
 
 
+def _config() -> Config:
+    """The single config instance every tool shares.
+
+    Loading it twice would let the file tools and the engine disagree about
+    the allowed IO roots (a path refused by one tool and accepted by the
+    other), so the parsed config is cached here and reset by ``uplus_close``.
+    """
+    cfg = _state.get("config")
+    if cfg is None:
+        cfg = load_config()
+        _state["config"] = cfg
+    return cfg
+
+
 def _ensure_engine() -> PatrolEngine:
     """Create the engine on the *worker* thread (Playwright thread affinity)."""
     if not _state.get("ready"):
-        cfg = load_config()
+        cfg = _config()
         session = BrowserSession(cfg)
-        _state["config"] = cfg
         _state["session"] = session
         _state["client"] = PlatformClient(session, cfg)
         _state["operator"] = HomeworkOperator(session, _state["client"], cfg)
@@ -178,20 +191,24 @@ async def uplus_generate_experiment_report(
     (the report folder and the system temp dir by default; extend via
     ``allowed_io_paths`` in config or ``UPLUS_ALLOWED_PATHS``).
     """
-    from pathlib import Path
     from . import utils
     from .report_generator import generate_algorithm_report
-    safe_path = utils.resolve_io_path(
-        output_path, load_config().io_roots)
-    path = generate_algorithm_report(
-        title=title,
-        purpose=purpose,
-        content=content,
-        output_path=safe_path,
-        student_name=student_name,
-        student_id=student_id,
-    )
-    return {"generated": True, "path": str(path), "size": path.stat().st_size}
+
+    def work() -> dict:
+        cfg = _config()
+        safe_path = utils.resolve_io_path(output_path, cfg.io_roots)
+        path = generate_algorithm_report(
+            title=title,
+            purpose=purpose,
+            content=content,
+            output_path=safe_path,
+            student_name=student_name,
+            student_id=student_id,
+        )
+        return {"generated": True, "path": str(path), "size": path.stat().st_size}
+
+    # Building the .docx is blocking work: keep it off the asyncio loop.
+    return await _thread.run_async(work)
 
 
 @mcp.tool()
@@ -206,13 +223,13 @@ async def uplus_submit_experiment_report(
     ``file_path`` must stay inside the configured allowed directories (see
     ``uplus_generate_experiment_report``).
     """
-    from pathlib import Path
     from . import utils
     from .experiment import ExperimentOperator
+
     def work() -> dict:
         _ensure_engine()
         safe_path = utils.resolve_io_path(
-            file_path, _state["engine"].config.io_roots, must_exist=True)
+            file_path, _config().io_roots, must_exist=True)
         op = ExperimentOperator(_state["engine"].config, _state["engine"].session)
         return op.upload_report(course_id, exp_id, stu_exp_id, safe_path)
     return await _thread.run_async(work)
@@ -298,19 +315,20 @@ async def browse_launch_edge(port: int = 0, refresh_profile: bool = False) -> di
     default profile directory. Login cookies survive the copy, so U+ stays
     signed in.
     """
-    cfg = load_config()
-    target_port = port if port > 0 else cfg.cdp_port
-    live = first_live_port(target_port)
-    if live:
-        return {"already_running": True, "port": live}
-    return await _thread.run_async(
-        lambda: launch_browser_with_cdp(
+    def work() -> dict:
+        cfg = _config()
+        target_port = port if port > 0 else cfg.cdp_port
+        live = first_live_port(target_port)
+        if live:
+            return {"already_running": True, "port": live}
+        return launch_browser_with_cdp(
             port=target_port,
             refresh_profile=refresh_profile,
             kind=cfg.browser,
             profile_root=cfg.profile_dir or None,
         )
-    )
+
+    return await _thread.run_async(work)
 
 
 @mcp.tool()

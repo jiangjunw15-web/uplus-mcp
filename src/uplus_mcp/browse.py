@@ -345,7 +345,11 @@ class BrowseTools:
             try:
                 before = page.url
                 if op == "navigate":
-                    target = utils.safe_navigation_url(step["url"])
+                    # Relative paths resolve against the platform origin, the
+                    # same way ``browse_open`` does.
+                    target = utils.safe_navigation_url(
+                        step["url"], base_url=getattr(self.session, "base_url", "")
+                    )
                     page.goto(target, wait_until="domcontentloaded")
                     time.sleep(0.4)
                 elif op == "back":

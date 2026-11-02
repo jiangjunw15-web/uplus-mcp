@@ -8,10 +8,8 @@ attachments. Page truth overrides API status: the button label
 
 from __future__ import annotations
 
-import datetime
 import re
 import time
-from pathlib import Path
 from typing import Optional
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout, Locator
@@ -452,11 +450,7 @@ class HomeworkOperator:
         for raw in raw_list:
             deadline_ms = None
             if raw.get("deadline"):
-                try:
-                    dt = datetime.datetime.strptime(raw["deadline"], "%Y-%m-%d %H:%M")
-                    deadline_ms = int(dt.timestamp() * 1000)
-                except ValueError:
-                    deadline_ms = None
+                deadline_ms = utils.parse_cn_datetime(raw["deadline"])
             experiments.append(
                 Experiment(
                     name=raw["name"],

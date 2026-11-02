@@ -13,6 +13,57 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.1
+
+A code-review release: an audit of the 0.7.0 code found deadline arithmetic
+that depended on the machine's timezone, a hostname check that matched a
+substring instead of an origin, and a release pipeline whose Maven publish
+could never authenticate. All are fixed here; no tool contract changed.
+
+- **Deadlines are read as Beijing time** — the experiment and homework cards
+  parsed the page's wall clock with a naive `datetime`, so `.timestamp()`
+  applied the *machine's* UTC offset. On a machine that is not set to UTC+8
+  every deadline in the patrol report drifted by that offset, and the
+  "deadline approaching" warning fired at the wrong time. Parsing is pinned
+  to `Asia/Shanghai` now (`utils.parse_cn_datetime`).
+- **A non-numeric timestamp no longer aborts the patrol** — the course feed
+  can answer with a date string (`endDate` / `startDate`); comparing it with
+  an integer raised `TypeError` and killed the whole run. Values are coerced
+  (`utils.to_epoch_ms`) and degrade to "unknown".
+- **The API read only runs on the platform origin** — the origin check was a
+  substring test (`host not in page.url`), so a page on
+  `www.eduplus.net.evil.example` passed it. The parsed host is compared now.
+- **Every experiment is named** — the detail page's title was matched only for
+  `实验一` / `实验二` (with an operator-precedence bug that also matched
+  "实验一" anywhere in a line), so `实验三` … `实验九` came back nameless.
+- **One config for all tools** — the report tools loaded their own config
+  while the engine used another, so the allowed-IO allow-list could disagree
+  between the two. The config is parsed once and shared, and report
+  generation moved onto the worker thread instead of blocking the event loop.
+- **The generated report uses 宋体** — `font.name` only writes the Latin face;
+  Word reads Chinese glyphs from `w:eastAsia`, which stayed on the theme
+  default.
+- **The release pipeline authenticates and fails loudly** — `mvn deploy` had
+  no `settings.xml`, so the Maven publish could only ever return 401, and
+  `continue-on-error` hid it. The publish now gets its credentials from
+  `setup-java`, the test suite runs before the build, the git tag is checked
+  against the package versions, and a publish failure ends the run red with a
+  named error while the GitHub Release is still created.
+- **An installed wheel no longer writes into the Python library** —
+  `PROJECT_ROOT` was derived from `parents[2]`, which in a wheel install is
+  the directory holding `site-packages`: reports landed there (unwritable on
+  a system-wide install) and the allow-list refused the user's own project.
+  Relative paths now resolve against the working directory, or `UPLUS_HOME`.
+- **The example config ships inside the package** —
+  `uplus_mcp/courses.example.json` is packaged with the wheel, so a wheel
+  install can still offer it.
+- **Personal coursework is ignored** — the generated reports carry the
+  student's name and student number; `*.doc`, `*.docx`, `*实验*.c` and
+  `gen_exp*.py` are now ignored, so a GitHub Desktop "Commit all" cannot
+  publish them.
+- **42 new regression tests** (`tests/test_code_review_fixes.py`).
+  Suite total: 165 tests.
+
 ## What's new in 0.7.0
 
 A security-hardening release: an audit of the 0.6.0 code found that a page the
@@ -208,16 +259,26 @@ python3 -m venv .venv
 
 ### 2. Configure personal courses (gitignored, optional)
 
-**Windows PowerShell:**
+The example config ships inside the package (`uplus_mcp/courses.example.json`).
+Copy it to `config/courses.json` in your project folder, then fill in your
+actual course ids.
+
+**Windows PowerShell (source checkout):**
 
 ```powershell
-Copy-Item config\courses.example.json config\courses.json
+Copy-Item src\uplus_mcp\courses.example.json config\courses.json
 ```
 
-**macOS / Linux:**
+**macOS / Linux (source checkout):**
 
 ```bash
-cp config/courses.example.json config/courses.json
+cp src/uplus_mcp/courses.example.json config/courses.json
+```
+
+Installed from a wheel? The example sits next to the installed package:
+
+```bash
+python -c "import pathlib,uplus_mcp;print(pathlib.Path(uplus_mcp.__file__).parent/'courses.example.json')"
 ```
 
 Edit `config/courses.json` with your actual `courseId` values and local paths.
@@ -331,8 +392,14 @@ Scheduler, macOS `launchd`, or Linux cron (e.g. daily 21:30).
 
 A GitHub Actions workflow publishes a metadata-only Apache Maven package to this
 repository's Packages registry on every `v*` tag push (and can be run manually
-from the Actions tab). The workflow uses the built-in `GITHUB_TOKEN`, so no
-personal access token is required to publish.
+from the Actions tab with an explicit tag). The workflow uses the built-in
+`GITHUB_TOKEN`, so no personal access token is required to publish.
+
+The workflow runs the test suite before it builds, checks that the git tag
+matches the version in `pyproject.toml` and `maven-package/pom.xml`, creates
+the GitHub Release with the wheel and sdist attached, and only then publishes
+the Maven package. A Maven failure therefore never costs the release, but it
+does end the run red with a named error instead of passing silently.
 
 ```
 maven-package/
@@ -373,9 +440,10 @@ pip install -e ".[dev]"
 pytest
 ```
 
-- 73 unit tests cover model parsing, config loading, answer normalization, page
+- 165 unit tests cover model parsing, config loading, answer normalization, page
   state rules, experiment classification, the two-mode login flow, the batch
-  action receipt, cross-platform browser detection and config compatibility.
+  action receipt, cross-platform browser detection, config compatibility and
+  the security hardening of 0.7.0 / 0.7.1.
 - Browser and platform interactions are exercised against a real session in
   read-only patrol mode; write actions require the authorized account and an
   active course deadline.

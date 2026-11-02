@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uplus-mcp"
-version = "0.7.0"
+version = "0.7.1"
 description = "MCP server that patrols the QingSoft U+ course platform homework & experiments, answers objective questions automatically, and reports items that need human takeover."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,7 +44,7 @@ dependencies = [
 Homepage = "https://github.com/jiangjunw15-web/uplus-mcp"
 Repository = "https://github.com/jiangjunw15-web/uplus-mcp"
 Issues = "https://github.com/jiangjunw15-web/uplus-mcp/issues"
-Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-050"
+Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-071"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -57,7 +57,7 @@ uplus-patrol = "uplus_mcp.daily_patrol:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-uplus_mcp = ["py.typed"]
+uplus_mcp = ["py.typed", "courses.example.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

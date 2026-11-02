@@ -12,6 +12,7 @@ from typing import Any, Optional
 from .browser import BrowserSession
 from .config import Config
 from .models import Course, HomeworkTask, Question
+from . import utils
 
 
 def _unpack_list(payload: Any) -> list[dict]:
@@ -67,8 +68,8 @@ class PlatformClient:
                     name=str(raw.get("name") or (preset.name if preset else "")),
                     teacher=str(raw.get("teacherName") or raw.get("creator")
                                or (preset.teacher if preset else "")),
-                    start_ms=raw.get("startTime") or raw.get("startDate"),
-                    end_ms=raw.get("endTime") or raw.get("endDate"),
+                    start_ms=utils.to_epoch_ms(raw.get("startTime") or raw.get("startDate")),
+                    end_ms=utils.to_epoch_ms(raw.get("endTime") or raw.get("endDate")),
                 )
             )
         # Keep configured courses even when the study feed omits them.

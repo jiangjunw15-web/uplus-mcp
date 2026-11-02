@@ -172,7 +172,15 @@ class BrowserSession:
         # Ensure the fetch runs inside the platform origin so cookies and CORS
         # apply the same as a human browsing session.
         host = urlparse(self.base_url).netloc
-        if host not in page.url:
+        # Compare the parsed host, not a substring of the whole URL: a page on
+        # "www.eduplus.net.evil.example" contains the platform host as text but
+        # is a different origin, and the token/cookie read below must happen
+        # on the platform origin only.
+        try:
+            current_host = urlparse(page.url).netloc
+        except Exception:  # noqa: BLE001 - closed page / mid-navigation
+            current_host = ""
+        if current_host != host:
             self.open("/workbench/index/school")
             page = self.page
         # A stale tab may carry no token yet; land on the workbench once before

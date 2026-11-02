@@ -10,7 +10,7 @@ Submission is a single file upload (usually .docx 实验报告).
 
 from __future__ import annotations
 
-import datetime
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +21,28 @@ from playwright.sync_api import Page
 from .browser import BrowserSession, UplusError, AuthExpiredError
 from .config import Config
 from .models import Course
+from . import utils
+
+
+# The experiment heading is ``实验N <topic>`` where N is a Chinese or an
+# Arabic numeral. Matching only 实验一/实验二 left every later experiment
+# (实验三 … 实验九) nameless.
+_EXPERIMENT_NAME_RE = re.compile(r"^实验\s*[一二三四五六七八九十0-9]")
+
+
+def extract_experiment_name(text: str) -> str:
+    """First title line of an experiment detail page."""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped and _EXPERIMENT_NAME_RE.match(stripped):
+            return stripped
+    # Fallback kept from the earlier heuristic: a topic line that carries no
+    # 实验 prefix.
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if "进程" in stripped and len(stripped) <= 60:
+            return stripped
+    return ""
 
 
 @dataclass
@@ -74,12 +96,7 @@ class ExperimentOperator:
         text = page.inner_text("body")
 
         # basic fields
-        name = ""
-        m = text.split("\n")
-        for i, line in enumerate(m):
-            if line.strip().startswith("实验") and "进程" in line or "实验一" in line or "实验二" in line:
-                name = line.strip()
-                break
+        name = extract_experiment_name(text)
 
         detail = ExperimentDetail(
             course_id=course_id, exp_id=exp_id, stu_exp_id=stu_exp_id,
@@ -93,7 +110,6 @@ class ExperimentOperator:
             detail.status = "未提交"
 
         # environment / material / deadline
-        import re
         m_env = re.search(r"环境[：:]\s*([^\n]+)", text)
         if m_env:
             detail.environment = m_env.group(1).strip()
@@ -103,11 +119,7 @@ class ExperimentOperator:
         m_dl = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
         if m_dl:
             detail.deadline = m_dl.group(1)
-            try:
-                dt = datetime.datetime.strptime(detail.deadline, "%Y-%m-%d %H:%M")
-                detail.deadline_ms = int(dt.timestamp() * 1000)
-            except ValueError:
-                pass
+            detail.deadline_ms = utils.parse_cn_datetime(detail.deadline)
 
         # submitted files
         m_files = re.findall(r"实验报告[：:]\s*([^\n]+?)(?=下载|撤回|$)", text)
@@ -208,7 +220,6 @@ class ExperimentOperator:
     def upload_report(self, course_id: str, exp_id: str, stu_exp_id: str,
                       file_path: Path) -> dict:
         """Upload a .docx report file to the experiment submission page."""
-        from . import utils
         safe_path = utils.resolve_io_path(
             file_path, self.config.io_roots, must_exist=True)
         page = self.open_detail(course_id, exp_id, stu_exp_id)

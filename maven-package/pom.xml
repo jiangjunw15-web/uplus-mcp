@@ -8,7 +8,7 @@
   repository root are attached as supplementary artifacts; the Maven coordinates
   are metadata only and cannot be consumed by pip.
 
-  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.7.0
+  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.7.1
   Keep <version> in sync with version in ../pyproject.toml at every release.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -18,7 +18,7 @@
 
   <groupId>com.github.jiangjunw15-web</groupId>
   <artifactId>uplus-mcp</artifactId>
-  <version>0.7.0</version>
+  <version>0.7.1</version>
   <packaging>pom</packaging>
 
   <name>uplus-mcp</name>
@@ -58,38 +58,4 @@
     </repository>
   </distributionManagement>
 
-  <build>
-    <plugins>
-      <!-- Attach the Python wheel and sdist built in the repository root as
-           supplementary artifacts for this metadata-only Maven package. -->
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>build-helper-maven-plugin</artifactId>
-        <version>3.5.0</version>
-        <executions>
-          <execution>
-            <id>attach-python-distributions</id>
-            <phase>package</phase>
-            <goals>
-              <goal>attach-artifact</goal>
-            </goals>
-            <configuration>
-              <artifacts>
-                <artifact>
-                  <file>artifacts/uplus_mcp-${project.version}-py3-none-any.whl</file>
-                  <type>whl</type>
-                  <classifier>wheel</classifier>
-                </artifact>
-                <artifact>
-                  <file>artifacts/uplus_mcp-${project.version}.tar.gz</file>
-                  <type>tar.gz</type>
-                  <classifier>sdist</classifier>
-                </artifact>
-              </artifacts>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-    </plugins>
-  </build>
 </project>

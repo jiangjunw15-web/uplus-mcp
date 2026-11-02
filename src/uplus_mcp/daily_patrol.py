@@ -44,6 +44,9 @@ def main() -> int:
     except UplusError as exc:
         print(f"⚠️ {exc}", file=sys.stderr)
         return 3
+    except Exception as exc:  # noqa: BLE001 - CLI entrypoint: no raw traceback
+        print(f"⚠️ 初始化失败：{exc}", file=sys.stderr)
+        return 3
     try:
         login = engine.check_login()
         if not login["logged_in"]:

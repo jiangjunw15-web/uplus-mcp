@@ -26,6 +26,14 @@ reports/*.json
 .env
 .env.local
 
+# Personal coursework: the generated experiment reports carry the student's
+# name and student number, and the assignment sources are private work. Keep
+# them local so a GitHub Desktop "Commit all" cannot publish them.
+*.doc
+*.docx
+*实验*.c
+gen_exp*.py
+
 # OS / editor
 Thumbs.db
 .DS_Store

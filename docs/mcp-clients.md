@@ -34,19 +34,22 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
 
-复制个人配置（gitignored，不会进入仓库）：
+复制个人配置（gitignored，不会进入仓库）。示例配置随包发布，位于 `uplus_mcp/courses.example.json`：
 
-**Windows：**
+**Windows（源码安装）：**
 
 ```powershell
-Copy-Item config\courses.example.json config\courses.json
+Copy-Item src\uplus_mcp\courses.example.json config\courses.json
 ```
 
-**macOS / Linux：**
+**macOS / Linux（源码安装）：**
 
 ```bash
-cp config/courses.example.json config/courses.json
+cp src/uplus_mcp/courses.example.json config/courses.json
 ```
+
+**从 wheel 安装：**示例文件在已安装的包目录内，可用
+`python -c "import pathlib,uplus_mcp;print(pathlib.Path(uplus_mcp.__file__).parent/'courses.example.json')"` 定位。
 
 ### 登录（两种方式，调用 `uplus_login` 前先问用户选哪种）
 

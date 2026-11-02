@@ -6,6 +6,27 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+
+#: Chinese face used for the report body.
+CN_FONT = "宋体"
+
+
+def _apply_east_asian_font(doc: Document, font_name: str = CN_FONT) -> None:
+    """Pin the East Asian font of the styles the report uses.
+
+    ``style.font.name`` only writes ``w:ascii``/``w:hAnsi``; Word picks the
+    face for Chinese glyphs from ``w:eastAsia``, which otherwise stays on the
+    theme default (等线 on current Office) and ignores the requested 宋体.
+    """
+    for style_name in ("Normal", "Heading 1", "Heading 2", "Heading 3"):
+        try:
+            style = doc.styles[style_name]
+        except KeyError:
+            continue
+        rpr = style.element.get_or_add_rPr()
+        rfonts = rpr.get_or_add_rFonts()
+        rfonts.set(qn("w:eastAsia"), font_name)
 
 
 def generate_report(
@@ -37,8 +58,9 @@ def generate_report(
 
     # set default font
     style = doc.styles['Normal']
-    style.font.name = '宋体'
+    style.font.name = CN_FONT
     style.font.size = Pt(12)
+    _apply_east_asian_font(doc)
 
     # title
     heading = doc.add_heading(title, level=1)

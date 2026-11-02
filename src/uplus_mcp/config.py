@@ -1,8 +1,9 @@
 """Runtime configuration for the U+ MCP server.
 
-Configuration file layout mirrors ``config/courses.example.json``. Missing files
-fall back to the bundled default course list so the server can start in read-only
-mode without a personal config.
+Configuration file layout mirrors the bundled ``courses.example.json`` (shipped
+inside the package as ``uplus_mcp/courses.example.json``). Missing files fall
+back to the default course list so the server can start in read-only mode
+without a personal config.
 
 All machine-specific values (debug port, browser engine, dedicated profile
 directory) resolve through config file → environment variable → safe default, so
@@ -22,9 +23,31 @@ from .models import Course
 
 
 # src/uplus_mcp/config.py -> project root = parents[2]
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+def _source_root() -> Path:
+    """Root of a source checkout (``src/uplus_mcp/config.py`` -> ``...``)."""
+    return Path(__file__).resolve().parents[2]
+
+def _data_root() -> Path:
+    """Directory that relative report / IO paths resolve against.
+
+    A source checkout keeps them next to the project. An installed wheel has
+    no project root: ``parents[2]`` there points into the Python library
+    directory, which is not writable on a system-wide install and hides the
+    patrol reports from the user. ``UPLUS_HOME`` overrides both.
+    """
+    env = os.environ.get("UPLUS_HOME")
+    if env and env.strip():
+        return Path(env).expanduser()
+    source_root = _source_root()
+    if (source_root / "pyproject.toml").is_file():
+        return source_root
+    return Path.cwd()
+
+
+PROJECT_ROOT = _data_root()
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "courses.json"
-EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "courses.example.json"
+# The example ships inside the package, so an installed wheel can offer it too.
+EXAMPLE_CONFIG_PATH = Path(__file__).resolve().parent / "courses.example.json"
 
 # Supported browser engines for CDP attach / auto launch.
 BROWSER_AUTO = "auto"
@@ -76,8 +99,8 @@ class Config:
 
     # ---- path resolution helpers ------------------------------------ #
     def resolve(self, raw: str) -> Path:
-        p = Path(raw)
-        return p if p.is_absolute() else (PROJECT_ROOT / p)
+        p = Path(raw).expanduser()
+        return p if p.is_absolute() else (_data_root() / p)
 
     @property
     def report_folder(self) -> Path:
@@ -138,9 +161,9 @@ def load_config(path: Optional[str] = None) -> Config:
     raw_path = path or os.environ.get("UPLUS_CONFIG")
     config_file: Optional[Path] = None
     if raw_path:
-        config_file = Path(raw_path)
+        config_file = Path(raw_path).expanduser()
         if not config_file.is_absolute():
-            config_file = PROJECT_ROOT / config_file
+            config_file = _data_root() / config_file
     elif DEFAULT_CONFIG_PATH.exists():
         config_file = DEFAULT_CONFIG_PATH
 

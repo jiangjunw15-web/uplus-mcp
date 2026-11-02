@@ -49,6 +49,10 @@ def parse_model_answers(model_payload: str | dict | None) -> dict[str, str]:
             data = json.loads(fence)
         except json.JSONDecodeError:
             return {}
+    # A model may answer with a bare JSON array or a scalar; only an object
+    # carries the answer map, everything else is "no answers".
+    if not isinstance(data, dict):
+        return {}
     answers = data.get("answers", data)
     if not isinstance(answers, dict):
         return {}

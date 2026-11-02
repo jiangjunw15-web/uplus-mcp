@@ -225,7 +225,7 @@ class HomeworkTask:
             homework_id=str(raw.get("homeworkId", "")),
             course_id=course_id,
             name=str(dto.get("name") or "未命名作业"),
-            end_ms=raw.get("endTime"),
+            end_ms=utils.to_epoch_ms(raw.get("endTime")),
             submit_task=str(raw.get("submitTask")) if raw.get("submitTask") is not None else None,
             review_task=str(raw.get("reviewTask")) if raw.get("reviewTask") is not None else None,
             sub_status=str(dto.get("subStatus")) if dto.get("subStatus") is not None else None,
