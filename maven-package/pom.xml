@@ -4,11 +4,16 @@
 
   This project does not compile Java code. It exists only to register the Python
   package in the GitHub Packages Apache Maven registry so the repository's
-  Packages panel shows a published entry. The wheel and sdist built from the
-  repository root are attached as supplementary artifacts; the Maven coordinates
-  are metadata only and cannot be consumed by pip.
+  Packages panel shows a published entry. The Maven coordinates are metadata
+  only and cannot be consumed by pip: the installable distributions are the
+  wheel and the sdist attached to the GitHub Release.
 
-  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.7.1
+  Only the POM itself is published. The GitHub Packages Maven registry
+  rejects artifacts whose extension it does not know, so attaching the
+  wheel and the sdist to this POM made the whole deploy fail with 400 and
+  left the Packages panel empty - the one thing this project exists for.
+
+  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.7.2
   Keep <version> in sync with version in ../pyproject.toml at every release.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -18,11 +23,11 @@
 
   <groupId>com.github.jiangjunw15-web</groupId>
   <artifactId>uplus-mcp</artifactId>
-  <version>0.7.1</version>
+  <version>0.7.2</version>
   <packaging>pom</packaging>
 
   <name>uplus-mcp</name>
-  <description>Python MCP server for the QingSoft U+ platform; wheel and sdist attached as supplementary files to register the package in GitHub Packages.</description>
+  <description>Python MCP server for the QingSoft U+ platform; a metadata-only entry that registers the project in the GitHub Packages Maven registry. The installable wheel and sdist live in the GitHub Release.</description>
   <url>https://github.com/jiangjunw15-web/uplus-mcp</url>
 
   <licenses>
@@ -57,5 +62,4 @@
       <url>https://maven.pkg.github.com/jiangjunw15-web/uplus-mcp</url>
     </repository>
   </distributionManagement>
-
 </project>

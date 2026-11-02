@@ -13,6 +13,23 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.2
+
+The publish pipeline now works end to end. 0.7.1 created the Release but could
+not register the Maven package, because the POM attached the wheel and the
+sdist to itself and the GitHub Packages Maven registry rejects artifact
+extensions it does not know - the deploy failed with 400 and the Packages
+panel stayed empty, which is the one thing that entry exists for.
+
+- **The Maven package publishes only its POM** — the wheel and the sdist are
+  no longer attached to it, so the deploy uploads the one file the registry
+  accepts. The installable distributions remain the Release assets, which is
+  where pip users get them anyway.
+- **A publish failure now explains itself** — the Maven output is captured
+  into a `mvn-deploy-log` artifact and the tail of it is written to the run
+  summary, so the next failure says why instead of only saying that it
+  happened.
+
 ## What's new in 0.7.1
 
 A code-review release: an audit of the 0.7.0 code found deadline arithmetic
