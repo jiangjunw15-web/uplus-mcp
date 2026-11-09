@@ -207,6 +207,31 @@ class PatrolEngine:
             "brief": solver.build_answer_brief(task.name, questions),
         }
 
+    def audit_homework(self, task_id: str, course_id: str) -> dict:
+        """Read-only completeness audit for one homework.
+
+        Reads every question's student-side detail and reports which objective
+        questions carry no answer. Nothing is withdrawn, filled or submitted, so
+        it is safe to run against an already submitted homework.
+        """
+        task = self.resolve_task(task_id, course_id)
+        questions = [
+            self.client.question_detail(q.question_id)
+            for q in self.client.list_questions(task.homework_id)
+        ]
+        return {
+            "course_id": course_id,
+            "course_name": self.course_name(course_id),
+            "task_id": task.task_id,
+            "homework_id": task.homework_id,
+            "name": task.name,
+            "status": task.status.value,
+            "status_label": report_mod.STATUS_LABEL[task.status],
+            "deadline": utils.deadline_label(task.end_ms),
+            "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
+            "audit": report_mod.audit_questions(questions),
+        }
+
     # ------------------------------------------------------------------ #
     # write tools
     # ------------------------------------------------------------------ #
@@ -227,10 +252,12 @@ class PatrolEngine:
     # ------------------------------------------------------------------ #
     # patrol
     # ------------------------------------------------------------------ #
-    def patrol(self, *, auto_answer: bool = False, submit: bool = False) -> dict:
+    def patrol(self, *, auto_answer: bool = False, submit: bool = False,
+               audit: bool = False) -> dict:
         snapshot = report_mod.PatrolReport(generated_at_ms=utils.now_ms())
         answer_briefs: list[dict] = []
         auto_submissions: list[dict] = []
+        incomplete: list[dict] = []
 
         for course in self._iter_courses():
             for task in self.client.list_homeworks(course.id):
@@ -251,6 +278,57 @@ class PatrolEngine:
                             "detail": f"页面状态读取失败：{exc}",
                         })
                 report_mod.add_homework(snapshot, course, task)
+
+                if audit and task.status in (
+                    HomeworkStatus.SUBMITTED_PENDING,
+                    HomeworkStatus.SUBMITTED_GRADED,
+                ):
+                    try:
+                        questions = [
+                            self.client.question_detail(q.question_id)
+                            for q in self.client.list_questions(task.homework_id)
+                        ]
+                        audit_result = report_mod.audit_questions(questions)
+                    except AuthExpiredError:
+                        raise
+                    except Exception as exc:  # keep the patrol alive
+                        snapshot.takeover.append({
+                            "course": course.name, "title": task.name,
+                            "detail": f"提交完整性核查失败：{exc}",
+                        })
+                    else:
+                        if not audit_result["complete"]:
+                            orders = "、".join(
+                                str(m["order"]) for m in audit_result["missing"][:10]
+                            )
+                            tail = "…" if len(audit_result["missing"]) > 10 else ""
+                            hint = ("，可撤回后补齐再提交"
+                                    if task.status is HomeworkStatus.SUBMITTED_PENDING
+                                    else "，已出分无法撤回")
+                            snapshot.takeover.append({
+                                "course": course.name, "title": task.name,
+                                "detail": (f"已提交但漏答 {len(audit_result['missing'])} 题"
+                                           f"（题号 {orders}{tail}）{hint}"),
+                                "deadline": utils.deadline_label(task.end_ms),
+                            })
+                            incomplete.append({
+                                "course_id": course.id,
+                                "course_name": course.name,
+                                "task_id": task.task_id,
+                                "homework_id": task.homework_id,
+                                "name": task.name,
+                                "status": task.status.value,
+                                "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
+                                "missing": audit_result["missing"],
+                                "audit": audit_result,
+                            })
+                            snapshot.incomplete.append({
+                                "course": course.name,
+                                "name": task.name,
+                                "missing_count": len(audit_result["missing"]),
+                                "missing_orders": [m["order"] for m in audit_result["missing"]],
+                                "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
+                            })
 
                 if task.status is HomeworkStatus.NOT_SUBMITTED and not task.is_expired():
                     questions = [
@@ -355,6 +433,7 @@ class PatrolEngine:
             },
             "answer_briefs": answer_briefs,
             "auto_submissions": auto_submissions,
+            "incomplete_homeworks": incomplete,
             "takeover": snapshot.takeover,
             "report_path": str(report_path),
         }

@@ -13,6 +13,39 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.4
+
+A completeness audit for already submitted homework: you can now tell whether a
+handed-in homework left objective questions blank **without withdrawing it**,
+and only a real gap leads to "withdraw → fill → resubmit". The audit itself is
+read-only against the platform.
+
+- **New tool `uplus_audit_homework(task_id, course_id)`** — every question is
+  read from the student-side detail, and a question counts as answered when
+  `userAnswer` or `hwAnswerId` is non-empty (the same rule as
+  `models._is_answered()`). Nothing is withdrawn, filled or submitted, so
+  pending and already-graded homework can be audited safely. Short-answer,
+  programming and attachment items are counted separately and never make a
+  homework "incomplete".
+- **Patrol can carry the audit** — `uplus_patrol(audit=True)` and
+  `uplus-patrol --audit` check every submitted homework while patrolling.
+  Homes with gaps land in the report and in the takeover list, labelled
+  "can withdraw and fill" or "graded, cannot withdraw", with the question
+  numbers truncated after ten.
+- **New report section "提交完整性核查"** — course, homework, number of blank
+  questions, their question numbers, and whether the homework is still
+  withdrawable, in one table.
+- **The version number is finally consistent** — `__version__` still said 0.7.0
+  because 0.7.1–0.7.3 only bumped `pyproject.toml`; everything is 0.7.4 now,
+  `maven-package/pom.xml` included.
+- **A time-bomb test is fixed** — `test_course_dates_from_the_study_feed_are_numeric`
+  hard-coded a `2026-11-05` deadline, so `is_expired()` returned `True` once that
+  date passed and the test could only fail. It verifies date parsing, not the
+  clock, so the deadline is now built as "now + 365 days".
+- **7 new tests** (`tests/test_audit.py`) cover gap detection, subjective items
+  excluded, the `hwAnswerId` path, report rendering and the graded case.
+  Total: 172.
+
 ## What's new in 0.7.3
 
 The Maven publish is now self-diagnosing, and its credentials are written
@@ -228,6 +261,9 @@ human.
   filled and submitted after the client model returns a normalized answer map.
 - Patrol report in Markdown: submitted / pending / outstanding homework,
   experiments, and a takeover list for manual work.
+- Completeness audit: `uplus_audit_homework` reports, read-only, which objective
+  questions of an already submitted homework are still blank; turn it on for the
+  whole patrol with `audit=True`.
 - Works with any MCP-compatible client: Claude Desktop, Cursor, VS Code MCP,
   Doubao agent, DSH and others.
 - Unattended CLI for nightly scheduled patrol; it never answers or submits on its

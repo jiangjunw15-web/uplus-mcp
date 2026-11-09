@@ -267,6 +267,19 @@ async def uplus_answer_homework(
 
 
 @mcp.tool()
+async def uplus_audit_homework(task_id: str, course_id: str) -> dict:
+    """Read-only completeness audit for one homework (no withdraw, no submit).
+
+    Every question is read from the student-side detail, so an already
+    submitted homework can be audited safely. The result lists which objective
+    questions carry no answer; subjective / programming / attachment items are
+    counted separately and never make the homework "incomplete". Fix a gap by
+    withdrawing (if ``withdrawable``), then ``uplus_answer_homework``.
+    """
+    return await _thread.run_async(_dispatch("audit_homework", task_id, course_id))
+
+
+@mcp.tool()
 async def uplus_upload_attachment(task_id: str, course_id: str, file_path: str) -> dict:
     """Attach a local file (PPT/PDF/ZIP) to a homework that requires an upload."""
     return await _thread.run_async(
@@ -275,15 +288,20 @@ async def uplus_upload_attachment(task_id: str, course_id: str, file_path: str) 
 
 
 @mcp.tool()
-async def uplus_patrol(auto_answer: bool = False, submit: bool = False) -> dict:
+async def uplus_patrol(auto_answer: bool = False, submit: bool = False,
+                       audit: bool = False) -> dict:
     """Patrol every configured course and write a Markdown report.
 
     Lists homework and experiments, separates submitted / pending / outstanding /
     takeover items, and collects answer briefs for outstanding objective
     questions. ``submit=True`` only submits homework that received valid answers;
     subjective, programming and file items are never auto-submitted.
+    ``audit=True`` additionally re-checks already submitted homework for
+    unanswered objective questions (read-only, nothing is withdrawn).
     """
-    return await _thread.run_async(_dispatch("patrol", auto_answer=auto_answer, submit=submit))
+    return await _thread.run_async(
+        _dispatch("patrol", auto_answer=auto_answer, submit=submit, audit=audit)
+    )
 
 
 @mcp.tool()

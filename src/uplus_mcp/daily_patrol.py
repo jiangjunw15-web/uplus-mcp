@@ -37,6 +37,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="U+ 巡检（附加到已登录的浏览器，不自动提交）")
     parser.add_argument("--config", default="", help="配置文件路径")
     parser.add_argument("--brief", default="", help="待答题目 brief JSON 保存路径")
+    parser.add_argument("--audit", action="store_true",
+                        help="额外核查已提交作业是否漏题（只读，不撤回）")
     args = parser.parse_args()
 
     try:
@@ -52,7 +54,7 @@ def main() -> int:
         if not login["logged_in"]:
             print("⚠️ 登录态无效：请在浏览器中登录 eduplus.net 后重试。", file=sys.stderr)
             return 2
-        result = engine.patrol(auto_answer=False, submit=False)
+        result = engine.patrol(auto_answer=False, submit=False, audit=args.audit)
         summary = result["summary"]
         print("=== 巡检摘要 ===")
         print(f"作业已提交 {summary['homework_submitted']}（待批改 {summary['homework_pending']}），"
@@ -67,6 +69,13 @@ def main() -> int:
             for item in result["takeover"]:
                 print(f"- [{item.get('course')}] {item.get('title')}：{item.get('detail')}"
                       + (f"（{item.get('deadline')}）" if item.get("deadline") else ""))
+        if result.get("incomplete_homeworks"):
+            print("\n=== 已提交但漏题 ===")
+            for item in result["incomplete_homeworks"]:
+                orders = "、".join(str(n["order"]) for n in item["missing"][:10])
+                hint = "，可撤回后补齐" if item["withdrawable"] else "，已出分无法撤回"
+                print(f"- [{item['course_name']}] {item['name']}：漏 {len(item['missing'])} 题"
+                      f"（题号 {orders}）{hint}")
         if result["answer_briefs"]:
             brief_path = args.brief or str(Path(result["report_path"]).with_suffix(".brief.json"))
             Path(brief_path).write_text(

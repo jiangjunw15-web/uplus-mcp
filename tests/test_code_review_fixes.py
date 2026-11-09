@@ -87,17 +87,25 @@ def test_homework_task_end_ms_is_always_numeric():
 
 
 def test_course_dates_from_the_study_feed_are_numeric():
+    import datetime
+
     from uplus_mcp.config import Config
     from uplus_mcp.platform import PlatformClient
+    from uplus_mcp import utils
+
+    # Use a date far in the future: this test checks parsing, not the clock.
+    future = datetime.datetime.now(tz=utils.CN_TZ) + datetime.timedelta(days=365)
+    stamp = future.strftime("%Y-%m-%d %H:%M")
 
     class _FakeSession:
         def api_get(self, path, *, retries=1):
-            return {"data": [{"id": "c1", "name": "算法",
-                              "endTime": "2026-11-05 23:59"}]}
+            return {"data": [{"id": "c1", "name": "算法", "endTime": stamp}]}
 
     client = PlatformClient(_FakeSession(), Config())
     course = client.list_my_courses()[0]
-    assert course.end_ms == _beijing_epoch(2026, 11, 5, 23, 59)
+    assert course.end_ms == _beijing_epoch(
+        future.year, future.month, future.day, future.hour, future.minute
+    )
     # The patrol filters on this value; it must not raise.
     assert utils.is_expired(course.end_ms) is False
 

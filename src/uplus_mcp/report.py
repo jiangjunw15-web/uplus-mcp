@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
-from .models import Course, Experiment, HomeworkStatus, HomeworkTask
+from .models import Course, Experiment, HomeworkStatus, HomeworkTask, Question
 from . import utils
 
 
@@ -43,6 +43,7 @@ class PatrolReport:
     rows: list[HomeworkRow] = field(default_factory=list)
     experiments: list[ExperimentRow] = field(default_factory=list)
     takeover: list[dict] = field(default_factory=list)
+    incomplete: list[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------ #
     # statistics
@@ -86,6 +87,33 @@ def add_homework(report: PatrolReport, course: Course, task: HomeworkTask, *, no
             note=note,
         )
     )
+
+
+def audit_questions(questions: list[Question]) -> dict:
+    """Read-only completeness check over one homework's questions.
+
+    A question counts as answered when the student-side detail carries a
+    non-empty ``userAnswer`` or a ``hwAnswerId`` (see ``models._is_answered``),
+    so the audit needs no page interaction and never withdraws a submission.
+    Subjective / programming / attachment items are reported separately and do
+    not make the homework "incomplete".
+    """
+    objective = [q for q in questions if q.auto_answerable]
+    missing = [
+        q for q in objective
+        if not (q.my_answer or q.answered or q.hw_answer_id)
+    ]
+    return {
+        "total": len(questions),
+        "objective": len(objective),
+        "subjective": len(questions) - len(objective),
+        "answered": len(objective) - len(missing),
+        "missing": [
+            {"order": q.order, "type": q.type.label, "stem": q.stem[:80]}
+            for q in missing
+        ],
+        "complete": not missing,
+    }
 
 
 def _deadline_text(ms: Optional[int], now: int, warning_hours: int, outstanding: bool) -> str:
@@ -151,6 +179,23 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
             lines.append(
                 f"| {row.course_name} | {e.name} | {state} | "
                 f"{deadline} | {e.material or '-'} |"
+            )
+        lines.append("")
+
+    # ---- completeness audit ----
+    if report.incomplete:
+        lines.append("## 提交完整性核查")
+        lines.append("")
+        lines.append("| 课程 | 作业 | 漏答题数 | 题号 | 可否撤回 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for item in report.incomplete:
+            orders = "、".join(str(n) for n in item.get("missing_orders", [])[:12])
+            if len(item.get("missing_orders", [])) > 12:
+                orders += "…"
+            withdrawable = "可撤回" if item.get("withdrawable") else "已出分不可撤回"
+            lines.append(
+                f"| {item.get('course', '')} | {item.get('name', '')} | "
+                f"{item.get('missing_count', 0)} | {orders or '-'} | {withdrawable} |"
             )
         lines.append("")
 
