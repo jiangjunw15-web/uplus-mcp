@@ -90,13 +90,14 @@ def test_incomplete_section_renders_in_markdown():
 # engine.audit_homework
 # --------------------------------------------------------------------------- #
 class FakeClient:
-    def __init__(self, details, sub_status="2"):
+    def __init__(self, details, sub_status="2", submit_task="1"):
         self._details = details
         self._sub_status = sub_status
+        self._submit_task = submit_task
 
     def list_homeworks(self, course_id):
         return [HomeworkTask(task_id="t1", homework_id="h1", name="作业-综合2",
-                             course_id=course_id, submit_task="1",
+                             course_id=course_id, submit_task=self._submit_task,
                              sub_status=self._sub_status)]
 
     def list_questions(self, homework_id):
@@ -113,10 +114,11 @@ class FakeClient:
         return None
 
 
-def _engine(details, sub_status="2"):
+def _engine(details, sub_status="2", submit_task="1"):
     cfg = Config()
     return PatrolEngine(cfg, session=None,
-                        client=FakeClient(details, sub_status), operator=None)
+                        client=FakeClient(details, sub_status, submit_task),
+                        operator=None)
 
 
 def test_engine_audit_homework_is_read_only_and_reports_missing():
@@ -139,3 +141,43 @@ def test_engine_audit_homework_graded_is_not_withdrawable():
     result = engine.audit_homework("t1", "c1")
     assert result["withdrawable"] is False
     assert result["audit"]["complete"] is True
+
+
+class FakeOperator:
+    """Only the two calls audit_homework needs."""
+
+    def __init__(self, page_status):
+        self._page_status = page_status
+
+    def open_homework(self, task):
+        return object()
+
+    def read_page_state(self, page):
+        return self._page_status, None
+
+
+def test_page_state_overrides_api_status():
+    # API claims "not submitted", the page says "submitted, pending grading":
+    # the audit must trust the page, otherwise a real gap would be skipped.
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": None}}, submit_task="0")
+    engine.operator = FakeOperator(HomeworkStatus.SUBMITTED_PENDING)
+    result = engine.audit_homework("t1", "c1")
+    assert result["api_status"] == "not_submitted"
+    assert result["status"] == "submitted_pending"
+    assert result["withdrawable"] is True
+    assert result["audit"]["complete"] is False
+
+
+def test_page_state_read_failure_falls_back_to_api_status():
+    class Boom:
+        def open_homework(self, task):
+            raise RuntimeError("页面打不开")
+
+        def read_page_state(self, page):
+            return None, None
+
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": "A"}})
+    engine.operator = Boom()
+    result = engine.audit_homework("t1", "c1")
+    assert result["status"] == "submitted_pending"  # API truth (sub_status=2)
+    assert "页面状态读取失败" in result["page_state_note"]

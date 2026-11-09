@@ -267,7 +267,8 @@ async def uplus_answer_homework(
 
 
 @mcp.tool()
-async def uplus_audit_homework(task_id: str, course_id: str) -> dict:
+async def uplus_audit_homework(task_id: str, course_id: str,
+                               refresh_page_state: bool = True) -> dict:
     """Read-only completeness audit for one homework (no withdraw, no submit).
 
     Every question is read from the student-side detail, so an already
@@ -275,8 +276,15 @@ async def uplus_audit_homework(task_id: str, course_id: str) -> dict:
     questions carry no answer; subjective / programming / attachment items are
     counted separately and never make the homework "incomplete". Fix a gap by
     withdrawing (if ``withdrawable``), then ``uplus_answer_homework``.
+
+    The API status understates (a handed-in homework may read as not submitted),
+    so ``withdrawable`` comes from the page's real button state; set
+    ``refresh_page_state=False`` to skip that page read and trust the API.
     """
-    return await _thread.run_async(_dispatch("audit_homework", task_id, course_id))
+    return await _thread.run_async(
+        _dispatch("audit_homework", task_id, course_id,
+                  refresh_page_state=refresh_page_state)
+    )
 
 
 @mcp.tool()

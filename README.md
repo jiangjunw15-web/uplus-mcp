@@ -42,9 +42,16 @@ read-only against the platform.
   hard-coded a `2026-11-05` deadline, so `is_expired()` returned `True` once that
   date passed and the test could only fail. It verifies date parsing, not the
   clock, so the deadline is now built as "now + 365 days".
-- **7 new tests** (`tests/test_audit.py`) cover gap detection, subjective items
-  excluded, the `hwAnswerId` path, report rendering and the graded case.
-  Total: 172.
+- **`withdrawable` follows the page, not the API** — the homework API still
+  reports a handed-in homework as "not submitted", so the audit reads the answer
+  page's real button state before deciding whether it can be withdrawn, and only
+  falls back to the API status (with `page_state_note` explaining it) when that
+  read fails. Skipping this would drop exactly the "submitted but incomplete"
+  homework the audit exists for.
+- **9 new tests** (`tests/test_audit.py`) cover gap detection, subjective items
+  excluded, the `hwAnswerId` path, report rendering, the graded case, the page
+  state overriding the API and the fallback when the page read fails.
+  Total: 174.
 
 ## What's new in 0.7.3
 

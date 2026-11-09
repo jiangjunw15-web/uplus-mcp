@@ -207,28 +207,52 @@ class PatrolEngine:
             "brief": solver.build_answer_brief(task.name, questions),
         }
 
-    def audit_homework(self, task_id: str, course_id: str) -> dict:
+    def audit_homework(self, task_id: str, course_id: str,
+                       refresh_page_state: bool = True) -> dict:
         """Read-only completeness audit for one homework.
 
         Reads every question's student-side detail and reports which objective
         questions carry no answer. Nothing is withdrawn, filled or submitted, so
         it is safe to run against an already submitted homework.
+
+        The API status understates: a homework already handed in can still come
+        back as ``not_submitted``. ``withdrawable`` therefore follows the page's
+        real button state when ``refresh_page_state`` is on, and falls back to the
+        API status only if that read fails.
         """
         task = self.resolve_task(task_id, course_id)
+        api_status = task.status
+        page_state_note = ""
+        if refresh_page_state and self.operator is not None:
+            try:
+                page = self.operator.open_homework(task)
+                status, progress = self.operator.read_page_state(page)
+                if status is not None:
+                    task.page_status = status
+                if progress is not None:
+                    task.page_progress = progress
+            except AuthExpiredError:
+                raise
+            except Exception as exc:  # page read is best-effort
+                page_state_note = f"页面状态读取失败：{exc}，按接口状态判定"
+
         questions = [
             self.client.question_detail(q.question_id)
             for q in self.client.list_questions(task.homework_id)
         ]
+        final_status = task.status
         return {
             "course_id": course_id,
             "course_name": self.course_name(course_id),
             "task_id": task.task_id,
             "homework_id": task.homework_id,
             "name": task.name,
-            "status": task.status.value,
-            "status_label": report_mod.STATUS_LABEL[task.status],
+            "status": final_status.value,
+            "status_label": report_mod.STATUS_LABEL[final_status],
+            "api_status": api_status.value,
+            "page_state_note": page_state_note,
             "deadline": utils.deadline_label(task.end_ms),
-            "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
+            "withdrawable": final_status is HomeworkStatus.SUBMITTED_PENDING,
             "audit": report_mod.audit_questions(questions),
         }
 
