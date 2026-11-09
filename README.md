@@ -13,6 +13,24 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.5
+
+Answering is now keyed to the question text instead of the page position, and
+option clicks survive both page layouts. Two bugs surfaced on a real quiz.
+
+- **Page order is no longer trusted** — on single-question pages (the ones with
+  a `答题卡` grid and `上一题/下一题`) the page order and the API `order` differ,
+  so clicking by API order answered the wrong question. The fill loop now maps
+  every page position to its stem first and navigates by that, and refuses to
+  answer a question whose stem cannot be found instead of risking a wrong click.
+- **Options without `A、` can be clicked** — some quizzes render the letter in
+  its own span (`A` + `开闭原则`) rather than as one label text. The text
+  locator timed out and those questions could never be answered; it now falls
+  back to `label:has(input[value="A"])` when that letter is unique on the page.
+- **Nine tests** cover stem normalization, the page-order mismatch, the
+  longest-prefix tie-break and the unknown-stem case. Suite is 179 (178 passed,
+  1 skipped).
+
 ## What's new in 0.7.4
 
 A completeness audit for already submitted homework: you can now tell whether a

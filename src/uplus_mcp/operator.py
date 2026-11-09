@@ -28,6 +28,40 @@ from .platform import PlatformClient
 from . import solver, utils
 
 
+def text_key(text: str) -> str:
+    """Normalize a stem for comparison: drop spaces, punctuation and brackets.
+
+    The page renders the stem inside a rich-text block whose spacing and full
+    width punctuation never match the REST payload character for character.
+    """
+    return re.sub(r"[\s\u00a0\u3000，。、？！：；“”‘’（）()《》〈〉\[\]【】\-—,.?!:;\"'`~]", "", text or "")
+
+
+def stem_position(positions: dict[str, int], stem: str) -> Optional[int]:
+    """Find the page position whose stem matches, preferring the longest prefix.
+
+    Page order and API order disagree on eduplus, so answering by API ``order``
+    can land on a different question. Matching by stem is exact first, then by
+    the longest shared prefix (the page appends option text to the stem).
+    """
+    key = text_key(stem)
+    if not key:
+        return None
+    if key in positions:
+        return positions[key]
+    best = None
+    best_len = 0
+    for candidate, index in positions.items():
+        shared = 0
+        for a, b in zip(key, candidate):
+            if a != b:
+                break
+            shared += 1
+        if shared >= 8 and shared > best_len:
+            best, best_len = index, shared
+    return best
+
+
 def classify_page_state(text: str) -> Optional[HomeworkStatus]:
     """Map answer-page body text to a submission state.
 
@@ -183,6 +217,70 @@ class HomeworkOperator:
         except PWTimeout:
             pass
 
+    # ---- page position mapping (page order != API order) --------------- #
+    def _single_question_view(self, page: Page) -> bool:
+        """True when the page shows one question at a time with an answer card.
+
+        Such pages carry a ``答题卡`` grid and navigate with ``上一题/下一题``;
+        list-style pages render every question at once.
+        """
+        try:
+            return "答题卡" in page.inner_text("body")[:400]
+        except PWTimeout:
+            return False
+
+    def _page_stem(self, page: Page) -> str:
+        """The stem of the question currently shown (first rich-text block)."""
+        try:
+            return text_key(page.locator(".ck-content").first.inner_text())
+        except Exception:  # page shape unknown: treat as unreadable, never crash
+            return ""
+
+    def page_stem_positions(self, page: Page, total: int) -> dict[str, int]:
+        """Map every question stem on a single-question page to its position.
+
+        Walks the page sequentially with ``下一题`` (clicking the answer-card
+        number is unreliable: it can land before the SPA repaints, which silently
+        drops a question from the map) and re-reads the stem when it comes back
+        empty, which happens while the transition animation is still running.
+        """
+        positions: dict[str, int] = {}
+        try:
+            page.locator("xpath=//*[normalize-space(text())='1']").first.click(timeout=4000)
+            time.sleep(0.8)
+        except Exception:
+            return positions
+
+        for index in range(1, max(total, 1) + 1):
+            stem = ""
+            for _ in range(3):
+                try:
+                    stem = self._page_stem(page)
+                except Exception:
+                    stem = ""
+                if stem:
+                    break
+                time.sleep(0.5)
+            if stem and stem not in positions:
+                positions[stem] = index
+            if index >= total:
+                break
+            try:
+                nxt = page.get_by_role("button", name="下一题")
+                if nxt.count() == 0 or nxt.first.is_disabled():
+                    break
+                nxt.first.click(timeout=5000)
+            except Exception:
+                break
+            time.sleep(1.0)
+        return positions
+
+    def _page_position(self, positions: dict[str, int], stem: str,
+                       fallback: int) -> Optional[int]:
+        if not positions:
+            return fallback
+        return stem_position(positions, stem)
+
     def fill_question(self, page: Page, question: Question, answer: str) -> str:
         """Fill one question on the current page; return the normalized answer."""
         normalized = solver.normalize_answer(question, answer)
@@ -267,9 +365,24 @@ class HomeworkOperator:
             outcome["note"] = "题目列表为空（纯材料/附件作业或接口未返回题目），不自动提交，请人工确认。"
             return outcome
 
+        # Page order and API order disagree on single-question views, so the
+        # position to click is resolved by stem instead of by ``detail.order``.
+        single_view = self._single_question_view(page)
+        positions = (
+            self.page_stem_positions(page, len(questions)) if single_view else {}
+        )
+
         for meta in questions:
             detail = self.client.question_detail(meta.question_id)
-            self.navigate_to_question(page, detail.order)
+            page_pos = detail.order
+            if single_view:
+                page_pos = self._page_position(positions, detail.stem, detail.order)
+                if page_pos is None:
+                    outcome["errors"].append(
+                        f"第{detail.order}题在页面上找不到对应题干，已跳过（不冒险点错题）"
+                    )
+                    continue
+                self.navigate_to_question(page, page_pos)
             # Every objective question counts toward the total, including ones
             # the platform already records as answered; otherwise previously
             # answered questions inflate answered without inflating total and
