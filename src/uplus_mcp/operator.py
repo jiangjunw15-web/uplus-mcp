@@ -123,13 +123,29 @@ class HomeworkOperator:
     # question filling
     # ------------------------------------------------------------------ #
     def _option_locator(self, page: Page, code: str) -> Locator:
-        """Locate the clickable option row for a letter like ``A``."""
+        """Locate the clickable option row for a letter like ``A``.
+
+        Two page layouts exist on eduplus: one renders the option as a single
+        label text ("A、开闭原则"), the other puts the letter in its own span
+        ("A" + "开闭原则", no 、). The text form is tried first because it is
+        unambiguous on pages that show every question at once; the letter-only
+        form is matched through the radio/checkbox input's ``value``, which is
+        only safe when the letter is unique on the page (single-question view).
+        """
         radio = page.locator(f"label.el-radio:has-text(\"{code}、\")")
         if radio.count():
             return radio.first
         checkbox = page.locator(f"label.el-checkbox:has-text(\"{code}、\")")
         if checkbox.count():
             return checkbox.first
+
+        radio_input = page.locator(f"label:has(input[type=radio][value=\"{code}\"])")
+        check_input = page.locator(f"label:has(input[type=checkbox][value=\"{code}\"])")
+        if radio_input.count() == 1:
+            return radio_input.first
+        if check_input.count() == 1:
+            return check_input.first
+
         # Fallback: text node "A、" and its clickable ancestor row.
         return page.locator(f"text={code}、").first
 
