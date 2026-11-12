@@ -158,14 +158,19 @@ def is_expired(ms: Optional[int], reference_ms: Optional[int] = None) -> bool:
     return ms <= (reference_ms or now_ms())
 
 
-def normalize_letters(raw: Optional[str]) -> str:
+def normalize_letters(raw: object) -> str:
     """Normalize a multiple-choice answer into a sorted uppercase letter string.
 
     ``"b,acd"`` / ``" A C D "`` -> ``"ACD"``.
+
+    ``raw`` is coerced with ``str`` first: a platform payload can carry a
+    non-string scalar for ``userAnswer`` (a number, a list), and calling
+    ``.upper()`` on it would raise ``AttributeError`` mid-answer instead of
+    degrading to "no letters".
     """
-    if not raw:
+    if raw is None:
         return ""
-    letters = re.findall(r"[A-Za-z]", raw.upper())
+    letters = re.findall(r"[A-Za-z]", str(raw).upper())
     return "".join(sorted(set(letters)))
 
 

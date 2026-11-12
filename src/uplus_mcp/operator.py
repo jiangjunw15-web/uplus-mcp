@@ -229,6 +229,31 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     # question filling
     # ------------------------------------------------------------------ #
+    def _narrowed_scope(self, page: Page, stem_text: str = "",
+                        occurrence: int = 0):
+        """Return the question-scoped locator, or ``None`` when none applied.
+
+        ``None`` means "the whole page is the only scope available", which is
+        correct for a single-question view but must never be treated as
+        "this page is one question" on a list view (see
+        :meth:`_checked_letters`).
+        """
+        if not stem_text:
+            return None
+        try:
+            marked = page.evaluate(_MARK_QUESTION_JS, [stem_text, occurrence])
+        except Exception:  # noqa: BLE001 - unknown page shape / fake page
+            return None
+        if not marked:
+            return None
+        try:
+            scope = page.locator("[data-uplus-q='1']")
+            if scope.count():
+                return scope.first
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
     def _question_scope(self, page: Page, stem_text: str = "",
                         occurrence: int = 0):
         """Return a locator scoped to one question container when possible.
@@ -246,21 +271,8 @@ class HomeworkOperator:
         the stem is not found, so an unknown layout degrades to the previous
         behaviour instead of raising.
         """
-        if not stem_text:
-            return page
-        try:
-            marked = page.evaluate(_MARK_QUESTION_JS, [stem_text, occurrence])
-        except Exception:  # noqa: BLE001 - unknown page shape / fake page
-            return page
-        if not marked:
-            return page
-        try:
-            scope = page.locator("[data-uplus-q='1']")
-            if scope.count():
-                return scope.first
-        except Exception:  # noqa: BLE001
-            pass
-        return page
+        scope = self._narrowed_scope(page, stem_text, occurrence)
+        return page if scope is None else scope
 
     def _option_locator(self, page: Page, code: str,
                         stem_text: str = "", occurrence: int = 0) -> Locator:
@@ -304,8 +316,19 @@ class HomeworkOperator:
         Returns the set of checked option letters, or ``None`` when the DOM
         cannot answer (no option inputs, or inputs without a letter ``value``).
         ``None`` must be treated as "unverifiable", never as "nothing checked".
+
+        A list-view page (``stem_text`` given) whose stem could not be narrowed
+        also returns ``None``: the whole page holds every question's boxes, so
+        reading them would mix this question's state with its neighbours' and
+        the caller would uncheck someone else's option. A single-question view
+        (no ``stem_text``) has nothing else on the page, so it reads normally.
         """
-        scope = self._question_scope(page, stem_text, occurrence)
+        if stem_text:
+            scope = self._narrowed_scope(page, stem_text, occurrence)
+            if scope is None:
+                return None
+        else:
+            scope = page
         try:
             inputs = scope.locator("input[type=checkbox], input[type=radio]")
             total = min(inputs.count(), 40)

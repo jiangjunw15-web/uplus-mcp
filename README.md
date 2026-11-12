@@ -13,6 +13,31 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.7
+
+A hardening pass over 0.7.6: three real defects found while re-reading the
+code, all fixed without changing any documented behaviour. Suite is 208 passed.
+
+- **A list page whose stem cannot be scoped no longer reads other questions'
+  checkboxes** — 0.7.6 introduced page-state verification for multi-selects. On
+  a list-view page the scope comes from the stem; when the stem could not be
+  narrowed the code fell back to the whole page, which holds *every* question's
+  boxes. Reading that mixed this question's state with its neighbours', and the
+  reconciliation would then uncheck someone else's option. Such a page now
+  reports "unverifiable" and the fill falls back to the API-side delta instead.
+  (Single-question views are unaffected: there is nothing else on the page.)
+- **`userAnswer` can be a non-string, and no longer crashes the answer path** —
+  the value comes from a JSON payload, so it can arrive as a number, a list or
+  a bool. `utils.normalize_letters` called `.upper()` on it directly, raising
+  `AttributeError` in the middle of filling a question.
+- **The experiment-name fallback no longer labels a requirement line as the
+  title** — a line like `实验要求：掌握进程同步的基本方法` or
+  `提交物：进程同步实验报告` used to be reported as the experiment's name. The
+  fallback now requires a short line without a `：`/`:` separator, so only a
+  real title line matches.
+- **11 new tests** (`tests/test_answer_fixes.py`) cover the unscoped-page
+  refusal, the non-string `userAnswer` path and the experiment-name fallback.
+
 ## What's new in 0.7.6
 
 A correctness release for answering: partial multi-selects are no longer left

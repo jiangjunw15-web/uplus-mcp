@@ -17,9 +17,11 @@ import pytest
 
 from uplus_mcp.browser import UplusError
 from uplus_mcp.config import Config
+from uplus_mcp.experiment import extract_experiment_name
 from uplus_mcp.models import Option, Question, QuestionType
 from uplus_mcp.operator import HomeworkOperator, stem_matches, stem_position
 from uplus_mcp.solver import normalize_answer
+from uplus_mcp import utils
 
 
 # --------------------------------------------------------------------------- #
@@ -183,6 +185,9 @@ class _BoxHandle:
 class _MultiLocator:
     BOX_LIST = "input[type=checkbox], input[type=radio]"
     CHECK_VALUE = re.compile(r'input\[type=checkbox\]\[value="([A-Z])"\]')
+    SCOPE = "[data-uplus-q='1']"
+    # xpath=.//label[contains(@class,'el-checkbox') and starts-with(...)]
+    LABEL_XPATH = re.compile(r"contains\(@class,'el-(radio|checkbox)'\)")
 
     def __init__(self, page, selector):
         self._page = page
@@ -192,11 +197,21 @@ class _MultiLocator:
     def first(self):
         return self
 
+    def locator(self, selector):
+        """A scoped locator keeps working: the real page's marker locator is a
+        normal locator, so ``scope.locator(...)`` must resolve. The fake models
+        one question's container, so the same rules apply."""
+        return _MultiLocator(self._page, selector)
+
     def count(self):
+        if self._selector == self.SCOPE:
+            return 1 if self._page.narrowable else 0
         if self._selector == self.BOX_LIST:
             return len(self._page.boxes)
         if self.CHECK_VALUE.search(self._selector):
             return 1
+        # This fake has no label DOM: the el-checkbox label path finds nothing,
+        # so the locator falls through to the input-value form.
         return 0
 
     def nth(self, index):
@@ -212,15 +227,24 @@ class _MultiLocator:
 
 
 class _MultiPage:
-    """List-view page fake: one page, four checkbox options, no stem scope."""
+    """List-view page fake with a *narrowable* question scope.
 
-    def __init__(self, checked: str, stuck: str = ""):
+    ``evaluate`` reports the stem was found and the ``data-uplus-q`` marker
+    locator resolves, so the box reads and clicks run inside one question's
+    container — exactly the situation the reconciliation is for. Use
+    ``narrowable=False`` to model a page whose stem cannot be scoped, where the
+    operator must refuse to read box state at all rather than mixing in other
+    questions' boxes.
+    """
+
+    def __init__(self, checked: str, stuck: str = "", narrowable: bool = True):
         self.boxes = {code: _Box(code, code in checked) for code in "ABCD"}
         self.clicks: list[str] = []
         self._stuck = stuck  # letter whose click never sticks
+        self.narrowable = narrowable
 
     def evaluate(self, script, arg=None):
-        return False  # no scoping marker: operate on the whole fake page
+        return self.narrowable
 
     def locator(self, selector):
         return _MultiLocator(self, selector)
@@ -276,3 +300,54 @@ def test_multiselect_raises_when_the_page_cannot_reach_the_target():
     with pytest.raises(UplusError, match="选项未能全部选中"):
         _operator().fill_question(page, _multi_question(""), "AC",
                                   single_view=False)
+
+
+def test_multiselect_refuses_to_read_state_when_the_scope_cannot_be_narrowed():
+    """A list page whose stem cannot be scoped holds every question's boxes.
+
+    Reading them would mix this question's state with its neighbours' and
+    uncheck someone else's option, so ``_checked_letters`` must report
+    "unverifiable" instead.
+    """
+    page = _MultiPage("AB", narrowable=False)
+    assert _operator()._checked_letters(page, "题干") is None
+
+
+def test_multiselect_unverifiable_falls_back_to_the_api_delta():
+    page = _MultiPage("AB", narrowable=False)
+    out = _operator().fill_question(page, _multi_question("AB"), "ABCD",
+                                    single_view=False)
+    assert out == "ABCD"
+    assert page.clicks == ["C", "D"]
+
+
+# --------------------------------------------------------------------------- #
+# a non-string userAnswer must not crash the answer path
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("raw", [123, True, ["A", "B"], {"a": 1}, 0])
+def test_normalize_letters_survives_a_non_string_answer(raw):
+    """``userAnswer`` comes from a JSON payload, so it can be any scalar.
+    ``.upper()`` on it used to raise AttributeError mid-answer."""
+    assert isinstance(utils.normalize_letters(raw), str)
+
+
+def test_multiselect_with_a_non_string_recorded_answer_still_fills():
+    page = _MultiPage("AB")
+    question = _multi_question(123)  # platform returned a number
+    out = _operator().fill_question(page, question, "ABCD", single_view=False)
+    assert out == "ABCD"
+    assert page.clicks == ["C", "D"]
+
+
+# --------------------------------------------------------------------------- #
+# experiment name fallback must not label a requirement line as the title
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("text,want", [
+    ("提交物：实验报告\n实验二 进程同步算法", "实验二 进程同步算法"),
+    ("实验要求：掌握进程同步的基本方法\n截止：2026-11-05 23:59", ""),
+    ("提交物：进程同步实验报告\n截止：2026-11-05 23:59", ""),
+    ("实验一 进程管理", "实验一 进程管理"),
+    ("进程同步\n实验内容", "进程同步"),
+])
+def test_experiment_name_fallback_rejects_requirement_lines(text, want):
+    assert extract_experiment_name(text) == want

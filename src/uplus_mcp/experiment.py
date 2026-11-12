@@ -37,10 +37,16 @@ def extract_experiment_name(text: str) -> str:
         if stripped and _EXPERIMENT_NAME_RE.match(stripped):
             return stripped
     # Fallback kept from the earlier heuristic: a topic line that carries no
-    # 实验 prefix.
+    # 实验 prefix. It must look like a *title*, not a sentence: requirement
+    # lines ("实验要求：掌握进程同步…", "提交物：进程同步实验报告") would
+    # otherwise be reported as the experiment's name.
     for line in text.split("\n"):
         stripped = line.strip()
-        if "进程" in stripped and len(stripped) <= 60:
+        if not stripped or len(stripped) > 40:
+            continue
+        if "：" in stripped or ":" in stripped:
+            continue
+        if "进程" in stripped:
             return stripped
     return ""
 
