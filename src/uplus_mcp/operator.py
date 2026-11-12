@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 from typing import Optional
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout, Locator
@@ -575,6 +576,80 @@ class HomeworkOperator:
                                occurrence=occurrence)
             return normalized
         raise UplusError(f"题型 {qtype.label} 不支持自动作答")
+
+    # ------------------------------------------------------------------ #
+    # figure questions: screenshot the question block for the model
+    # ------------------------------------------------------------------ #
+    def _image_output_path(self, raw: str, order: int) -> Path:
+        """Resolve where a question screenshot may be written.
+
+        An explicit ``raw`` path is confined to the configured IO roots like
+        every other file tool. Without one, the file goes under the report
+        folder's ``question_images/``; if that folder is not an allowed root,
+        the first configured root is used instead.
+        """
+        if raw:
+            path = utils.resolve_io_path(raw, self.config.io_roots)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        name = f"question_{order or 'x'}_{stamp}.png"
+        candidates = [self.config.report_folder / "question_images"]
+        candidates.extend(Path(root) / "question_images" for root in self.config.io_roots)
+        for folder in candidates:
+            try:
+                safe = utils.resolve_io_path(folder, self.config.io_roots)
+            except (PermissionError, OSError):
+                continue
+            try:
+                safe.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            return safe / name
+        raise UplusError(
+            "没有可写的目录用于保存题目截图，请在配置的 allowed_io_paths / "
+            "UPLUS_ALLOWED_PATHS 中加入一个可写目录"
+        )
+
+    def capture_question(self, page: Page, question: Question, total: int,
+                         output_path: str = "", full_page: bool = False) -> Path:
+        """Screenshot one question block (diagram included) and return the path.
+
+        Figure questions (``以下模型是…`` with a picture) cannot be answered
+        from text: ``strip_html`` removes the ``<img>``, so the model needs to
+        *see* the rendered block. The page is navigated to the question by stem
+        first — the same rule the fill loop uses — and the question container
+        is captured rather than the whole viewport, so the diagram is readable.
+        """
+        if self._single_question_view(page):
+            # Fast path: the page may already show the requested question.
+            current = self._page_stem(page)
+            if not (current and stem_matches(current, question.stem)):
+                positions = self.page_stem_positions(page, max(total, 1))
+                page_pos = self._page_position(positions, question.stem, question.order)
+                if page_pos is None:
+                    raise UplusError(
+                        f"第{question.order}题在页面上找不到对应题干，无法定位题目截图"
+                    )
+                if not self.navigate_to_question(page, page_pos, question.stem):
+                    raise UplusError(
+                        f"第{question.order}题跳转后题干校验不一致，未截图（避免截到别的题）"
+                    )
+        path = self._image_output_path(output_path, question.order)
+        scope = self._narrowed_scope(page, question.stem)
+        try:
+            if scope is not None and not full_page:
+                scope.scroll_into_view_if_needed(timeout=4000)
+                time.sleep(0.3)
+                scope.screenshot(path=str(path))
+            else:
+                # No question container recognised, or the caller asked for
+                # the full page: capture everything so the figure is never
+                # cropped out.
+                page.screenshot(path=str(path), full_page=True)
+        except PWTimeout as exc:
+            raise UplusError(f"题目截图失败：{exc}") from exc
+        return path
 
     def read_current_my_answer(self, page: Page) -> Optional[str]:
         try:

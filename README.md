@@ -15,9 +15,19 @@ for the step-by-step script an AI agent follows when onboarding a new user.
 
 ## What's new in 0.7.7
 
-A hardening pass over 0.7.6: three real defects found while re-reading the
-code, all fixed without changing any documented behaviour. Suite is 208 passed.
+A hardening pass over 0.7.6 plus figure-question support: three real defects
+found while re-reading the code and one new capability, without changing any
+documented behaviour. Suite is 226 passed.
 
+- **Figure questions can finally be seen** — new tool
+  `uplus_capture_question_image(task_id, course_id, order=…)`. The platform
+  stores a diagram as an `<img>` inside the stem's rich text; `strip_html`
+  dropped it, so a judge question like 「以下模型是非对称密码体制中的两种模型」
+  reached the model as text with no picture and could only be guessed. The
+  question detail now exposes `images`, the brief carries a `figure_note`
+  naming the tool, and the tool navigates to the question by stem (same rule
+  as filling) and returns that question's block as a real MCP **image content
+  block** plus the saved PNG path. It fills and submits nothing.
 - **A list page whose stem cannot be scoped no longer reads other questions'
   checkboxes** — 0.7.6 introduced page-state verification for multi-selects. On
   a list-view page the scope comes from the stem; when the stem could not be
@@ -35,8 +45,11 @@ code, all fixed without changing any documented behaviour. Suite is 208 passed.
   `提交物：进程同步实验报告` used to be reported as the experiment's name. The
   fallback now requires a short line without a `：`/`:` separator, so only a
   real title line matches.
-- **11 new tests** (`tests/test_answer_fixes.py`) cover the unscoped-page
-  refusal, the non-string `userAnswer` path and the experiment-name fallback.
+- **29 new tests** — 18 in `tests/test_figure_questions.py` cover image
+  detection, the brief's figure hint, question-container screenshots, path
+  confinement and the text+image tool contract; 11 in
+  `tests/test_answer_fixes.py` cover the unscoped-page refusal, the non-string
+  `userAnswer` path and the experiment-name fallback.
 
 ## What's new in 0.7.6
 
@@ -517,6 +530,7 @@ Code examples.
 | `uplus_list_homeworks` | List homework status; open answer pages to verify button truth on demand |
 | `uplus_list_experiments` | List experiments and submission state (submitted / outstanding / unknown) |
 | `uplus_inspect_homework` | Return status and a structured question brief for the client model |
+| `uplus_capture_question_image` | Screenshot one question block (diagram included) and return the image to the model |
 | `uplus_answer_homework` | Fill objective questions and optionally submit |
 | `uplus_upload_attachment` | Attach a local file to a homework that requires upload |
 | `uplus_patrol` | Full patrol, Markdown report, answer briefs and takeover list |

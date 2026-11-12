@@ -269,6 +269,53 @@ class PatrolEngine:
             course_name=self.course_name(course_id),
         )
 
+    def capture_question_image(self, task_id: str, course_id: str, *,
+                               order: int = 0, question_id: str = "",
+                               output_path: str = "",
+                               full_page: bool = False) -> dict:
+        """Screenshot one question (figure questions included).
+
+        Read-only against the platform: it opens the answer page, navigates to
+        the question by stem and saves a PNG of that question's block. Nothing
+        is filled or submitted.
+        """
+        task = self.resolve_task(task_id, course_id)
+        metas = self.client.list_questions(task.homework_id)
+        if not metas:
+            raise UplusError("该作业没有题目（纯材料/附件作业），无法截取题目图片")
+        target = None
+        for meta in metas:
+            if question_id and meta.question_id == question_id:
+                target = meta
+                break
+            if order and meta.order == order:
+                target = meta
+                break
+        if target is None:
+            if not question_id and not order:
+                raise UplusError("请提供 order 或 question_id 指定要截图的题目")
+            raise UplusError("未找到指定题目，请核对 order / question_id")
+        detail = self.client.question_detail(target.question_id)
+        page = self.operator.open_homework(task)
+        path = self.operator.capture_question(
+            page, detail, len(metas), output_path=output_path,
+            full_page=full_page)
+        return {
+            "task_id": task.task_id,
+            "course_id": course_id,
+            "question_id": detail.question_id,
+            "order": detail.order,
+            "type": detail.type.label,
+            "stem": detail.stem[:200],
+            "images": detail.images,
+            "path": str(path),
+            "bytes": path.stat().st_size,
+            "note": (
+                "题目截图已保存。图形题请依据截图作答；"
+                "把答案交给 uplus_answer_homework 时用 question_id 作为键。"
+            ),
+        }
+
     def upload_attachment(self, task_id: str, course_id: str, file_path: str) -> dict:
         task = self.resolve_task(task_id, course_id)
         return self.operator.upload_attachment(task, file_path)

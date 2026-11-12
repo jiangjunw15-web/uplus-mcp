@@ -120,6 +120,10 @@ class Question:
     my_answer: Optional[str] = None
     answered: bool = False
     hw_answer_id: Optional[str] = None
+    #: Image URLs embedded in the stem or options (diagrams, charts, tables
+    #: rendered as pictures). Text alone cannot answer these questions; the
+    #: model must look at the figure via ``uplus_capture_question_image``.
+    images: list[str] = field(default_factory=list)
 
     @classmethod
     def from_meta(cls, raw: dict) -> "Question":
@@ -142,6 +146,15 @@ class Question:
         answer = raw.get("userAnswer")
         detail.my_answer = str(answer) if answer is not None and str(answer).strip() else None
         detail.hw_answer_id = raw.get("hwAnswerId") or None
+        # Figures live in the stem or an option's rich text. ``strip_html``
+        # drops the <img>, so collect them before the model sees the question.
+        images = utils.extract_images(raw.get("titleText"))
+        for option in raw.get("options") or []:
+            images.extend(
+                src for src in utils.extract_images(option.get("optionContent"))
+                if src not in images
+            )
+        detail.images = images
         return detail
 
     @property
@@ -162,6 +175,13 @@ class Question:
         }
         if self.options:
             payload["options"] = [o.prompt_line() for o in self.options]
+        if self.images:
+            payload["images"] = self.images
+            payload["figure_note"] = (
+                "本题含图形/图片，文字不足以作答：先调用 "
+                "uplus_capture_question_image(task_id, course_id, order="
+                f"{self.order}) 查看题目截图，再给出答案。"
+            )
         if self.type is QuestionType.JUDGE:
             payload["answer_hint"] = "回答 true（正确）或 false（错误）"
         elif self.type is QuestionType.SINGLE:

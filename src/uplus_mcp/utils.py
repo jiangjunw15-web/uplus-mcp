@@ -63,6 +63,30 @@ def strip_html(html: Optional[str]) -> str:
     return text
 
 
+def extract_images(html: Optional[str]) -> list[str]:
+    """Image URLs referenced by a rich-text stem/option fragment.
+
+    ``strip_html`` drops tags, so an ``<img>`` diagram disappears from the
+    text entirely and the model would answer a figure question blind. This
+    keeps the ``src`` values so the question can be flagged as image-bearing.
+    Inline ``data:`` payloads are reported as a marker, never copied out (a
+    base64 diagram can be hundreds of kilobytes).
+    """
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[str] = []
+    for img in soup.find_all("img"):
+        src = str(img.get("src") or img.get("data-src") or "").strip()
+        if not src:
+            continue
+        if src.startswith("data:"):
+            src = "(inline image data)"
+        if src not in out:
+            out.append(src)
+    return out
+
+
 _TOKEN_KEY_RE = re.compile(
     r'(?i)("?[a-z0-9_-]*(?:token|secret|password|api[_-]?key|authorization)"?\s*[=:]\s*)'
     r'"?([^",\s}]{6,})"?'

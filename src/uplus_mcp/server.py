@@ -25,9 +25,11 @@ Or use the installed console script ``uplus-mcp``.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
+from mcp.types import CallToolResult, TextContent
 
 from .browse import BrowseTools
 from .browser import BrowserSession
@@ -264,6 +266,49 @@ async def uplus_answer_homework(
         _dispatch("answer_homework", task_id, course_id, answers,
                   submit=submit, force_submit=force_submit)
     )
+
+
+@mcp.tool()
+async def uplus_capture_question_image(
+    task_id: str,
+    course_id: str,
+    order: int = 0,
+    question_id: str = "",
+    output_path: str = "",
+    full_page: bool = False,
+) -> CallToolResult:
+    """Screenshot one question block and return it as an image.
+
+    Use for *figure questions* — a stem whose diagram/picture carries the part
+    that makes the statement true or false (for example "以下模型是…" with a
+    crypto diagram). The question text alone cannot be answered reliably, and
+    the model cannot see an ``<img>`` that lives in the platform's rich text.
+
+    The tool opens the answer page, navigates to the question by its stem
+    (same rule as filling), and captures that question's container — not just
+    the viewport — so the whole figure is readable. It fills and submits
+    nothing. Identify the question with ``order`` (the number shown on the
+    page) or ``question_id``. The result is the saved PNG path plus the image
+    itself; answer the question after looking at it and pass the answer to
+    ``uplus_answer_homework`` keyed by ``question_id``.
+
+    ``output_path`` is optional and confined to the configured IO roots; by
+    default the PNG goes under the report folder's ``question_images/``.
+    Set ``full_page=True`` when the figure sits outside the question block
+    (for example a shared table above the questions).
+    """
+    def work() -> dict:
+        _ensure_engine()
+        return _state["engine"].capture_question_image(
+            task_id, course_id, order=order, question_id=question_id,
+            output_path=output_path, full_page=full_page,
+        )
+
+    info = await _thread.run_async(work)
+    return CallToolResult(content=[
+        TextContent(type="text", text=json.dumps(info, ensure_ascii=False, indent=2)),
+        Image(path=info["path"]).to_image_content(),
+    ])
 
 
 @mcp.tool()
