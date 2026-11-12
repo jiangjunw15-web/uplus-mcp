@@ -26,7 +26,8 @@ def build_answer_brief(homework_name: str, questions: list[Question]) -> dict:
             "判断题返回 true（正确）或 false（错误）；填空题返回文本。"
             "题目带 images / figure_note 时，文字不足以作答：先调用 "
             "uplus_capture_question_image(task_id, course_id, order=题号) "
-            "查看题目截图，再给出答案。"
+            "查看题目截图，再给出答案。题干提到「图 / 模型 / 流程 / 下图」"
+            "但正文没有对应内容时，同样先截图确认。"
             "输出 JSON：{\"answers\": {\"<question_id>\": \"<answer>\"}}，不要解释。"
         ),
         "questions": [q.llm_prompt() for q in questions],

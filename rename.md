@@ -370,7 +370,7 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 
 1. 对用户确认要处理的作业（课程 + 作业名 + 截止时间）。
 2. 调用 `uplus_inspect_homework(task_id, course_id)` 获取题目审题包（题干、选项、题型提示）。
-   - 某题带 `images` / `figure_note` 时说明**文字不足以作答**（示意图、流程图、表格截图等）：先调用 `uplus_capture_question_image(task_id, course_id, order=题号)`，工具会把整道题的截图以图片形式返回；看清图后再作答。**不要在没有看图的情况下猜图形判断题。**
+   - 某题带 `images` / `figure_note` 时说明**文字不足以作答**（示意图、流程图、表格截图等）：先调用 `uplus_capture_question_image(task_id, course_id, order=题号)`，工具会把整道题的截图以图片形式返回；看清图后再作答。**不要在没有看图的情况下猜图形判断题。** 题干提到「图 / 模型 / 流程 / 下图」但正文没有对应内容时，同样先截图确认；图形不在题目容器内时加 `full_page=True`。
 3. AI 逐题作答，按题型规范化答案：
    - 单选：单个字母，如 `"C"`；
    - 多选：去重排序大写字母串，如 `"ABCD"`；
