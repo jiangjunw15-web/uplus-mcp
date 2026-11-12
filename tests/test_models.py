@@ -116,21 +116,30 @@ def test_attachment_question_prompt_asks_for_human_takeover():
 
 
 # --------------------------------------------------------------------------- #
-# answered joint judgement
+# answered judgement: only a real userAnswer counts
 # --------------------------------------------------------------------------- #
 def test_answered_from_user_answer_when_is_answer_missing():
     raw = {"id": "a", "orderNumber": 1, "qsnType": 1, "userAnswer": "C"}
     assert Question.from_meta(raw).answered is True
 
 
-def test_answered_from_hw_answer_id_when_user_answer_blank():
+def test_hw_answer_id_alone_does_not_count_as_answered():
+    """The platform creates the answer row when a question is opened, even
+    without a selection; treating it as answered made the audit miss blanks."""
     raw = {"id": "b", "orderNumber": 1, "qsnType": 3, "hwAnswerId": "hw-9"}
-    assert Question.from_meta(raw).answered is True
+    assert Question.from_meta(raw).answered is False
 
 
-def test_answered_flag_string_one_counts_as_answered():
+def test_is_answer_flag_alone_does_not_count_as_answered():
     raw = {"id": "c", "orderNumber": 1, "qsnType": 1, "isAnswer": "1"}
-    assert Question.from_meta(raw).answered is True
+    assert Question.from_meta(raw).answered is False
+
+
+def test_whitespace_user_answer_is_not_an_answer():
+    raw = {"id": "e", "orderNumber": 1, "qsnType": 4, "userAnswer": "   "}
+    q = Question.from_detail(raw)
+    assert q.answered is False
+    assert q.my_answer is None
 
 
 def test_unanswered_when_all_signals_are_blank():

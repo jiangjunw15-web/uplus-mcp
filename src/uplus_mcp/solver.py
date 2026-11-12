@@ -76,12 +76,57 @@ def re_search_json(text: str) -> str:
     return text
 
 
+# A leading choice group: letter runs joined by the separators students use.
+# It stops before prose ("AC because..." -> "AC"), so English explanation
+# letters can never be mistaken for options.
+_LEADING_CHOICES_RE = re.compile(
+    r"^\s*[（(]?\s*[A-Za-z]+(?:\s*[,，、/和与及]\s*[A-Za-z]+)*"
+)
+
+
+def _valid_codes(question: Question) -> set[str]:
+    return {
+        option.code.strip().upper()
+        for option in question.options
+        if re.fullmatch(r"[A-Za-z]", option.code.strip())
+    }
+
+
+def _choice_letters(question: Question, raw: str) -> str:
+    """Normalize a choice answer, keeping only real option letters.
+
+    ``utils.normalize_letters`` extracts every Latin letter from the payload,
+    so an answer like ``"AC，因为B中的..."`` or ``"AC because ..."`` would pick
+    up spurious letters and silently select wrong options. The leading answer
+    token is preferred; if it is not composed of real option letters, the whole
+    string is scanned and intersected with the question's options instead.
+    """
+    valid = _valid_codes(question)
+    lead = _LEADING_CHOICES_RE.match(str(raw or ""))
+    if lead:
+        letters = utils.normalize_letters(lead.group(0))
+        if letters and (not valid or set(letters) <= valid):
+            return letters
+    letters = utils.normalize_letters(raw)
+    if valid:
+        filtered = "".join(ch for ch in letters if ch in valid)
+        if filtered:
+            return filtered
+    return letters
+
+
 def normalize_answer(question: Question, raw: str) -> str:
     """Validate and normalize one answer against its question type."""
     if question.type is QuestionType.SINGLE:
-        return utils.normalize_letters(raw)[:1]
+        letters = _choice_letters(question, raw)[:1]
+        if not letters:
+            raise ValueError(f"单选题答案缺少选项字母: {raw!r}")
+        return letters
     if question.type is QuestionType.MULTIPLE:
-        return utils.normalize_letters(raw)
+        letters = _choice_letters(question, raw)
+        if not letters:
+            raise ValueError(f"多选题答案缺少选项字母: {raw!r}")
+        return letters
     if question.type is QuestionType.JUDGE:
         value = utils.normalize_bool(raw)
         if value is None:

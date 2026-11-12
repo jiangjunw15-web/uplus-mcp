@@ -37,29 +37,102 @@ def text_key(text: str) -> str:
     return re.sub(r"[\s\u00a0\u3000，。、？！：；“”‘’（）()《》〈〉\[\]【】\-—,.?!:;\"'`~]", "", text or "")
 
 
-def stem_position(positions: dict[str, int], stem: str) -> Optional[int]:
+def stem_position(positions: dict[str, int], stem: str,
+                   used: set[int] | None = None) -> Optional[int]:
     """Find the page position whose stem matches, preferring the longest prefix.
 
     Page order and API order disagree on eduplus, so answering by API ``order``
     can land on a different question. Matching by stem is exact first, then by
     the longest shared prefix (the page appends option text to the stem).
+
+    ``used`` tracks positions already consumed so duplicate stems don't collide.
     """
     key = text_key(stem)
     if not key:
         return None
-    if key in positions:
-        return positions[key]
+    # ``used or set()`` would replace an empty caller set with a fresh one, so
+    # the first consumed position would never reach the caller; test ``None``.
+    _used = used if used is not None else set()
+    # Exact hit: try unsuffixed key first, then suffixed keys in order
+    for candidate_key in [key] + [f"{key}::{i}" for i in range(2, 100)]:
+        if candidate_key in positions and positions[candidate_key] not in _used:
+            _used.add(positions[candidate_key])
+            return positions[candidate_key]
     best = None
     best_len = 0
     for candidate, index in positions.items():
+        if index in _used:
+            continue
+        # Strip the ::N suffix for prefix comparison
+        bare = candidate.split("::")[0] if "::" in candidate else candidate
         shared = 0
-        for a, b in zip(key, candidate):
+        for a, b in zip(key, bare):
             if a != b:
                 break
             shared += 1
         if shared >= 8 and shared > best_len:
             best, best_len = index, shared
+    if best is not None:
+        _used.add(best)
     return best
+
+
+def stem_matches(a: str, b: str) -> bool:
+    """True when two stems are the same question.
+
+    The page appends the option text to the stem, so equality is checked after
+    normalization, then prefix containment (the shorter one must be at least 8
+    normalized characters, so two different questions that share a boilerplate
+    opening are not confused).
+    """
+    ka, kb = text_key(a), text_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    short, long_ = (ka, kb) if len(ka) <= len(kb) else (kb, ka)
+    return len(short) >= 8 and long_.startswith(short)
+
+
+# Mark the question container that owns a given stem with ``data-uplus-q`` so
+# Playwright locators can be scoped to it. Matching mirrors ``stem_position``:
+# exact normalized text first, then the longest shared prefix (>= 8 chars).
+# ``skip`` selects the n-th exact duplicate (0-based).
+_MARK_QUESTION_JS = r"""
+([stem, skip]) => {
+  const norm = (s) => (s || '').replace(
+    /[\s 　，。、？！：；“”‘’（）()《》〈〉\[\]【】\-—,.?!:;:"'`~]/g, '');
+  const key = norm(stem);
+  if (!key) return false;
+  const blocks = [...document.querySelectorAll('.ck-content')];
+  const exact = blocks.filter((el) => norm(el.innerText) === key);
+  let target = null;
+  if (exact.length) {
+    target = exact[Math.min(Math.max(skip | 0, 0), exact.length - 1)];
+  } else {
+    let bestLen = 0;
+    for (const el of blocks) {
+      const text = norm(el.innerText);
+      if (!text) continue;
+      let shared = 0;
+      const n = Math.min(key.length, text.length);
+      while (shared < n && key[shared] === text[shared]) shared++;
+      if (shared >= 8 && shared > bestLen) { target = el; bestLen = shared; }
+    }
+  }
+  if (!target) return false;
+  let scope = target;
+  while (scope && scope !== document.body) {
+    if (scope.querySelector('input, textarea')) break;
+    scope = scope.parentElement;
+  }
+  if (!scope || scope === document.body) scope = target.parentElement || target;
+  document.querySelectorAll('[data-uplus-q]').forEach(
+    (el) => el.removeAttribute('data-uplus-q'));
+  scope.setAttribute('data-uplus-q', '1');
+  return true;
+}
+"""
 
 
 def classify_page_state(text: str) -> Optional[HomeworkStatus]:
@@ -156,66 +229,185 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     # question filling
     # ------------------------------------------------------------------ #
-    def _option_locator(self, page: Page, code: str) -> Locator:
+    def _question_scope(self, page: Page, stem_text: str = "",
+                        occurrence: int = 0):
+        """Return a locator scoped to one question container when possible.
+
+        On list-view pages every question renders at once, so an unscoped
+        ``label.el-checkbox:has-text("A、")`` would always hit the first
+        question's option A. The stem block is located in the DOM (same
+        normalized matching as :func:`stem_position`), its nearest ancestor
+        that contains an option input is tagged with ``data-uplus-q`` and that
+        container becomes the scope. When no stem is given (single-question
+        view) the whole page is the scope.
+
+        ``occurrence`` selects the n-th identical stem for duplicate questions.
+        Falls back to the whole page whenever the page cannot be evaluated or
+        the stem is not found, so an unknown layout degrades to the previous
+        behaviour instead of raising.
+        """
+        if not stem_text:
+            return page
+        try:
+            marked = page.evaluate(_MARK_QUESTION_JS, [stem_text, occurrence])
+        except Exception:  # noqa: BLE001 - unknown page shape / fake page
+            return page
+        if not marked:
+            return page
+        try:
+            scope = page.locator("[data-uplus-q='1']")
+            if scope.count():
+                return scope.first
+        except Exception:  # noqa: BLE001
+            pass
+        return page
+
+    def _option_locator(self, page: Page, code: str,
+                        stem_text: str = "", occurrence: int = 0) -> Locator:
         """Locate the clickable option row for a letter like ``A``.
 
         Two page layouts exist on eduplus: one renders the option as a single
         label text ("A、开闭原则"), the other puts the letter in its own span
         ("A" + "开闭原则", no 、). The text form is tried first because it is
         unambiguous on pages that show every question at once; the letter-only
-        form is matched through the radio/checkbox input's ``value``, which is
-        only safe when the letter is unique on the page (single-question view).
-        """
-        radio = page.locator(f"label.el-radio:has-text(\"{code}、\")")
-        if radio.count():
-            return radio.first
-        checkbox = page.locator(f"label.el-checkbox:has-text(\"{code}、\")")
-        if checkbox.count():
-            return checkbox.first
+        form is matched through the radio/checkbox input's ``value``.
 
-        radio_input = page.locator(f"label:has(input[type=radio][value=\"{code}\"])")
-        check_input = page.locator(f"label:has(input[type=checkbox][value=\"{code}\"])")
+        ``xpath=...starts-with(normalize-space(.), 'A、')`` is used instead of
+        ``:has-text`` because the latter matches the letter anywhere in the
+        label, so an option whose *content* mentions "A、" could be picked by
+        mistake.
+        """
+        scope = self._question_scope(page, stem_text, occurrence)
+
+        for kind in ("el-radio", "el-checkbox"):
+            label = scope.locator(
+                f"xpath=.//label[contains(@class,'{kind}') and "
+                f"starts-with(normalize-space(.), '{code}、')]"
+            )
+            if label.count():
+                return label.first
+
+        radio_input = scope.locator(f"label:has(input[type=radio][value=\"{code}\"])")
+        check_input = scope.locator(f"label:has(input[type=checkbox][value=\"{code}\"])")
         if radio_input.count() == 1:
             return radio_input.first
         if check_input.count() == 1:
             return check_input.first
 
         # Fallback: text node "A、" and its clickable ancestor row.
-        return page.locator(f"text={code}、").first
+        return scope.locator(f"text={code}、").first
 
-    def _click_option(self, page: Page, code: str) -> None:
-        locator = self._option_locator(page, code)
+    def _checked_letters(self, page: Page, stem_text: str = "",
+                         occurrence: int = 0) -> Optional[set[str]]:
+        """Read the option inputs' checked state inside the question scope.
+
+        Returns the set of checked option letters, or ``None`` when the DOM
+        cannot answer (no option inputs, or inputs without a letter ``value``).
+        ``None`` must be treated as "unverifiable", never as "nothing checked".
+        """
+        scope = self._question_scope(page, stem_text, occurrence)
+        try:
+            inputs = scope.locator("input[type=checkbox], input[type=radio]")
+            total = min(inputs.count(), 40)
+        except Exception:  # noqa: BLE001 - fake page / detached frame
+            return None
+        if total == 0:
+            return None
+        checked: set[str] = set()
+        valued = 0
+        for index in range(total):
+            try:
+                box = inputs.nth(index)
+                value = str(box.get_attribute("value") or "").strip().upper()
+                match = re.fullmatch(r"[A-Z]", value)
+                if not match:
+                    continue
+                valued += 1
+                if box.is_checked():
+                    checked.add(value)
+            except Exception:  # noqa: BLE001 - input detached mid-read
+                continue
+        return checked if valued else None
+
+    def _click_option(self, page: Page, code: str,
+                      stem_text: str = "", occurrence: int = 0) -> None:
+        locator = self._option_locator(page, code, stem_text=stem_text,
+                                       occurrence=occurrence)
         locator.scroll_into_view_if_needed(timeout=4000)
         locator.click(timeout=6000)
         time.sleep(0.25)
 
-    def _answer_judge(self, page: Page, value: bool) -> None:
+    def _answer_judge(self, page: Page, value: bool,
+                      stem_text: str = "", occurrence: int = 0) -> None:
         target = "正确" if value else "错误"
-        btn = page.get_by_text(target, exact=True)
+        scope = self._question_scope(page, stem_text, occurrence)
+        btn = scope.get_by_text(target, exact=True)
         if btn.count() == 0:
-            btn = page.locator(f"label:has-text(\"{target}\")")
+            btn = scope.locator(f"label:has-text(\"{target}\")")
         btn.first.click(timeout=6000)
         time.sleep(0.25)
 
-    def _answer_blank(self, page: Page, text: str) -> None:
-        box = page.locator("textarea").first
+    def _answer_blank(self, page: Page, text: str,
+                      stem_text: str = "", occurrence: int = 0) -> None:
+        scope = self._question_scope(page, stem_text, occurrence)
+        box = scope.locator("textarea").first
         if box.count() == 0:
-            box = page.locator(
+            box = scope.locator(
                 "input[type=text], input[type=search], input[type=number]"
             ).first
         box.fill(text, timeout=6000)
-
-    def navigate_to_question(self, page: Page, order: int) -> None:
-        if order <= 1:
+        # Read back what actually landed in the box; a rich-text editor that
+        # ignores ``fill`` would otherwise look like a silent success.
+        try:
+            landed = str(box.input_value() or "").strip()
+        except Exception:  # noqa: BLE001 - non-input element
             return
+        if landed and landed != text.strip():
+            box.fill(text, timeout=6000)
+            landed = str(box.input_value() or "").strip()
+            if landed != text.strip():
+                raise UplusError(
+                    f"填空题写入后页面内容不一致（期望 {text[:30]!r}，实际 {landed[:30]!r}）"
+                )
+
+    def navigate_to_question(self, page: Page, position: int,
+                             expected_stem: str = "") -> bool:
+        """Click the answer-card number for ``position`` and verify the page.
+
+        The early return for position 1 was wrong: the previous stem walk
+        leaves the page on the *last* question, so a question whose page
+        position is 1 must still be navigated back. Filling on whatever page
+        happened to be open would answer the wrong question — the reported
+        "多选漏选 / 漏题" symptom.
+
+        When ``expected_stem`` is given, the stem now shown is compared with
+        it; a mismatch returns ``False`` so the caller skips the question
+        instead of typing an answer into the wrong one.
+        """
         card = page.locator(
-            f"xpath=//*[normalize-space(text())='{order}']"
+            f"xpath=//*[normalize-space(text())='{position}']"
         ).first
         try:
             card.click(timeout=4000)
             time.sleep(0.3)
         except PWTimeout:
-            pass
+            if position > 1:
+                return False
+        if not expected_stem:
+            return True
+        saw_stem = False
+        for attempt in range(3):
+            current = self._page_stem(page)
+            if current:
+                saw_stem = True
+                if stem_matches(current, expected_stem):
+                    return True
+            if attempt < 2:
+                time.sleep(0.3)
+        # A page whose stem cannot be read at all keeps the legacy behaviour
+        # (proceed); a readable but different stem means the click landed on
+        # the wrong question and the caller must skip it.
+        return not saw_stem
 
     # ---- page position mapping (page order != API order) --------------- #
     def _single_question_view(self, page: Page) -> bool:
@@ -225,9 +417,10 @@ class HomeworkOperator:
         list-style pages render every question at once.
         """
         try:
-            return "答题卡" in page.inner_text("body")[:400]
+            text = page.inner_text("body")
         except PWTimeout:
             return False
+        return "答题卡" in text or ("上一题" in text and "下一题" in text)
 
     def _page_stem(self, page: Page) -> str:
         """The stem of the question currently shown (first rich-text block)."""
@@ -243,8 +436,13 @@ class HomeworkOperator:
         number is unreliable: it can land before the SPA repaints, which silently
         drops a question from the map) and re-reads the stem when it comes back
         empty, which happens while the transition animation is still running.
+
+        Duplicate stems (identical rich-text content) are disambiguated by
+        appending a positional suffix, e.g. ``"题干文本::2"``, so every
+        question gets a distinct position.
         """
         positions: dict[str, int] = {}
+        stem_counts: dict[str, int] = {}  # track how many times each stem appears
         try:
             page.locator("xpath=//*[normalize-space(text())='1']").first.click(timeout=4000)
             time.sleep(0.8)
@@ -261,8 +459,11 @@ class HomeworkOperator:
                 if stem:
                     break
                 time.sleep(0.5)
-            if stem and stem not in positions:
-                positions[stem] = index
+            if stem:
+                count = stem_counts.get(stem, 0) + 1
+                stem_counts[stem] = count
+                key = f"{stem}::{count}" if count > 1 or stem in positions else stem
+                positions[key] = index
             if index >= total:
                 break
             try:
@@ -276,32 +477,79 @@ class HomeworkOperator:
         return positions
 
     def _page_position(self, positions: dict[str, int], stem: str,
-                       fallback: int) -> Optional[int]:
+                       fallback: int, used: set[int] | None = None) -> Optional[int]:
         if not positions:
             return fallback
-        return stem_position(positions, stem)
+        return stem_position(positions, stem, used)
 
-    def fill_question(self, page: Page, question: Question, answer: str) -> str:
-        """Fill one question on the current page; return the normalized answer."""
+    def fill_question(self, page: Page, question: Question, answer: str,
+                      *, single_view: bool = True, occurrence: int = 0) -> str:
+        """Fill one question on the current page; return the normalized answer.
+
+        ``single_view`` controls whether option/blank/judge locators are scoped
+        to the question container (list-view pages) or left unscoped (single-
+        question pages where only one question is visible). ``occurrence``
+        selects the n-th identical stem on list-view pages.
+
+        Every objective type is verified against the page after clicking:
+        a multi-select is reconciled with the *actual* checked boxes (clicking a
+        box that is already checked would uncheck it — the reported "漏选"),
+        and a single choice / judge / blank is re-read once. A question that
+        still does not match its target raises, so the submit gate refuses to
+        hand in a wrong answer instead of silently losing options.
+        """
         normalized = solver.normalize_answer(question, answer)
         qtype = question.type
+        stem = "" if single_view else question.stem
         if qtype is QuestionType.SINGLE:
-            self._click_option(page, normalized)
+            self._click_option(page, normalized, stem_text=stem,
+                               occurrence=occurrence)
+            actual = self._checked_letters(page, stem, occurrence)
+            if actual is not None and normalized not in actual:
+                self._click_option(page, normalized, stem_text=stem,
+                                   occurrence=occurrence)
+                actual = self._checked_letters(page, stem, occurrence)
+                if actual is not None and normalized not in actual:
+                    shown = "".join(sorted(actual)) or "空"
+                    raise UplusError(
+                        f"单选题点选后页面显示 {shown}，目标 {normalized}，未确认选中"
+                    )
             return normalized
         if qtype is QuestionType.MULTIPLE:
-            current = set(utils.normalize_letters(question.my_answer or ""))
             target = set(normalized)
-            # Deselect removed choices first, then select target choices.
-            for old in sorted(current - target):
-                self._click_option(page, old)
-            for new in sorted(target - current):
-                self._click_option(page, new)
-            return normalized
+            actual = self._checked_letters(page, stem, occurrence)
+            if actual is None:
+                # Unverifiable layout: fall back to the API-side delta.
+                current = set(utils.normalize_letters(question.my_answer or ""))
+                for old in sorted(current - target):
+                    self._click_option(page, old, stem_text=stem,
+                                       occurrence=occurrence)
+                for new in sorted(target - current):
+                    self._click_option(page, new, stem_text=stem,
+                                       occurrence=occurrence)
+                return normalized
+            for _ in range(2):
+                for code in sorted(actual - target):
+                    self._click_option(page, code, stem_text=stem,
+                                       occurrence=occurrence)
+                for code in sorted(target - actual):
+                    self._click_option(page, code, stem_text=stem,
+                                       occurrence=occurrence)
+                reread = self._checked_letters(page, stem, occurrence)
+                if reread is None or reread == target:
+                    return normalized
+                actual = reread
+            raise UplusError(
+                f"多选题点选后页面显示 {''.join(sorted(actual)) or '空'}"
+                f"，目标 {normalized}，选项未能全部选中"
+            )
         if qtype is QuestionType.JUDGE:
-            self._answer_judge(page, normalized == "true")
+            self._answer_judge(page, normalized == "true", stem_text=stem,
+                               occurrence=occurrence)
             return normalized
         if qtype is QuestionType.FILL_BLANK:
-            self._answer_blank(page, normalized)
+            self._answer_blank(page, normalized, stem_text=stem,
+                               occurrence=occurrence)
             return normalized
         raise UplusError(f"题型 {qtype.label} 不支持自动作答")
 
@@ -371,29 +619,81 @@ class HomeworkOperator:
         positions = (
             self.page_stem_positions(page, len(questions)) if single_view else {}
         )
+        used_positions: set[int] = set()
+        # List-view pages render duplicate stems (same rich text) at once;
+        # the n-th occurrence selects the right container for each.
+        stem_occurrence: dict[str, int] = {}
 
         for meta in questions:
             detail = self.client.question_detail(meta.question_id)
+            occurrence = 0
+            if not single_view:
+                key = text_key(detail.stem)
+                occurrence = stem_occurrence.get(key, 0)
+                stem_occurrence[key] = occurrence + 1
             page_pos = detail.order
             if single_view:
-                page_pos = self._page_position(positions, detail.stem, detail.order)
+                page_pos = self._page_position(positions, detail.stem, detail.order,
+                                               used=used_positions)
                 if page_pos is None:
                     outcome["errors"].append(
                         f"第{detail.order}题在页面上找不到对应题干，已跳过（不冒险点错题）"
                     )
                     continue
-                self.navigate_to_question(page, page_pos)
+                # Verify the page really shows this stem before typing: the
+                # answer-card click can silently miss, and filling whatever
+                # question is open would answer the wrong one.
+                if not self.navigate_to_question(page, page_pos, detail.stem):
+                    outcome["errors"].append(
+                        f"第{detail.order}题跳转后题干校验不一致，已跳过（不冒险写错题）"
+                    )
+                    continue
             # Every objective question counts toward the total, including ones
             # the platform already records as answered; otherwise previously
             # answered questions inflate answered without inflating total and
             # the equality can never balance again.
             if detail.auto_answerable:
                 outcome["objective_total"] += 1
+            # A multiple-choice question that is already "answered" may still be
+            # incomplete (e.g. the student picked A,B but the model says A,B,C,D).
+            # Re-fill it if a model answer is available and differs from the
+            # current selection.  Other question types (single / judge / blank)
+            # that carry a real answer are genuinely complete and can be skipped.
             if detail.answered and detail.my_answer:
-                outcome["answered"] += 1
-                if detail.auto_answerable:
-                    outcome["objective_answered"] += 1
-                continue
+                need_refill = False
+                unverifiable_partial = False
+                if detail.type is QuestionType.MULTIPLE:
+                    raw_answer = answers.get(detail.question_id) or answers.get(str(detail.order))
+                    if raw_answer is not None:
+                        target = set(solver.normalize_answer(detail, raw_answer))
+                        current = set(utils.normalize_letters(detail.my_answer or ""))
+                        if target != current:
+                            need_refill = True
+                    else:
+                        # No model answer for this one: the recorded answer may
+                        # be a partial multi-select (exactly the "漏选" failure),
+                        # so it cannot be verified and must not pass silently.
+                        unverifiable_partial = True
+                if not need_refill:
+                    if unverifiable_partial:
+                        outcome["skipped"] += 1
+                        outcome["skipped_questions"].append(
+                            {
+                                "question_id": detail.question_id,
+                                "order": detail.order,
+                                "type": detail.type.label,
+                                "stem": detail.stem[:120],
+                                "reason": (
+                                    f"多选已答 {detail.my_answer}，但缺少模型答案，"
+                                    "无法核对是否漏选"
+                                ),
+                            }
+                        )
+                    else:
+                        outcome["answered"] += 1
+                        if detail.auto_answerable:
+                            outcome["objective_answered"] += 1
+                    continue
             if not detail.auto_answerable:
                 outcome["skipped"] += 1
                 outcome["skipped_questions"].append(
@@ -420,7 +720,9 @@ class HomeworkOperator:
                 )
                 continue
             try:
-                normalized = self.fill_question(page, detail, raw_answer)
+                normalized = self.fill_question(page, detail, raw_answer,
+                                               single_view=single_view,
+                                               occurrence=occurrence)
                 detail.my_answer = normalized
                 detail.answered = True
                 outcome["answered"] += 1

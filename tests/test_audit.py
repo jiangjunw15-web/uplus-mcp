@@ -69,10 +69,14 @@ def test_subjective_items_do_not_count_as_incomplete():
     assert result["objective"] == 1
 
 
-def test_hw_answer_id_counts_as_answered():
+def test_hw_answer_id_without_user_answer_is_reported_missing():
+    """An answer row exists as soon as the question is opened; only a
+    non-empty userAnswer proves the student actually chose something."""
     q = Q(1, QuestionType.SINGLE, None, False)
     q.hw_answer_id = "18872e2309a740ae95fdb131fa0faa24"
-    assert audit_questions([q])["complete"] is True
+    result = audit_questions([q])
+    assert result["complete"] is False
+    assert [m["order"] for m in result["missing"]] == [1]
 
 
 def test_incomplete_section_renders_in_markdown():

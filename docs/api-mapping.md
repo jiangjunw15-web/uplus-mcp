@@ -25,7 +25,7 @@
 
 > `homeworkDTO` 在不同课程下可能是 JSON 对象，也可能是 JSON 字符串；`models.HomeworkTask.from_api` 已做兼容解析。
 >
-> **已答判定**：`isAnswer` 字段可能缺失或为 null；`models._is_answered` 采用联合判定——`userAnswer` 非空、`hwAnswerId` 非空、`isAnswer` 为 `1/"1"/true/"true"`，任一命中即视为已答。
+> **已答判定**：只认 `userAnswer` 非空（`models._is_answered`）。`isAnswer` 与 `hwAnswerId` 会在学生**仅打开题目**时就生成，单独出现不能证明学生真的选了答案——0.7.6 起不再作为已答依据，否则审计会把空题报成已完成（漏题误判）。
 
 ## 3. 页面路由
 

@@ -92,16 +92,18 @@ def add_homework(report: PatrolReport, course: Course, task: HomeworkTask, *, no
 def audit_questions(questions: list[Question]) -> dict:
     """Read-only completeness check over one homework's questions.
 
-    A question counts as answered when the student-side detail carries a
-    non-empty ``userAnswer`` or a ``hwAnswerId`` (see ``models._is_answered``),
-    so the audit needs no page interaction and never withdraws a submission.
-    Subjective / programming / attachment items are reported separately and do
-    not make the homework "incomplete".
+    A question counts as answered only when it carries a non-empty
+    ``userAnswer`` (``my_answer``).  A bare ``hwAnswerId`` or ``isAnswer`` flag
+    no longer suffices: the platform creates an answer row when the student
+    merely opens the question, even with no option selected (see
+    ``models._is_answered``).  The audit needs no page interaction and never
+    withdraws a submission. Subjective / programming / attachment items are
+    reported separately and do not make the homework "incomplete".
     """
     objective = [q for q in questions if q.auto_answerable]
     missing = [
         q for q in objective
-        if not (q.my_answer or q.answered or q.hw_answer_id)
+        if not q.my_answer
     ]
     return {
         "total": len(questions),

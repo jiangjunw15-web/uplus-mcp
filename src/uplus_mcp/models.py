@@ -58,14 +58,17 @@ def question_type(code: Any) -> QuestionType:
 
 
 def _is_answered(raw: dict) -> bool:
-    """Joint answered check: ``isAnswer`` may be missing/null, so a non-empty
-    ``userAnswer`` or ``hwAnswerId`` also counts as answered."""
-    if raw.get("userAnswer") not in (None, ""):
-        return True
-    if raw.get("hwAnswerId") not in (None, ""):
-        return True
-    flag = raw.get("isAnswer")
-    return flag in (1, "1", True, "true")
+    """True only when a real answer is recorded (``userAnswer`` non-empty).
+
+    ``isAnswer`` and ``hwAnswerId`` are NOT enough on their own: the platform
+    creates the answer row (``hwAnswerId``) and flips ``isAnswer`` when the
+    student merely opens a question, so trusting them made the audit and the
+    answer brief silently skip questions that were actually blank — the
+    reported "漏题". Everything that needs to know "did the student really
+    answer this" must look at ``userAnswer``.
+    """
+    answer = raw.get("userAnswer")
+    return answer is not None and str(answer).strip() != ""
 
 
 # --------------------------------------------------------------------------- #
@@ -136,7 +139,8 @@ class Question:
         detail.options = [Option.from_api(o) for o in (raw.get("options") or [])]
         detail.knowledge = str(raw.get("knowledges") or "")
         detail.labels = str(raw.get("labels") or "")
-        detail.my_answer = raw.get("userAnswer") or None
+        answer = raw.get("userAnswer")
+        detail.my_answer = str(answer) if answer is not None and str(answer).strip() else None
         detail.hw_answer_id = raw.get("hwAnswerId") or None
         return detail
 

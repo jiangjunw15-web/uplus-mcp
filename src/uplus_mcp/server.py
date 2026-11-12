@@ -272,7 +272,10 @@ async def uplus_audit_homework(task_id: str, course_id: str,
     """Read-only completeness audit for one homework (no withdraw, no submit).
 
     Every question is read from the student-side detail, so an already
-    submitted homework can be audited safely. The result lists which objective
+    submitted homework can be audited safely. A question counts as answered
+    only when its ``userAnswer`` is non-empty; the platform creates an answer
+    row (``hwAnswerId`` / ``isAnswer``) when a question is merely opened, so
+    those fields alone prove nothing. The result lists which objective
     questions carry no answer; subjective / programming / attachment items are
     counted separately and never make the homework "incomplete". Fix a gap by
     withdrawing (if ``withdrawable``), then ``uplus_answer_homework``.

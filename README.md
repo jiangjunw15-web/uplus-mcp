@@ -13,6 +13,55 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.6
+
+A correctness release for answering: partial multi-selects are no longer left
+partial, and a question can no longer be answered on the wrong page position.
+Every fix below is covered by a regression test; the suite is 195 passed.
+
+- **Multi-select is reconciled with the page, not the API** — the old code
+  clicked ``target − userAnswer``. On a page where the student had already
+  ticked an option the API did not know about, that click *unchecked* it, and
+  a fresh page whose boxes were already set could end up missing exactly the
+  letters it meant to add. Filling now reads the real checked boxes, ticks only
+  the missing letters, unticks only the extras, re-reads the page, and raises
+  if the target still cannot be reached — so the submit gate refuses an
+  incomplete multi-select instead of handing it in silently.
+- **An already-answered multi-select is re-checked** — the loop used to skip
+  every question the platform marked answered, even when the model's answer
+  had more letters (the "漏选" case). It is now re-filled whenever the model
+  answer differs from the recorded one; a recorded multi-select with no model
+  answer is counted as "cannot verify" and blocks auto-submit instead of
+  passing silently.
+- **Navigation is verified before typing** — clicking an answer-card number can
+  miss. The page stem is re-read after the click and compared with the expected
+  question; on a mismatch the question is skipped (and reported), never filled
+  into whatever question happens to be open. This also fixes a real bug where a
+  question whose page position was 1 returned early without clicking, after the
+  stem walk had left the page on the last question — its answer landed on the
+  wrong question.
+- **Duplicate stems no longer collide** — two questions with identical rich
+  text used to overwrite each other in the position map, so one of them could
+  never be reached. Duplicates get a positional suffix and each position is
+  consumed once.
+- **List-view pages are scoped per question** — when every question renders at
+  once, option / judge / blank locators are now confined to the container of
+  the question being filled (located by its stem) instead of always hitting the
+  first question on the page. Option labels use ``starts-with(…, "A、")`` so an
+  option whose *content* mentions "A、" cannot be picked by mistake.
+- **"Answered" now means a real ``userAnswer``** — the platform creates an
+  answer row (``hwAnswerId``) and flips ``isAnswer`` when a question is merely
+  opened. Counting those as answered made the completeness audit report blank
+  questions as done (the "漏题" false negative) and kept them out of answer
+  briefs. The audit, the patrol brief and the fill loop now require a non-empty
+  ``userAnswer``.
+- **Answer parsing ignores prose** — a model answer like ``"AC because A and C
+  are correct"`` used to contribute every Latin letter in the explanation as an
+  option. Only the leading choice group is read, intersected with the question's
+  actual options; empty choice answers are rejected instead of clicking nothing.
+- **Fill-blank input is read back** — a rich text editor that ignores ``fill``
+  is now reported as an error rather than looking like success.
+
 ## What's new in 0.7.5
 
 Answering is now keyed to the question text instead of the page position, and
@@ -41,7 +90,8 @@ read-only against the platform.
 - **New tool `uplus_audit_homework(task_id, course_id)`** — every question is
   read from the student-side detail, and a question counts as answered when
   `userAnswer` or `hwAnswerId` is non-empty (the same rule as
-  `models._is_answered()`). Nothing is withdrawn, filled or submitted, so
+  `models._is_answered()`). *0.7.6 corrected this rule: only a non-empty
+  `userAnswer` counts — see "What's new in 0.7.6".* Nothing is withdrawn, filled or submitted, so
   pending and already-graded homework can be audited safely. Short-answer,
   programming and attachment items are counted separately and never make a
   homework "incomplete".
