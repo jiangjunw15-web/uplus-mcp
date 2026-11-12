@@ -19,13 +19,19 @@
 | 课程作业列表 | `/api/course/homeworks/published/student?courseId={courseId}` | `data[]`：`id`(taskId)、`homeworkId`、`endTime`、`submitTask`、`reviewTask`、`questionCount`（在 `homeworkDTO` 内）、`homeworkDTO.name` |
 | 作业实例详情 | `/api/course/homeworks/published/{taskId}/student` | 作业实例全量字段、`course`、`teachClass`、`homeworkDTO` |
 | 题目元数据列表 | `/api/course/homeworkQuestions/student?homeworkId={homeworkId}` | `data[]`：`id`(questionId)、`orderNumber`、`qsnType`、`isAnswer`、`everyScore` |
-| 单题详情 | `/api/course/homeworkQuestions/{questionId}/student/detail` | `titleText`、`options[].id/optionContent`、`qsnType`、`userAnswer`、`hwAnswerId`、`knowledges`、`labels`、`everyScore` |
+| 单题详情 | `/api/course/homeworkQuestions/{questionId}/student/detail` | `titleText`、`options[].id/optionContent`、`qsnType`、`userAnswer`、`hwAnswerId`、`knowledges`、`labels`、`everyScore`；**出分后**另有 `answer`（标准答案）、`isCorrect`（0/1）、`userScore` |
 | 实验模式配置 | `/api/course/courseTestcases/experiment_modes?organId={organId}` | 实验环境与提交物配置 |
 | 班级实验列表 | `/api/course/teach_classes/{teachClassId}/experiments?userId={userId}&details=report,...` | 实验名称、提交状态、截止时间、报告附件 |
 
 > `homeworkDTO` 在不同课程下可能是 JSON 对象，也可能是 JSON 字符串；`models.HomeworkTask.from_api` 已做兼容解析。
 >
 > **已答判定**：只认 `userAnswer` 非空（`models._is_answered`）。`isAnswer` 与 `hwAnswerId` 会在学生**仅打开题目**时就生成，单独出现不能证明学生真的选了答案——0.7.6 起不再作为已答依据，否则审计会把空题报成已完成（漏题误判）。
+>
+> **漏选判定（0.7.8）**：
+> - 单选题 / 判断题 / 填空题：把 `userAnswer` 与 `answer` 归一化后比较，不等即为错答；
+> - 多选题：把两者解析成选项字母集合。实答是标准答案的**真子集**（如 `A` ⊂ `ABC`）即为「漏选」，`missing_letters` 给出漏掉的 `BC`；顺序不同不算错（`AB` = `BA`）；多出标准答案之外的字母记为错答；
+> - `answer` 只在**出分后**返回；待批改时学生端 detail 没有该字段，作答页也只显示「我的答案」。此时本地答案簿 `reports/answer_journal.json`（工具成功提交时记录，已 gitignore）作为第二来源；两者都没有则题目进入 `unjudged`，不得当成已完成。
+> - `options[].optionContent` 可能是 `<p><code>&lt;property&gt;</code></p>` 这类代码块；`strip_html` 会得到完整文本 `<property>`，页面选项在 `label.el-radio` 内、input 的 `value` 为字母，按 value 定位即可点击。
 
 ## 3. 页面路由
 

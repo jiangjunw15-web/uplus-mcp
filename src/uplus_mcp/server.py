@@ -269,6 +269,38 @@ async def uplus_answer_homework(
 
 
 @mcp.tool()
+async def uplus_repair_homework(
+    task_id: str,
+    course_id: str,
+    answers: dict[str, str] | None = None,
+    verify_unjudged: bool = False,
+    submit: bool = True,
+) -> dict:
+    """Withdraw a submitted homework, fill its gaps, and resubmit it.
+
+    Use after ``uplus_patrol`` (audit is on by default) reports a homework as
+    ``missing`` (漏答) or ``partial`` (多选漏选). ``answers`` maps
+    ``question_id`` (or question order as a string) to the corrected answer;
+    the patrol result's ``repair_briefs`` lists exactly which questions need
+    one. Answers already stored in the local journal (because this tool
+    submitted the homework earlier) are used automatically, so a
+    journal-covered partial can be repaired without new model answers.
+
+    The tool refuses to withdraw until every known gap has an answer. A graded
+    homework cannot be withdrawn and is reported without changing anything.
+    Existing answers are preserved and re-filled, so a withdrawal that clears
+    the draft still leaves enough answers to resubmit. Submission uses the same
+    gate as ``uplus_answer_homework``; subjective items never block the repair.
+    ``verify_unjudged=True`` additionally re-answers multi-selects whose
+    completeness could not be checked while the homework was pending grading.
+    """
+    return await _thread.run_async(
+        _dispatch("repair_homework", task_id, course_id, answers or {},
+                  verify_unjudged=verify_unjudged, submit=submit)
+    )
+
+
+@mcp.tool()
 async def uplus_capture_question_image(
     task_id: str,
     course_id: str,
@@ -321,9 +353,17 @@ async def uplus_audit_homework(task_id: str, course_id: str,
     only when its ``userAnswer`` is non-empty; the platform creates an answer
     row (``hwAnswerId`` / ``isAnswer``) when a question is merely opened, so
     those fields alone prove nothing. The result lists which objective
-    questions carry no answer; subjective / programming / attachment items are
-    counted separately and never make the homework "incomplete". Fix a gap by
-    withdrawing (if ``withdrawable``), then ``uplus_answer_homework``.
+    questions carry no answer (``missing``) and, when the platform has graded
+    the homework and exposed its standard answer (``answer``), which
+    multi-selects were submitted with only part of the correct options
+    (``partial``, with the omitted letters). A multi-select still awaiting
+    grading has no reference answer and is listed in ``unjudged`` instead of
+    being silently treated as complete. Subjective / programming / attachment
+    items are counted separately and never make the homework "incomplete".
+    ``complete`` means no missing and no partial multi-select; ``clean`` also
+    requires checked answers to be correct. Fix a gap with
+    ``uplus_repair_homework`` (it withdraws only after every gap has an
+    answer, then completes and resubmits).
 
     The API status understates (a handed-in homework may read as not submitted),
     so ``withdrawable`` comes from the page's real button state; set
@@ -345,15 +385,24 @@ async def uplus_upload_attachment(task_id: str, course_id: str, file_path: str) 
 
 @mcp.tool()
 async def uplus_patrol(auto_answer: bool = False, submit: bool = False,
-                       audit: bool = False) -> dict:
+                       audit: bool = True) -> dict:
     """Patrol every configured course and write a Markdown report.
 
     Lists homework and experiments, separates submitted / pending / outstanding /
     takeover items, and collects answer briefs for outstanding objective
     questions. ``submit=True`` only submits homework that received valid answers;
     subjective, programming and file items are never auto-submitted.
-    ``audit=True`` additionally re-checks already submitted homework for
-    unanswered objective questions (read-only, nothing is withdrawn).
+
+    ``audit`` is on by default: every already-submitted homework is re-checked
+    for unanswered objective questions (漏答) and for multi-selects submitted
+    with only part of the correct options (漏选). The platform only reveals its
+    standard answer after grading and hides it while a submission is pending;
+    a local journal of answers this tool submitted fills that gap. Multi-selects
+    with neither source are reported as "unjudged", never silently as complete.
+    The audit itself is read-only. Results also include ``repair_briefs``: when
+    a gap is found, answer the listed questions and call
+    ``uplus_repair_homework`` to withdraw, complete and resubmit the homework.
+    Set ``audit=False`` only to skip this extra read pass.
     """
     return await _thread.run_async(
         _dispatch("patrol", auto_answer=auto_answer, submit=submit, audit=audit)

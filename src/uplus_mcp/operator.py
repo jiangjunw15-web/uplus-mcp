@@ -26,7 +26,7 @@ from .models import (
     QuestionType,
 )
 from .platform import PlatformClient
-from . import solver, utils
+from . import journal, solver, utils
 
 
 def text_key(text: str) -> str:
@@ -226,6 +226,56 @@ class HomeworkOperator:
         if m:
             progress = m.group(1).replace(" ", "")
         return classify_page_state(text), progress
+
+    def withdraw_homework(self, page: Page, task: HomeworkTask) -> str:
+        """Withdraw a submitted-but-ungraded homework so it can be corrected.
+
+        Only the page's real "撤回作业" button is trusted. A graded homework
+        cannot be withdrawn; a page that never returns to the editable state
+        raises instead of pretending the withdrawal happened.
+        """
+        state, progress = self.read_page_state(page)
+        if state is HomeworkStatus.SUBMITTED_GRADED:
+            raise UplusError("作业已出分，平台不允许撤回，无法补交")
+        if state is HomeworkStatus.NOT_SUBMITTED:
+            task.page_status = state
+            task.page_progress = progress
+            return "not_submitted"
+        if state is not HomeworkStatus.SUBMITTED_PENDING:
+            raise UplusError("页面状态无法确认（未找到「撤回作业」按钮），为避免误操作已停止")
+
+        button = page.get_by_role("button", name="撤回作业")
+        if button.count() == 0:
+            button = page.locator("text=撤回作业")
+        if button.count() == 0:
+            raise UplusError("未找到「撤回作业」按钮，页面状态可能已变化")
+        button.first.click(timeout=6000)
+        time.sleep(0.8)
+
+        # Element Plus confirmation dialog: primary button first, then a
+        # visible button whose label is the action verb.
+        try:
+            confirm = page.locator(".el-message-box__btns .el-button--primary")
+            if confirm.count():
+                confirm.first.click(timeout=4000)
+            else:
+                for name in ("确定", "确认", "撤回"):
+                    candidate = page.get_by_role("button", name=name)
+                    if candidate.count():
+                        candidate.first.click(timeout=4000)
+                        break
+        except PWTimeout as exc:
+            raise UplusError(f"撤回确认弹窗未处理：{exc}") from exc
+
+        for _ in range(12):
+            time.sleep(0.6)
+            state, progress = self.read_page_state(page)
+            if state is HomeworkStatus.NOT_SUBMITTED:
+                task.page_status = state
+                task.page_progress = progress
+                return "withdrawn"
+        state, _ = self.read_page_state(page)
+        raise UplusError(f"撤回后页面未回到可作答状态（当前 {state}），请人工确认后再操作")
 
     # ------------------------------------------------------------------ #
     # question filling
@@ -668,6 +718,7 @@ class HomeworkOperator:
         *,
         submit: bool = True,
         force_submit: bool = False,
+        allow_subjective_skips: bool = False,
         course_name: str = "",
     ) -> dict:
         """Open a homework, fill provided objective answers, verify and submit.
@@ -688,10 +739,12 @@ class HomeworkOperator:
             "objective_total": 0,
             "objective_answered": 0,
             "can_submit": False,
+            "subjective_skipped": 0,
             "skipped_questions": [],
             "errors": [],
             "note": "",
         }
+        submitted_answers: dict[str, str] = {}
         page = self.open_homework(task)
         status, progress = self.read_page_state(page)
         if status is not None:
@@ -752,6 +805,10 @@ class HomeworkOperator:
             # the equality can never balance again.
             if detail.auto_answerable:
                 outcome["objective_total"] += 1
+            if detail.auto_answerable and detail.my_answer:
+                # Snapshot the answer state that will be submitted; the audit
+                # uses it later when the platform still hides its own answer.
+                submitted_answers[detail.question_id] = detail.my_answer
             # A multiple-choice question that is already "answered" may still be
             # incomplete (e.g. the student picked A,B but the model says A,B,C,D).
             # Re-fill it if a model answer is available and differs from the
@@ -781,6 +838,7 @@ class HomeworkOperator:
                                 "order": detail.order,
                                 "type": detail.type.label,
                                 "stem": detail.stem[:120],
+                                "subjective": False,
                                 "reason": (
                                     f"多选已答 {detail.my_answer}，但缺少模型答案，"
                                     "无法核对是否漏选"
@@ -800,6 +858,7 @@ class HomeworkOperator:
                         "order": detail.order,
                         "type": detail.type.label,
                         "stem": detail.stem[:120],
+                        "subjective": True,
                         "reason": "主观题/编程题/附件题，需本人完成",
                     }
                 )
@@ -813,6 +872,7 @@ class HomeworkOperator:
                         "order": detail.order,
                         "type": detail.type.label,
                         "stem": detail.stem[:120],
+                        "subjective": False,
                         "reason": "缺少模型答案，待人工/LLM 补充",
                     }
                 )
@@ -823,22 +883,40 @@ class HomeworkOperator:
                                                occurrence=occurrence)
                 detail.my_answer = normalized
                 detail.answered = True
+                submitted_answers[detail.question_id] = normalized
                 outcome["answered"] += 1
                 outcome["objective_answered"] += 1
             except (UplusError, PWTimeout, ValueError) as exc:
                 outcome["errors"].append(f"第{detail.order}题作答失败: {exc}")
 
+        subjective_skips = sum(
+            1 for item in outcome["skipped_questions"] if item.get("subjective")
+        )
+        blocking_skips = outcome["skipped"]
+        if allow_subjective_skips:
+            blocking_skips -= subjective_skips
+        outcome["subjective_skipped"] = subjective_skips
+        outcome["blocking_skips"] = blocking_skips
         outcome["can_submit"] = (
             not outcome["errors"]
-            and outcome["skipped"] == 0
+            and blocking_skips == 0
             and outcome["objective_answered"] == outcome["objective_total"]
         )
         if submit and (outcome["can_submit"] or force_submit):
             self.submit_homework(page, task, outcome)
+            if outcome["submitted"]:
+                try:
+                    journal.record(
+                        self.config, task_id=task.task_id,
+                        homework_id=task.homework_id, name=task.name,
+                        answers=submitted_answers,
+                    )
+                except OSError as exc:
+                    outcome["note"] += f"（本地答案记录写入失败：{exc}，不影响提交）"
         else:
             reasons = []
-            if outcome["skipped"]:
-                reasons.append(f"{outcome['skipped']} 题未完成")
+            if blocking_skips:
+                reasons.append(f"{blocking_skips} 题未完成")
             if outcome["errors"]:
                 reasons.append(f"{len(outcome['errors'])} 题作答出错")
             outcome["note"] = "存在未完成题目，已暂缓提交：" + "，".join(reasons) if reasons else "已填写，等待提交"

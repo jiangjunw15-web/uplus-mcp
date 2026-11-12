@@ -9,10 +9,10 @@ from __future__ import annotations
 from . import report as report_mod
 from .browser import BrowserSession, AuthExpiredError, UplusError
 from .config import Config
-from .models import HomeworkStatus, HomeworkTask
+from .models import HomeworkStatus, HomeworkTask, QuestionType
 from .operator import HomeworkOperator
 from .platform import PlatformClient
-from . import solver, utils
+from . import journal, solver, utils
 
 
 class PatrolEngine:
@@ -212,8 +212,11 @@ class PatrolEngine:
         """Read-only completeness audit for one homework.
 
         Reads every question's student-side detail and reports which objective
-        questions carry no answer. Nothing is withdrawn, filled or submitted, so
-        it is safe to run against an already submitted homework.
+        questions carry no answer, which multi-selects were submitted with only
+        part of the correct options, and which multi-selects cannot be judged
+        because neither the platform nor the local journal has an answer yet.
+        Nothing is withdrawn, filled or submitted, so it is safe to run against
+        an already submitted homework.
 
         The API status understates: a homework already handed in can still come
         back as ``not_submitted``. ``withdrawable`` therefore follows the page's
@@ -240,6 +243,7 @@ class PatrolEngine:
             self.client.question_detail(q.question_id)
             for q in self.client.list_questions(task.homework_id)
         ]
+        expected = journal.answers_for(self.config, task.task_id, task.homework_id)
         final_status = task.status
         return {
             "course_id": course_id,
@@ -253,8 +257,225 @@ class PatrolEngine:
             "page_state_note": page_state_note,
             "deadline": utils.deadline_label(task.end_ms),
             "withdrawable": final_status is HomeworkStatus.SUBMITTED_PENDING,
-            "audit": report_mod.audit_questions(questions),
+            "journal_answers": len(expected),
+            "audit": report_mod.audit_questions(questions, expected_answers=expected),
         }
+
+    def repair_homework(self, task_id: str, course_id: str,
+                        answers: dict[str, str] | str | None = None,
+                        *, verify_unjudged: bool = False,
+                        submit: bool = True) -> dict:
+        """Withdraw a submitted homework, fill the gaps, and resubmit it.
+
+        Only a homework the page reports as ``submitted_pending`` can be
+        repaired (a graded one cannot be withdrawn). The withdrawal happens
+        only after every known gap has an answer: the caller's ``answers``
+        first, then the local journal recorded when this tool submitted the
+        homework. Existing answers are preserved and re-used, so a withdrawal
+        that clears the draft can still be restored.
+
+        ``verify_unjudged=True`` additionally re-answers multi-selects whose
+        completeness could not be checked before grading (the platform hides
+        its standard answer while a submission is pending). Supplying an answer
+        for such a question is what makes the re-check meaningful.
+        """
+        task = self.resolve_task(task_id, course_id)
+        supplied = solver.parse_model_answers(answers or {})
+        page = self.operator.open_homework(task)
+        status, progress = self.operator.read_page_state(page)
+        if status is not None:
+            task.page_status = status
+        if progress is not None:
+            task.page_progress = progress
+        final_status = task.status
+
+        result: dict = {
+            "course_id": course_id,
+            "course_name": self.course_name(course_id),
+            "task_id": task.task_id,
+            "homework_id": task.homework_id,
+            "name": task.name,
+            "status": final_status.value,
+            "status_label": report_mod.STATUS_LABEL[final_status],
+            "withdrawable": final_status is HomeworkStatus.SUBMITTED_PENDING,
+            "withdrawn": False,
+            "submitted": False,
+            "needs_answers": [],
+            "errors": [],
+            "note": "",
+        }
+        if final_status is HomeworkStatus.SUBMITTED_GRADED:
+            result["note"] = "作业已出分，平台不允许撤回，无法补交"
+            return result
+        if final_status is not HomeworkStatus.SUBMITTED_PENDING:
+            result["note"] = ("页面未显示「撤回作业」，这份作业不是待批改状态；"
+                              "如仍未提交，请直接用 uplus_answer_homework 作答")
+            return result
+
+        questions = [
+            self.client.question_detail(q.question_id)
+            for q in self.client.list_questions(task.homework_id)
+        ]
+        expected = journal.answers_for(self.config, task.task_id, task.homework_id)
+        audit = report_mod.audit_questions(questions, expected_answers=expected)
+        result["audit"] = audit
+
+        by_order = {q.order: q for q in questions}
+        target_ids: set[str] = set()
+        targets: list[tuple[str, object, dict]] = []
+        for hit in audit["missing"]:
+            question = by_order.get(hit["order"])
+            if question is not None:
+                targets.append(("missing", question, hit))
+                target_ids.add(question.question_id)
+        for hit in audit["partial"]:
+            question = by_order.get(hit["order"])
+            if question is not None:
+                targets.append(("partial", question, hit))
+                target_ids.add(question.question_id)
+        if verify_unjudged:
+            for hit in audit["unjudged"]:
+                question = by_order.get(hit["order"])
+                if question is not None:
+                    targets.append(("verify", question, hit))
+                    target_ids.add(question.question_id)
+
+        for kind, question, hit in targets:
+            supplied_answer = (
+                supplied.get(question.question_id)
+                or supplied.get(str(question.order))
+            )
+            fallback = expected.get(question.question_id)
+            answer = supplied_answer or fallback
+            invalid_reason = ""
+            # A partial selection or an unverified multi-select must not be
+            # resubmitted as-is: that would only repeat the defect. Require a
+            # real answer from the caller or the local journal.
+            if not answer:
+                invalid_reason = "缺少答案，无法补交"
+            else:
+                try:
+                    normalized = solver.normalize_answer(question, answer)
+                except (TypeError, ValueError) as exc:
+                    invalid_reason = f"答案无法解析：{exc}"
+                else:
+                    reference = hit.get("reference_answer")
+                    if reference and question.type is QuestionType.MULTIPLE:
+                        expected_letters = set(utils.normalize_letters(reference))
+                        got_letters = set(utils.normalize_letters(normalized))
+                        if expected_letters != got_letters:
+                            missing = "".join(sorted(expected_letters - got_letters))
+                            extra = "".join(sorted(got_letters - expected_letters))
+                            detail = []
+                            if missing:
+                                detail.append(f"仍缺 {missing}")
+                            if extra:
+                                detail.append(f"多出 {extra}")
+                            invalid_reason = (
+                                "新答案与标准答案不一致（" + "，".join(detail) + "）"
+                            )
+            if invalid_reason:
+                result["needs_answers"].append({
+                    "kind": kind,
+                    "question_id": question.question_id,
+                    "order": question.order,
+                    "type": question.type.label,
+                    "stem": question.stem[:120],
+                    "my_answer": question.my_answer,
+                    "reference_answer": question.reference_answer,
+                    "missing_letters": hit.get("missing_letters"),
+                    "reason": invalid_reason,
+                    "question": question.llm_prompt(),
+                })
+        if result["needs_answers"]:
+            result["note"] = ("撤回前必须先准备以下漏答/漏选题目答案；"
+                              "本次未撤回，作业保持已提交状态")
+            return result
+        if not targets:
+            result["note"] = "没有漏答或漏选题目，无需撤回"
+            return result
+
+        merged: dict[str, str] = {}
+        for question in questions:
+            if not question.auto_answerable:
+                continue
+            answer = (
+                supplied.get(question.question_id)
+                or supplied.get(str(question.order))
+            )
+            if answer is None and question.question_id in target_ids:
+                answer = expected.get(question.question_id)
+            if answer is None:
+                answer = question.my_answer
+            if answer:
+                merged[question.question_id] = answer
+        uncovered = [
+            question.order for question in questions
+            if question.auto_answerable and question.question_id not in merged
+        ]
+        if uncovered:
+            result["needs_answers"] = [
+                {"order": order, "reason": "该客观题没有任何答案可供补交"}
+                for order in uncovered
+            ]
+            result["note"] = "仍有客观题没有答案，未撤回，作业保持已提交状态"
+            return result
+
+        try:
+            result["withdrawal"] = self.operator.withdraw_homework(page, task)
+            result["withdrawn"] = result["withdrawal"] == "withdrawn"
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - report, never crash the tool
+            result["errors"].append(f"撤回失败：{exc}")
+            result["note"] = "撤回失败，作业保持原状态"
+            return result
+
+        try:
+            outcome = self.operator.answer_homework(
+                task, merged, submit=submit,
+                allow_subjective_skips=True,
+                course_name=self.course_name(course_id),
+            )
+            result["repair"] = outcome
+            result["submitted"] = bool(outcome.get("submitted"))
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"补交失败：{exc}")
+            result["note"] = "作业已撤回，但补交未完成，请人工确认后重新提交"
+            return result
+
+        try:
+            after_questions = [
+                self.client.question_detail(q.question_id)
+                for q in self.client.list_questions(task.homework_id)
+            ]
+            after_expected = journal.answers_for(
+                self.config, task.task_id, task.homework_id)
+            result["audit_after"] = report_mod.audit_questions(
+                after_questions, expected_answers=after_expected)
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - verification is best-effort
+            result["audit_after"] = {"error": str(exc)}
+
+        if result["submitted"]:
+            after = result.get("audit_after") or {}
+            if after.get("complete"):
+                result["note"] = "已撤回、补齐并重新提交；复核未发现漏答或漏选"
+                if after.get("unjudged_count"):
+                    result["note"] += (
+                        f"（另有 {after['unjudged_count']} 道多选因平台尚未公布"
+                        "参考答案，最终正确性要等批改后复核）"
+                    )
+            else:
+                result["note"] = "已重新提交，但复核仍有未完成项，请人工检查"
+        elif submit:
+            result["note"] = "作业已撤回，但未完成重新提交；请检查 errors"
+        else:
+            result["note"] = "作业已撤回并填写答案，未提交（submit=False）"
+        return result
 
     # ------------------------------------------------------------------ #
     # write tools
@@ -323,17 +544,60 @@ class PatrolEngine:
     # ------------------------------------------------------------------ #
     # patrol
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _repair_items(questions: list, audit_result: dict,
+                      expected: dict[str, str]) -> list[dict]:
+        """Questions a repair call must answer, with their current context."""
+        by_order = {q.order: q for q in questions}
+        items: list[dict] = []
+        for kind in ("missing", "partial", "unjudged"):
+            for hit in audit_result.get(kind, []):
+                question = by_order.get(hit.get("order"))
+                if question is None:
+                    continue
+                item = {
+                    "kind": kind,
+                    "order": question.order,
+                    "question_id": question.question_id,
+                    "type": question.type.label,
+                    "stem": question.stem[:120],
+                    "current_answer": question.my_answer,
+                    "reference_answer": question.reference_answer,
+                    "journal_answer": expected.get(question.question_id),
+                    "question": question.llm_prompt(),
+                }
+                for key in ("missing_letters", "reason", "reference_source"):
+                    if hit.get(key):
+                        item[key] = hit[key]
+                item["needs_model_answer"] = not bool(item.get("journal_answer"))
+                if kind == "unjudged":
+                    # Not a proven defect: the platform simply has not shown
+                    # its answer yet. Re-answering it is optional.
+                    item["optional"] = True
+                items.append(item)
+        return items
+
     def patrol(self, *, auto_answer: bool = False, submit: bool = False,
-               audit: bool = False) -> dict:
+               audit: bool = True) -> dict:
         snapshot = report_mod.PatrolReport(generated_at_ms=utils.now_ms())
         answer_briefs: list[dict] = []
+        repair_briefs: list[dict] = []
         auto_submissions: list[dict] = []
         incomplete: list[dict] = []
 
         for course in self._iter_courses():
             for task in self.client.list_homeworks(course.id):
                 self._register(task)
-                if task.status is HomeworkStatus.NOT_SUBMITTED:
+                # The page button is the authoritative status. Read it for
+                # open homeworks as before, and for audited submitted ones so
+                # a graded homework is not misreported as withdrawable.
+                should_read_page = task.status is HomeworkStatus.NOT_SUBMITTED or (
+                    audit and task.status in (
+                        HomeworkStatus.SUBMITTED_PENDING,
+                        HomeworkStatus.SUBMITTED_GRADED,
+                    )
+                )
+                if should_read_page:
                     try:
                         page = self.operator.open_homework(task)
                         status, progress = self.operator.read_page_state(page)
@@ -359,7 +623,10 @@ class PatrolEngine:
                             self.client.question_detail(q.question_id)
                             for q in self.client.list_questions(task.homework_id)
                         ]
-                        audit_result = report_mod.audit_questions(questions)
+                        expected = journal.answers_for(
+                            self.config, task.task_id, task.homework_id)
+                        audit_result = report_mod.audit_questions(
+                            questions, expected_answers=expected)
                     except AuthExpiredError:
                         raise
                     except Exception as exc:  # keep the patrol alive
@@ -368,18 +635,34 @@ class PatrolEngine:
                             "detail": f"提交完整性核查失败：{exc}",
                         })
                     else:
+                        snapshot.audit_checked += 1
+                        snapshot.audit_unjudged += audit_result["unjudged_count"]
                         if not audit_result["complete"]:
-                            orders = "、".join(
-                                str(m["order"]) for m in audit_result["missing"][:10]
-                            )
-                            tail = "…" if len(audit_result["missing"]) > 10 else ""
+                            detail_parts: list[str] = []
+                            if audit_result["missing"]:
+                                orders = "、".join(
+                                    str(m["order"]) for m in audit_result["missing"][:10]
+                                )
+                                tail = "…" if len(audit_result["missing"]) > 10 else ""
+                                detail_parts.append(
+                                    f"漏答 {len(audit_result['missing'])} 题"
+                                    f"（题号 {orders}{tail}）"
+                                )
+                            if audit_result["partial"]:
+                                porders = "、".join(
+                                    str(m["order"]) for m in audit_result["partial"][:10]
+                                )
+                                ptail = "…" if len(audit_result["partial"]) > 10 else ""
+                                detail_parts.append(
+                                    f"多选漏选 {len(audit_result['partial'])} 题"
+                                    f"（题号 {porders}{ptail}）"
+                                )
                             hint = ("，可撤回后补齐再提交"
                                     if task.status is HomeworkStatus.SUBMITTED_PENDING
                                     else "，已出分无法撤回")
                             snapshot.takeover.append({
                                 "course": course.name, "title": task.name,
-                                "detail": (f"已提交但漏答 {len(audit_result['missing'])} 题"
-                                           f"（题号 {orders}{tail}）{hint}"),
+                                "detail": "已提交但" + "；".join(detail_parts) + hint,
                                 "deadline": utils.deadline_label(task.end_ms),
                             })
                             incomplete.append({
@@ -391,6 +674,9 @@ class PatrolEngine:
                                 "status": task.status.value,
                                 "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
                                 "missing": audit_result["missing"],
+                                "partial": audit_result["partial"],
+                                "wrong": audit_result["wrong"],
+                                "unjudged": audit_result["unjudged"],
                                 "audit": audit_result,
                             })
                             snapshot.incomplete.append({
@@ -398,7 +684,38 @@ class PatrolEngine:
                                 "name": task.name,
                                 "missing_count": len(audit_result["missing"]),
                                 "missing_orders": [m["order"] for m in audit_result["missing"]],
+                                "partial_count": len(audit_result["partial"]),
+                                "partial": audit_result["partial"],
+                                "unjudged_count": audit_result["unjudged_count"],
                                 "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
+                            })
+                        repair_items = self._repair_items(
+                            questions, audit_result, expected)
+                        if repair_items:
+                            withdrawable = (
+                                task.status is HomeworkStatus.SUBMITTED_PENDING
+                            )
+                            if withdrawable:
+                                note = ("先答完 needs_model_answer 且非 optional 的题目，再调用 "
+                                        "uplus_repair_homework(task_id, course_id, answers) "
+                                        "撤回、补齐并重新提交；journal_answer 已有答案的题目"
+                                        "无需模型再答。optional=true 的是待批改、平台尚未公布"
+                                        "答案的多选，用户要求彻底排除漏选时再作答并传 "
+                                        "verify_unjudged=True。")
+                            elif task.status is HomeworkStatus.SUBMITTED_GRADED:
+                                note = "作业已出分，平台不允许撤回；这些题目仅作结果告知。"
+                            else:
+                                note = "当前状态无法确认可撤回，请人工核对。"
+                            repair_briefs.append({
+                                "course_id": course.id,
+                                "course_name": course.name,
+                                "task_id": task.task_id,
+                                "homework_id": task.homework_id,
+                                "name": task.name,
+                                "status": task.status.value,
+                                "withdrawable": withdrawable,
+                                "items": repair_items,
+                                "note": note,
                             })
 
                 if task.status is HomeworkStatus.NOT_SUBMITTED and not task.is_expired():
@@ -502,7 +819,13 @@ class PatrolEngine:
                 "experiments_unknown": snapshot.unknown_experiments,
                 "takeover_count": len(snapshot.takeover),
             },
+            "audit_summary": {
+                "checked": snapshot.audit_checked,
+                "incomplete": len(incomplete),
+                "unjudged_multiselect": snapshot.audit_unjudged,
+            },
             "answer_briefs": answer_briefs,
+            "repair_briefs": repair_briefs,
             "auto_submissions": auto_submissions,
             "incomplete_homeworks": incomplete,
             "takeover": snapshot.takeover,

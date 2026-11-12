@@ -71,8 +71,9 @@ cp src/uplus_mcp/courses.example.json config/courses.json
 | `uplus_list_experiments` | 列出课程实验，返回已提交 / 未提交 / 状态未知三态 |
 | `uplus_inspect_homework` | 读取作业状态与题目审题包，供客户端模型作答 |
 | `uplus_answer_homework` | 按 `{question_id: answer}` 填写客观题；题目未答完或出错时自动暂缓提交，`force_submit=true` 可人工强制提交 |
+| `uplus_repair_homework` | 对已提交待批改的作业执行「撤回 → 补齐漏答/漏选 → 重新提交」；撤回前必须备齐所有已知缺口答案，已出分作业拒绝撤回 |
 | `uplus_upload_attachment` | 上传附件到指定作业 |
-| `uplus_patrol` | 全量巡检并生成 Markdown 报告，返回待答审题包与待接管清单 |
+| `uplus_patrol` | 全量巡检并生成 Markdown 报告；默认核查已提交作业的漏答/多选漏选，返回待答审题包、补交清单与待接管清单 |
 | `uplus_close` | 关闭本进程浏览器会话 |
 
 ### 通用浏览器工具（`browse_*`）

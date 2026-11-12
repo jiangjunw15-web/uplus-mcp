@@ -155,3 +155,46 @@ def test_experiment_unknown_state_defaults_to_none():
     exp = Experiment(name="实验一")
     assert exp.submitted is None
 
+
+
+def test_code_block_option_content_is_readable():
+    """Options rendered as code blocks (``<property>`` etc.) must reach the
+    model as text; the page wraps them in <p><code>, not an image or a widget."""
+    raw = {
+        "id": "q20",
+        "orderNumber": 20,
+        "qsnType": 1,
+        "titleText": "<p>XML 中使用构造器注入时，应使用的子标签是（ ）。</p>",
+        "options": [
+            {"id": "A", "optionContent": "<p><code>&lt;property&gt;</code></p>"},
+            {"id": "B", "optionContent": "<p><code>&lt;value&gt;</code></p>"},
+            {"id": "C", "optionContent": "<p><code>&lt;constructor-arg&gt;</code></p>"},
+            {"id": "D", "optionContent": "<p><code>&lt;bean&gt;</code></p>"},
+        ],
+        "userAnswer": "C",
+    }
+    q = Question.from_detail(raw)
+    assert q.options[2].content == "<constructor-arg>"
+    assert q.options[2].prompt_line() == "C、<constructor-arg>"
+    assert q.llm_prompt()["options"] == [
+        "A、<property>", "B、<value>", "C、<constructor-arg>", "D、<bean>",
+    ]
+
+
+def test_question_detail_parses_reference_answer_and_score():
+    raw = {
+        "id": "q1",
+        "orderNumber": 1,
+        "qsnType": 2,
+        "everyScore": 10,
+        "titleText": "<p>题干</p>",
+        "options": [{"id": "A", "optionContent": "<p>甲</p>"}],
+        "userAnswer": "A",
+        "answer": "ABC",
+        "isCorrect": 0,
+        "userScore": 2,
+    }
+    q = Question.from_detail(raw)
+    assert q.reference_answer == "ABC"
+    assert q.is_correct is False
+    assert q.user_score == 2.0

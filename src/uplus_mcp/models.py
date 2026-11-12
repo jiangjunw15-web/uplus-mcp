@@ -57,6 +57,33 @@ def question_type(code: Any) -> QuestionType:
         return QuestionType.UNKNOWN
 
 
+def _as_bool_flag(value: Any) -> Optional[bool]:
+    """Read a 0/1 flag that may arrive as int, bool or string."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().lower()
+    if text in ("true", "yes", "y", "1", "正确", "对"):
+        return True
+    if text in ("false", "no", "n", "0", "错误", "错"):
+        return False
+    return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_answered(raw: dict) -> bool:
     """True only when a real answer is recorded (``userAnswer`` non-empty).
 
@@ -120,6 +147,16 @@ class Question:
     my_answer: Optional[str] = None
     answered: bool = False
     hw_answer_id: Optional[str] = None
+    #: Standard answer exposed by the student detail endpoint. The platform
+    #: only sends it once the homework is graded; while a submission is still
+    #: awaiting grading the field is absent, so a multi-select cannot be
+    #: checked for missing options (漏选) at that point.
+    reference_answer: Optional[str] = None
+    #: ``isCorrect`` from the same payload: True/False after grading, None
+    #: before. Used as a fallback when ``reference_answer`` is unavailable.
+    is_correct: Optional[bool] = None
+    #: Points awarded for this question after grading (``userScore``).
+    user_score: Optional[float] = None
     #: Image URLs embedded in the stem or options (diagrams, charts, tables
     #: rendered as pictures). Text alone cannot answer these questions; the
     #: model must look at the figure via ``uplus_capture_question_image``.
@@ -146,6 +183,15 @@ class Question:
         answer = raw.get("userAnswer")
         detail.my_answer = str(answer) if answer is not None and str(answer).strip() else None
         detail.hw_answer_id = raw.get("hwAnswerId") or None
+        # ``answer`` is the platform's standard answer. It only appears after
+        # grading; a pending submission must be audited without it.
+        reference = raw.get("answer")
+        detail.reference_answer = (
+            str(reference).strip()
+            if reference is not None and str(reference).strip() else None
+        )
+        detail.is_correct = _as_bool_flag(raw.get("isCorrect"))
+        detail.user_score = _as_float(raw.get("userScore"))
         # Figures live in the stem or an option's rich text. ``strip_html``
         # drops the <img>, so collect them before the model sees the question.
         images = utils.extract_images(raw.get("titleText"))

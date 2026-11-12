@@ -8,8 +8,15 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
-from .models import Course, Experiment, HomeworkStatus, HomeworkTask, Question
-from . import utils
+from .models import (
+    Course,
+    Experiment,
+    HomeworkStatus,
+    HomeworkTask,
+    Question,
+    QuestionType,
+)
+from . import solver, utils
 
 
 STATUS_LABEL = {
@@ -44,6 +51,11 @@ class PatrolReport:
     experiments: list[ExperimentRow] = field(default_factory=list)
     takeover: list[dict] = field(default_factory=list)
     incomplete: list[dict] = field(default_factory=list)
+    #: How many submitted homeworks the optional audit inspected, and how many
+    #: answered multi-select questions it could not verify because the platform
+    #: had not published the reference answer yet (still awaiting grading).
+    audit_checked: int = 0
+    audit_unjudged: int = 0
 
     # ------------------------------------------------------------------ #
     # statistics
@@ -89,22 +101,140 @@ def add_homework(report: PatrolReport, course: Course, task: HomeworkTask, *, no
     )
 
 
-def audit_questions(questions: list[Question]) -> dict:
+def _entry(question: Question, **extra) -> dict:
+    entry = {
+        "order": question.order,
+        "type": question.type.label,
+        "stem": question.stem[:80],
+        "my_answer": question.my_answer,
+    }
+    entry.update(extra)
+    return entry
+
+
+def _normalized(question: Question, raw: Optional[str]) -> Optional[str]:
+    """Normalize one answer the same way the answer path does; None if invalid."""
+    if not raw:
+        return None
+    try:
+        return solver.normalize_answer(question, raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def audit_questions(questions: list[Question],
+                    expected_answers: Optional[dict[str, str]] = None) -> dict:
     """Read-only completeness check over one homework's questions.
 
     A question counts as answered only when it carries a non-empty
-    ``userAnswer`` (``my_answer``).  A bare ``hwAnswerId`` or ``isAnswer`` flag
+    ``userAnswer`` (``my_answer``). A bare ``hwAnswerId`` or ``isAnswer`` flag
     no longer suffices: the platform creates an answer row when the student
     merely opens the question, even with no option selected (see
-    ``models._is_answered``).  The audit needs no page interaction and never
+    ``models._is_answered``). The audit needs no page interaction and never
     withdraws a submission. Subjective / programming / attachment items are
     reported separately and do not make the homework "incomplete".
+
+    Multi-select answers are also checked against the platform's standard
+    answer (``answer``) when it is available. That field is only sent after
+    grading; an answer that is a *proper subset* of the standard answer is a
+    "漏选" (``partial``), while letters outside it are ``wrong``. When the
+    platform hides the answer (still awaiting grading), a locally recorded
+    answer from :mod:`uplus_mcp.journal` is used instead, so homework submitted
+    through this tool can be checked before it is graded. A multi-select with
+    neither source is listed under ``unjudged`` instead of being silently
+    reported as complete. ``complete`` therefore means "no blank question and
+    no partial multi-select"; ``clean`` additionally requires every checked
+    answer to be correct.
     """
     objective = [q for q in questions if q.auto_answerable]
-    missing = [
-        q for q in objective
-        if not q.my_answer
-    ]
+    missing = [q for q in objective if not q.my_answer]
+    partial: list[dict] = []
+    wrong: list[dict] = []
+    unjudged: list[dict] = []
+    correct = 0
+    reference_known = 0
+
+    expected_answers = expected_answers or {}
+    for q in objective:
+        if not q.my_answer:
+            continue
+        journal_answer = (expected_answers.get(q.question_id) or "").strip()
+        reference = (q.reference_answer or "").strip()
+        reference_source = "platform" if reference else ""
+        if not reference and q.type is QuestionType.MULTIPLE and journal_answer:
+            reference = journal_answer
+            reference_source = "journal"
+        if reference:
+            reference_known += 1
+            if q.type is QuestionType.MULTIPLE:
+                selected = set(utils.normalize_letters(q.my_answer))
+                expected_letters = set(utils.normalize_letters(reference))
+                if not expected_letters:
+                    unjudged.append(_entry(
+                        q, reason="标准答案无法解析为选项字母，未能核对漏选",
+                        reference_answer=reference, reference_source=reference_source,
+                    ))
+                elif selected == expected_letters:
+                    correct += 1
+                elif selected and selected < expected_letters:
+                    partial.append(_entry(
+                        q,
+                        reference_answer=reference,
+                        reference_source=reference_source,
+                        missing_letters="".join(sorted(expected_letters - selected)),
+                    ))
+                else:
+                    extra = "".join(sorted(selected - expected_letters))
+                    absent = "".join(sorted(expected_letters - selected))
+                    reason = "多选了标准答案之外的选项"
+                    if absent:
+                        reason += f"，同时漏选 {absent}"
+                    wrong.append(_entry(
+                        q,
+                        reference_answer=reference,
+                        reference_source=reference_source,
+                        extra_letters=extra,
+                        missing_letters=absent,
+                        reason=reason,
+                    ))
+            else:
+                got = _normalized(q, q.my_answer)
+                want = _normalized(q, reference)
+                if got is None or want is None:
+                    unjudged.append(_entry(
+                        q, reason="答案或标准答案无法解析，未能核对",
+                        reference_answer=reference, reference_source=reference_source,
+                    ))
+                elif got == want:
+                    correct += 1
+                else:
+                    wrong.append(_entry(
+                        q, reference_answer=reference,
+                        reference_source=reference_source,
+                        reason="与标准答案不一致",
+                    ))
+        elif q.is_correct is not None:
+            # Graded, but the endpoint did not expose the answer text. The
+            # boolean still tells right from wrong; it cannot tell a partial
+            # multi-select from a wrongly selected one.
+            reference_known += 1
+            if q.is_correct:
+                correct += 1
+            else:
+                reason = "判分不正确"
+                if q.type is QuestionType.MULTIPLE:
+                    reason += "（平台未给出标准答案，无法区分漏选与错选）"
+                wrong.append(_entry(q, reason=reason))
+        elif q.type is QuestionType.MULTIPLE:
+            # Pending grading: the student-side detail carries no ``answer``,
+            # and the answer page only shows "我的答案". A non-empty selection
+            # can still be missing options, so it must not pass silently.
+            unjudged.append(_entry(
+                q, reason="平台未公布参考答案（待批改），本地也没有提交时的答案记录，"
+                          "无法核对是否漏选",
+            ))
+
+    issue_count = len(missing) + len(partial)
     return {
         "total": len(questions),
         "objective": len(objective),
@@ -114,7 +244,19 @@ def audit_questions(questions: list[Question]) -> dict:
             {"order": q.order, "type": q.type.label, "stem": q.stem[:80]}
             for q in missing
         ],
-        "complete": not missing,
+        "partial": partial,
+        "wrong": wrong,
+        "unjudged": unjudged,
+        "correct": correct,
+        "reference_known": reference_known,
+        "missing_count": len(missing),
+        "partial_count": len(partial),
+        "wrong_count": len(wrong),
+        "unjudged_count": len(unjudged),
+        "issue_count": issue_count,
+        "complete": issue_count == 0,
+        "clean": issue_count == 0 and not wrong,
+        "verified": not unjudged,
     }
 
 
@@ -185,21 +327,44 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
         lines.append("")
 
     # ---- completeness audit ----
-    if report.incomplete:
+    if report.incomplete or report.audit_checked:
         lines.append("## 提交完整性核查")
         lines.append("")
-        lines.append("| 课程 | 作业 | 漏答题数 | 题号 | 可否撤回 |")
-        lines.append("| --- | --- | --- | --- | --- |")
-        for item in report.incomplete:
-            orders = "、".join(str(n) for n in item.get("missing_orders", [])[:12])
-            if len(item.get("missing_orders", [])) > 12:
-                orders += "…"
-            withdrawable = "可撤回" if item.get("withdrawable") else "已出分不可撤回"
+        if report.incomplete:
+            lines.append("| 课程 | 作业 | 漏答 | 多选漏选 | 题号 | 可否撤回 |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for item in report.incomplete:
+                orders = "、".join(str(n) for n in item.get("missing_orders", [])[:12])
+                if len(item.get("missing_orders", [])) > 12:
+                    orders += "…"
+                partial_parts: list[str] = []
+                for hit in item.get("partial", [])[:12]:
+                    miss = hit.get("missing_letters")
+                    partial_parts.append(
+                        f"{hit.get('order')}" + (f"（缺{miss}）" if miss else "")
+                    )
+                if len(item.get("partial", [])) > 12:
+                    partial_parts.append("…")
+                if partial_parts:
+                    orders = "；".join(
+                        part for part in (orders, "漏选 " + "、".join(partial_parts)) if part
+                    )
+                withdrawable = "可撤回" if item.get("withdrawable") else "已出分不可撤回"
+                lines.append(
+                    f"| {item.get('course', '')} | {item.get('name', '')} | "
+                    f"{item.get('missing_count', 0)} | {item.get('partial_count', 0)} | "
+                    f"{orders or '-'} | {withdrawable} |"
+                )
+            lines.append("")
+        else:
+            lines.append("本次核查的已提交作业没有漏答或漏选。")
+            lines.append("")
+        if report.audit_unjudged:
             lines.append(
-                f"| {item.get('course', '')} | {item.get('name', '')} | "
-                f"{item.get('missing_count', 0)} | {orders or '-'} | {withdrawable} |"
+                f"> 另有 {report.audit_unjudged} 道多选题因平台尚未公布参考答案"
+                "（待批改）无法核对是否漏选；批改后重新运行核查即可判定。"
             )
-        lines.append("")
+            lines.append("")
 
     # ---- takeover list ----
     if report.takeover:

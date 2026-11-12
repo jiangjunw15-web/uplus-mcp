@@ -5,6 +5,8 @@ counter balance, patrol auto_answer/submit wiring, and the unknown-course
 query scope.
 """
 
+import tempfile
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -15,8 +17,17 @@ from uplus_mcp.config import Config
 from uplus_mcp.engine import PatrolEngine
 from uplus_mcp.browser import UplusError
 from uplus_mcp.launcher import _copy_profile
-from uplus_mcp.models import Course, HomeworkTask, Question, QuestionType
+from uplus_mcp.models import (
+    Course,
+    HomeworkStatus,
+    HomeworkTask,
+    Question,
+    QuestionType,
+)
 from uplus_mcp.operator import HomeworkOperator
+
+
+_TEST_REPORT_DIR = Path(tempfile.mkdtemp(prefix="uplus-test-reports-"))
 
 
 # --------------------------------------------------------------------------- #
@@ -199,7 +210,10 @@ def _operator(questions, page=None):
     client.list_questions.return_value = list(questions)
     client.question_detail.side_effect = lambda qid: next(
         q for q in questions if q.question_id == qid)
-    op = HomeworkOperator(session, client, Config())
+    # A temporary report folder keeps the answer journal out of the real repo
+    # copy while still exercising the recording path.
+    op = HomeworkOperator(session, client,
+                          Config(report_dir=str(_TEST_REPORT_DIR)))
     return op, page
 
 
@@ -251,6 +265,48 @@ def test_answer_homework_fresh_all_answered_still_submits():
     outcome = op.answer_homework(_task(), {"q1": "A", "q2": "B"}, submit=True)
     assert outcome["can_submit"] is True
     assert outcome["submitted"] is True
+
+
+def test_answer_homework_can_submit_when_only_subjective_items_remain():
+    """A repair re-submits an already handed-in homework: its subjective
+    answers were completed before, so they must not block the resubmission."""
+    questions = [
+        _question("q1", 1, QuestionType.SINGLE),
+        _question("q2", 2, QuestionType.SHORT_ANSWER),
+    ]
+    op, page = _operator(questions)
+    outcome = op.answer_homework(
+        _task(), {"q1": "A"}, submit=True, allow_subjective_skips=True)
+    assert outcome["subjective_skipped"] == 1
+    assert outcome["blocking_skips"] == 0
+    assert outcome["can_submit"] is True
+    assert outcome["submitted"] is True
+
+
+class _WithdrawPage(_OpPage):
+    """Fake submitted page: 撤回作业 flips back to 提交作业 after confirming."""
+
+    def __init__(self):
+        super().__init__()
+        self._body = "答题卡 (1/2) 撤回作业"
+
+    def _confirm(self):
+        self._body = "答题卡 (1/2) 提交作业"
+
+
+def test_withdraw_homework_returns_to_editable_state():
+    op, page = _operator([], page=_WithdrawPage())
+    task = _task()
+    assert op.withdraw_homework(page, task) == "withdrawn"
+    assert task.page_status is HomeworkStatus.NOT_SUBMITTED
+
+
+def test_withdraw_homework_refuses_a_graded_homework():
+    page = _WithdrawPage()
+    page._body = "参考答案 总分：100 得分：5"
+    op, _ = _operator([], page=page)
+    with pytest.raises(UplusError, match="已出分"):
+        op.withdraw_homework(page, _task())
 
 
 # --------------------------------------------------------------------------- #

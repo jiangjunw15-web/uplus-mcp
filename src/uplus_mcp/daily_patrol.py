@@ -2,8 +2,11 @@
 
 This CLI never launches a browser and never submits answers by itself: it
 checks the login session, saves a Markdown report, and dumps objective-question
-briefs that an MCP session (or a human) can answer next. Subjective, file and
-experiment-report items are listed under "takeover".
+briefs that an MCP session (or a human) can answer next. Submitted homework is
+audited by default for blank answers and partial multi-selects; the repair
+brief tells the MCP session what to answer before calling
+``uplus_repair_homework``. Subjective, file and experiment-report items are
+listed under "takeover".
 
 Usage:
     python -m uplus_mcp.daily_patrol
@@ -37,8 +40,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="U+ 巡检（附加到已登录的浏览器，不自动提交）")
     parser.add_argument("--config", default="", help="配置文件路径")
     parser.add_argument("--brief", default="", help="待答题目 brief JSON 保存路径")
-    parser.add_argument("--audit", action="store_true",
-                        help="额外核查已提交作业是否漏题（只读，不撤回）")
+    parser.add_argument("--audit", dest="audit", action="store_true", default=True,
+                        help="核查已提交作业是否漏答/多选漏选（默认开启，只读不撤回）")
+    parser.add_argument("--no-audit", dest="audit", action="store_false",
+                        help="跳过已提交作业的完整性核查")
     args = parser.parse_args()
 
     try:
@@ -70,12 +75,28 @@ def main() -> int:
                 print(f"- [{item.get('course')}] {item.get('title')}：{item.get('detail')}"
                       + (f"（{item.get('deadline')}）" if item.get("deadline") else ""))
         if result.get("incomplete_homeworks"):
-            print("\n=== 已提交但漏题 ===")
+            print("\n=== 已提交但不完整 ===")
             for item in result["incomplete_homeworks"]:
-                orders = "、".join(str(n["order"]) for n in item["missing"][:10])
+                parts: list[str] = []
+                if item["missing"]:
+                    orders = "、".join(str(n["order"]) for n in item["missing"][:10])
+                    tail = "…" if len(item["missing"]) > 10 else ""
+                    parts.append(f"漏答 {len(item['missing'])} 题（题号 {orders}{tail}）")
+                if item.get("partial"):
+                    porders = "、".join(
+                        str(n["order"]) + (
+                            f"缺{n.get('missing_letters')}" if n.get("missing_letters") else ""
+                        )
+                        for n in item["partial"][:10]
+                    )
+                    ptail = "…" if len(item["partial"]) > 10 else ""
+                    parts.append(f"多选漏选 {len(item['partial'])} 题（题号 {porders}{ptail}）")
                 hint = "，可撤回后补齐" if item["withdrawable"] else "，已出分无法撤回"
-                print(f"- [{item['course_name']}] {item['name']}：漏 {len(item['missing'])} 题"
-                      f"（题号 {orders}）{hint}")
+                print(f"- [{item['course_name']}] {item['name']}：{'；'.join(parts)}{hint}")
+        audit_summary = result.get("audit_summary") or {}
+        if audit_summary.get("checked") and audit_summary.get("unjudged_multiselect"):
+            print(f"\n另有 {audit_summary['unjudged_multiselect']} 道多选题因平台尚未公布"
+                  "参考答案（待批改）无法核对是否漏选。")
         if result["answer_briefs"]:
             brief_path = args.brief or str(Path(result["report_path"]).with_suffix(".brief.json"))
             Path(brief_path).write_text(
@@ -83,6 +104,28 @@ def main() -> int:
                 encoding="utf-8",
             )
             print(f"\n待答客观题 brief 已保存：{brief_path}")
+        if result.get("repair_briefs"):
+            repair_path = Path(result["report_path"]).with_suffix(".repair.json")
+            repair_path.write_text(
+                json.dumps(result["repair_briefs"], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            needs = sum(
+                1 for hw in result["repair_briefs"]
+                for item in hw["items"]
+                if item.get("needs_model_answer") and not item.get("optional")
+            )
+            optional = sum(
+                1 for hw in result["repair_briefs"]
+                for item in hw["items"] if item.get("optional")
+            )
+            print(f"\n待补交题目 brief 已保存：{repair_path}")
+            if needs:
+                print(f"其中 {needs} 题需要模型作答；交给 uplus_repair_homework "
+                      "撤回并补齐后重新提交。")
+            if optional:
+                print(f"另有 {optional} 道待批改多选无法核对是否漏选（optional）；"
+                      "批改后复核，或由模型重答后用 verify_unjudged=True 彻底复核。")
         print(f"\n巡检报告：{result['report_path']}")
         return 0
     except AuthExpiredError:

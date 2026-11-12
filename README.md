@@ -13,6 +13,53 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.7.8
+
+Patrol now checks *already submitted* homework by default, detects partial
+multi-select answers, and can withdraw/complete/resubmit a homework through a
+guarded repair action. Suite is 250 passed.
+
+- **Submitted homework is audited on every patrol** — `uplus_patrol`'s
+  `audit` now defaults to `true`; the CLI audits unless `--no-audit` is given.
+  The completeness table gains separate "missing" and "partial multi-select"
+  columns, plus a count of multi-selects that could not be judged.
+- **Partial multi-select answers are detected** — the audit compares
+  `userAnswer` with the platform's standard answer (`answer`) as sets. A
+  proper subset (standard `ABC`, submitted `A`) is `partial` and reports the
+  omitted letters (`BC`); letters outside the standard answer are `wrong`.
+  Option order does not matter (`AB` equals `BA`).
+- **Pending submissions get a second source of truth** — the platform only
+  exposes `answer` after grading; while pending, the student detail has no
+  standard answer and the page only shows "我的答案". A local answer journal
+  (`reports/answer_journal.json`, gitignored) records every answer this tool
+  submits, so a pending homework can still be checked. With neither source the
+  question is reported as `unjudged`, never silently treated as complete.
+- **New `uplus_repair_homework`** — performs "withdraw → fill gaps →
+  resubmit" as one guarded action. Only a homework whose page shows
+  `撤回作业` (submitted, pending grading) can be withdrawn; a graded one is
+  refused. Withdrawal happens only after every known gap has an answer
+  (the caller's `answers` first, the local journal second); otherwise nothing
+  is withdrawn and the submission stays untouched. Existing answers are
+  preserved and re-filled, so a withdrawal that clears the draft can still be
+  restored. The tool re-audits after resubmitting.
+- **A repair answer is validated before withdrawal** — if the new answer still
+  misses letters of the known standard answer, the tool refuses to withdraw and
+  says which letters are missing, so a repair cannot reintroduce 漏选.
+- **Optional re-verification** — `verify_unjudged=True` re-answers every
+  multi-select whose completeness could not be checked while pending, then
+  resubmits. Without it, only known missing/partial questions are repaired.
+- **Code-block options are readable and clickable** — options such as
+  `A、<property>` / `C、<constructor-arg>` come from `<p><code>` fragments and
+  are parsed as plain text; on the page they sit inside a
+  `label.el-radio` whose input value is the letter, so the existing locator
+  finds them uniquely. Regression tests pin both behaviours.
+- **Patrol returns `repair_briefs`** — each affected homework lists the
+  questions, current answer, standard/journal answer and whether the model must
+  answer. The CLI writes the list next to the report as `*.repair.json`.
+- **24 new tests** — partial detection, the journal, unjudged pending
+  multi-selects, guarded withdraw/resubmit, rejection of incomplete repair
+  answers, code-block option parsing and page locators. Total 250 passed.
+
 ## What's new in 0.7.7
 
 A hardening pass over 0.7.6 plus figure-question support: three real defects
@@ -375,8 +422,11 @@ human.
 - Patrol report in Markdown: submitted / pending / outstanding homework,
   experiments, and a takeover list for manual work.
 - Completeness audit: `uplus_audit_homework` reports, read-only, which objective
-  questions of an already submitted homework are still blank; turn it on for the
-  whole patrol with `audit=True`.
+  questions of an already submitted homework are still blank **and** which
+  multi-selects were submitted with only part of the correct options. Patrol
+  runs this audit by default; `audit=False` skips it. Known gaps are repaired
+  through `uplus_repair_homework` (withdraw → complete → resubmit), which never
+  withdraws before every gap has an answer.
 - Works with any MCP-compatible client: Claude Desktop, Cursor, VS Code MCP,
   Doubao agent, DSH and others.
 - Unattended CLI for nightly scheduled patrol; it never answers or submits on its
@@ -532,8 +582,9 @@ Code examples.
 | `uplus_inspect_homework` | Return status and a structured question brief for the client model |
 | `uplus_capture_question_image` | Screenshot one question block (diagram included) and return the image to the model |
 | `uplus_answer_homework` | Fill objective questions and optionally submit |
+| `uplus_repair_homework` | Withdraw a submitted homework, complete missing/partial answers, resubmit and re-audit |
 | `uplus_upload_attachment` | Attach a local file to a homework that requires upload |
-| `uplus_patrol` | Full patrol, Markdown report, answer briefs and takeover list |
+| `uplus_patrol` | Full patrol (submitted-homework audit on by default), Markdown report, answer/repair briefs and takeover list |
 | `uplus_close` | Release the browser session held by this process |
 
 ### Generic browser (`browse_*`)

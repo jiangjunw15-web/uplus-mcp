@@ -10,7 +10,30 @@
 > - 命令分三种环境：**Windows PowerShell**、**macOS Terminal**、**Linux**；AI 先判断用户系统再给对应命令，不要混发。
 > - 工具名以插件实际注册名为准：U+ 业务族 `uplus_*`，通用浏览器族 `browse_*`。
 > - 客观题可自动作答；**简答、编程、附件、实验报告、小组成果物一律交回用户本人**，AI 不得编造答案或伪造上传。
-> - 本手册基于 **0.7.7** 编写；0.7.0 起插件收紧了导航与文件路径边界（见「安全边界」），0.7.4 新增提交完整性核查（见「0.7.4 更新了什么」），0.7.5 修掉作答点错题（见「0.7.5 更新了什么」），0.7.6 修掉多选漏选与跳题（见「0.7.6 更新了什么」），0.7.7 修掉 0.7.6 引入的三处缺陷（见「0.7.7 更新了什么」）。
+> - 本手册基于 **0.7.8** 编写；0.7.0 起插件收紧了导航与文件路径边界（见「安全边界」），0.7.4 新增提交完整性核查（见「0.7.4 更新了什么」），0.7.5 修掉作答点错题（见「0.7.5 更新了什么」），0.7.6 修掉多选漏选与跳题（见「0.7.6 更新了什么」），0.7.7 修掉 0.7.6 引入的三处缺陷（见「0.7.7 更新了什么」），0.7.8 把已提交作业纳入默认巡检并支持撤回补交（见「0.7.8 更新了什么」）。
+
+---
+
+## 0.7.8 更新了什么（已提交作业默认核查 + 多选漏选 + 撤回补交）
+
+| 变化 | 具体内容 | AI 该怎么用 |
+| --- | --- | --- |
+| **巡检默认核查已提交作业** | `uplus_patrol` 的 `audit` 默认 `true`；CLI 默认核查，`--no-audit` 才跳过 | 巡检结束后先看 `incomplete_homeworks` 与 `repair_briefs`，不要只看未提交作业 |
+| **多选漏选判定** | 用平台标准答案 `answer` 对比实答：少选是 `partial`（带 `missing_letters`），多选/错选是 `wrong`；顺序不同不算错 | 看到 `partial` 就必须处理；`wrong` 也建议人工确认 |
+| **待批改的答案来源** | 平台待批改时不给 `answer`，工具用本地答案簿 `reports/answer_journal.json` 对比；两者都没有时题目进入 `unjudged`，**不能当成已完成** | `unjudged` 不是「没问题」，而是「平台还没公布答案、本地也没有提交记录」；需要彻底排除漏选时走 `verify_unjudged` |
+| **新增 `uplus_repair_homework`** | 撤回 → 补齐 → 重新提交一次完成；撤回前必须为所有已知漏答/漏选题目准备好答案，否则不撤回；已出分拒绝 | `repair_briefs` 里 `needs_model_answer: true` 的题目先作答，把 `{question_id: answer}` 传给 `uplus_repair_homework`；`journal_answer` 已给的不用再答 |
+| **新答案会校验** | 若新答案仍缺标准答案中的选项，工具拒绝撤回并指出缺哪些字母 | 按返回的「仍缺 …」补齐后重试，不要反复提交不完整答案 |
+| **可选逐题复核** | `verify_unjudged=True` 会把待批改中无法核对的多选也重新作答并提交 | 用户要求「彻底排除漏选」时使用；会撤回并重新提交，先向用户说明 |
+| **代码块选项** | `A、<property>`、`C、<constructor-arg>` 这类 `<code>` 选项能正常读取，也能按 input value 唯一点击 | 无需特殊处理；审题包里会显示完整文本 |
+| **测试** | 新增 24 个用例；全量 250 通过 | — |
+
+**每轮巡检后的标准动作（AI 必须做）**：
+
+1. 调 `uplus_patrol()`（默认已带核查），读 `incomplete_homeworks` 与 `repair_briefs`；
+2. 对 `repair_briefs` 中 `withdrawable: true` 的作业，把 `needs_model_answer: true` 且 `optional` 不为 `true` 的题目逐题作答（`optional` 是待批改、平台尚未公布答案的多选；用户要求彻底排除漏选时再作答并传 `verify_unjudged=True`）；
+3. 调 `uplus_repair_homework(task_id, course_id, answers)`；工具只在所有已知漏答/漏选都有答案时才撤回，随后补齐并重新提交；
+4. 检查返回的 `audit_after.complete`；若仍有 `unjudged`，说明平台还没出分，批改后再复核；
+5. 已出分（`withdrawable: false`）的作业不要尝试撤回，把漏题清单交给用户。
 
 ---
 
@@ -76,11 +99,11 @@
 
 **判定口径（AI 必须知道）**：一题算「已答」当且仅当学生端 detail 的 `userAnswer` 非空（与 `models._is_answered()` 同一口径）。0.7.6 起 `hwAnswerId` / `isAnswer` 不再单独作为已答依据——它们会在仅打开题目时生成，旧口径会漏报空题。**简答、编程、附件题单独统计，不算漏题**，也不会让作业被判成不完整——它们本来就该由用户本人完成。
 
-**发现漏题后的正确顺序**：
-1. `uplus_audit_homework` 拿到漏题清单；
-2. `withdrawable` 为 `true` 时，先征得用户同意，再用 `uplus_answer_homework` 补齐（撤回与重新提交由该工具完成）；
-3. `withdrawable` 为 `false`（已出分）时，**不要尝试撤回**，把漏题清单交给用户，说明平台已不允许改；
-4. 补完后再跑一次 `uplus_audit_homework` 复核，确认漏题数为 0。
+**发现漏题后的正确顺序**（0.7.8 起优先用 `uplus_repair_homework`，它会先撤回再补齐并重新提交）：
+1. `uplus_patrol()` 或 `uplus_audit_homework` 拿到漏答/漏选清单；
+2. `withdrawable` 为 `true` 时，按 `repair_briefs` 作答，调 `uplus_repair_homework(task_id, course_id, answers)`；工具只在所有已知缺口都有答案时才撤回；
+3. `withdrawable` 为 `false`（已出分）时，**不要尝试撤回**，把清单交给用户，说明平台已不允许改；
+4. 补完后检查 `audit_after.complete`，确认漏答/漏选为 0；仍有 `unjudged` 说明平台尚未出分，批改后再复核。
 
 ---
 
@@ -111,7 +134,8 @@
 | 4 启动浏览器会话 | 调用 `browse_launch_edge` | 返回端口号，`uplus_check_login` 可连接 |
 | 5 选择登录方式 | **先问用户**手动 / 自动，再调 `uplus_login` | `logged_in: true`，能看到工作台 |
 | 6 巡检 | `uplus_list_courses` → `uplus_patrol` | 返回课程、作业、实验统计与报告路径 |
-| 6+ 完整性核查 | `uplus_patrol(audit=True)` 或 `uplus_audit_homework` | 已交作业里没有漏答的客观题 |
+| 6+ 完整性核查 | `uplus_patrol()`（默认核查）或 `uplus_audit_homework` | 已交作业里没有漏答/多选漏选；`unjudged` 单独看待 |
+| 6++ 撤回补交 | 按 `repair_briefs` 作答 → `uplus_repair_homework` | 返回 `withdrawn: true`、`submitted: true`、`audit_after.complete: true` |
 | 7 客观题作答 | `uplus_inspect_homework` → 模型作答 → `uplus_answer_homework` | 题目填妥；提交前回读核对 |
 | 8 人工接管 | 把简答 / 编程 / 附件 / 实验列入清单交付用户 | 清单写明课程、题目、截止时间、需要什么 |
 | 9 收尾 | `uplus_close`；定时巡检走 CLI，不答题不提交 | 会话释放，报告落盘 |
@@ -345,9 +369,10 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 
 1. `uplus_check_login`：确认登录态有效；失效则回到第 5 步重新登录。
 2. `uplus_list_courses`：列出账号下当前学期课程（已截止课程默认跳过）。
-3. `uplus_patrol`：全量巡检作业与实验，生成 Markdown 报告，返回统计摘要、待答审题包与待接管清单。
+3. `uplus_patrol`：全量巡检作业与实验，生成 Markdown 报告，返回统计摘要、待答审题包、`repair_briefs` 与待接管清单。
    - 本工具**默认不答题、不提交**；不要在未经用户确认时开启自动提交。
-   - 想顺手体检已交作业有没有漏题，用 `uplus_patrol(audit=True)`（CLI 为 `uplus-patrol --audit`）。
+   - **已提交作业默认纳入核查**（`audit=true`，CLI 默认核查、`--no-audit` 才跳过）：报告会列出漏答与多选漏选。
+   - 对 `repair_briefs` 中可撤回的作业：先回答非 optional 且 `needs_model_answer` 的题目，再调 `uplus_repair_homework` 完成撤回、补齐、重新提交；已出分作业不得撤回。
 
 ### 成功信号
 
