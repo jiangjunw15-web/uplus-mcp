@@ -67,16 +67,28 @@ _PLACEHOLDER_RE = re.compile("|".join(f"(?:{p})" for p in PLACEHOLDER_PATTERNS))
 _CN_NUM = "一二三四五六七八九十"
 
 
+#: Map/ASCII-art rows that are legitimate report content, not blank slots. A
+#: 10×10 grid drawn with dots or hashes is one long line of the same symbol, so
+#: the generic underscore/dash rule must not swallow it.
+_ART_CHARS = ".#*·#@+"
+
+
 def is_placeholder_text(text: str) -> bool:
     """True when the whole line is only a fill-me-in placeholder.
 
     An empty string is a placeholder too (an empty paragraph is a slot).
     Ordinary prose such as ``实验目的：掌握进程同步`` never matches, because
     the patterns must consume the entire line.
+
+    A row made purely of drawing symbols (``.........`` or ``########``) is
+    treated as content: reports that render a grid, a path map or an ASCII
+    diagram would otherwise be refused as "unfilled placeholders".
     """
     t = (text or "").strip()
     if not t:
         return True
+    if len(t) >= 3 and all(ch in _ART_CHARS for ch in t):
+        return False
     return bool(_PLACEHOLDER_RE.fullmatch(t))
 
 

@@ -105,12 +105,36 @@ class ExperimentOperator:
         url = self.DETAIL_ROUTE.format(
             course_id=course_id, exp_id=exp_id, stu_exp_id=stu_exp_id
         )
-        page = self.session.open(url)
+        page = self._open_page(url)
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")
         page.wait_for_load_state("networkidle", timeout=8000)
         time.sleep(0.5)
         return page
+
+    def _open_page(self, url: str, *, retries: int = 1,
+                   timeout_ms: int = 45_000) -> Page:
+        """Open a platform page, retrying once on a navigation timeout.
+
+        Some course experiment pages are heavy enough to blow the default
+        30-second ``goto`` budget, and the first attempt is the one that
+        usually dies while the SPA is still warming up. Retrying beats
+        reporting "this course has no experiments".
+        """
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                return self.session.open(url, timeout_ms=timeout_ms)
+            except TypeError:  # a session stub that takes only the URL
+                return self.session.open(url)
+            except PWTimeout as exc:
+                last = exc
+                if attempt < retries:
+                    time.sleep(1.5)
+        raise UplusError(
+            f"页面加载超时（已重试 {retries} 次）：{url}；"
+            "该课程可能没有实验列表，或平台响应过慢"
+        ) from last
 
     def read_detail(self, course_id: str, exp_id: str,
                     stu_exp_id: str) -> ExperimentDetail:
@@ -250,7 +274,7 @@ class ExperimentOperator:
     # ------------------------------------------------------------------ #
     def list_experiment_ids(self, course: Course) -> list[dict]:
         """Return [{name, exp_id, stu_exp_id, status, material, deadline}]."""
-        page = self.session.open(
+        page = self._open_page(
             f"/course/course/{course.id}/ExperimentPage?userRole="
         )
         if "login" in page.url.lower():
@@ -750,6 +774,18 @@ def _missing_sections(body: str, expected: list[str]) -> list[str]:
         for index, line in enumerate(lines)
     ]
     headings = [(index, key) for index, key in headings if key]
+    # A body sub-heading can reuse a section alias ("一、算法伪代码" resolves to
+    # 实验实现). Treating a repeat as a new section boundary ended the first
+    # occurrence's body early and reported the section as empty, so only the
+    # first sighting of each section counts as its heading.
+    seen: set[str] = set()
+    first_headings: list[tuple[int, str]] = []
+    for index, key in headings:
+        if key in seen:
+            continue
+        seen.add(key)
+        first_headings.append((index, key))
+    headings = first_headings
     missing: list[str] = []
     for canonical in expected:
         start = next(

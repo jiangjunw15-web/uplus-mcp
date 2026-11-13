@@ -13,6 +13,34 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.2
+
+Four places where the 0.8.1 compliance work still got stuck on the real
+platform. Suite is 321 passed, 1 skipped.
+
+- **Phone-number accounts can sign in automatically.** The school login page
+  opens on the 学号/工号 tab, whose account box asks for a student/staff number
+  and requires picking a school — a phone number cannot sign in there.
+  `auto_login` now switches to the 密码登录 tab first (it detects the tab via
+  `input[placeholder*='手机']`) and skips the school step once there; login
+  pages without that tab keep the old single-form path.
+- **Drawing rows are no longer read as placeholders.** `is_placeholder_text`
+  treated a whole row of dots or hashes (a grid map, a state-space diagram) as
+  an unfilled slot and refused the report. Rows made only of `. # * · @ +` are
+  now treated as content; `____`, `---`, `（此处填写…）`, `待填写` and `TODO`
+  are still placeholders.
+- **A repeated sub-heading no longer truncates a section.** A body line
+  「一、算法伪代码」 resolves to the 实验实现 alias; a repeat used to count as a
+  new section boundary, cutting the earlier section's body off and reporting it
+  as empty. `_missing_sections` now takes only the first sighting of each
+  section as its heading.
+- **Navigation timeouts retry.** Some course `ExperimentPage` screens do not
+  render within 30 seconds, so the whole course appeared to have no
+  experiments. `list_experiment_ids` and `open_detail` now go through
+  `_open_page` (45 s timeout, one retry) and only fail after both attempts;
+  `BrowserSession.open` accepts `timeout_ms`.
+- **Tests:** `tests/test_optimizations.py` adds 11 cases.
+
 ## What's new in 0.8.0
 
 The complete experiment pipeline, plus a numbered pre-submission compliance

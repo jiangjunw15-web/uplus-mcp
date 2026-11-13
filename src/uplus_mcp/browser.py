@@ -156,9 +156,10 @@ class BrowserSession:
         # ``file://`` URL must be refused, not silently folded into base_url.
         return utils.safe_navigation_url(path, base_url=self.base_url)
 
-    def open(self, path: str) -> Page:
+    def open(self, path: str, *, timeout_ms: int = 30_000) -> Page:
         page = self.page
-        page.goto(self.url_for(path), wait_until="domcontentloaded")
+        page.goto(self.url_for(path), wait_until="domcontentloaded",
+                  timeout=timeout_ms)
         try:
             page.wait_for_load_state("networkidle", timeout=8000)
         except PWTimeout:
@@ -432,6 +433,49 @@ class BrowserSession:
                 continue
         return False
 
+    #: Labels of the tab that accepts a phone/account plus password.
+    _PASSWORD_TAB_TEXTS = ("密码登录", "账号密码登录", "账号登录")
+
+    def _on_password_tab(self, page: Page) -> bool:
+        """True when the form already shows the phone/account + password boxes.
+
+        The portal's 学号/工号 tab labels the account box 「请输入学号/工号」 and
+        requires a school choice; the 密码登录 tab labels it
+        「请输入账号/手机号」 and asks for no school. A phone-number account
+        only works on the latter, so the two are told apart by that hint.
+        """
+        try:
+            return bool(page.locator(
+                "input[placeholder*='手机' i], input[placeholder*='账号/手机' i]"
+            ).count())
+        except Exception:  # noqa: BLE001 - layout may differ per portal build
+            return False
+
+    def _switch_to_password_tab(self, page: Page) -> bool:
+        """Switch the sign-in form to 「密码登录」 when it starts elsewhere.
+
+        Returns True when the form ends up on the password tab (either because
+        it already was, or because the tab was clicked); False when no such
+        tab could be found, which keeps the caller's old behaviour alive for
+        portals that only ship one form.
+        """
+        if self._on_password_tab(page):
+            return True
+        for label in self._PASSWORD_TAB_TEXTS:
+            try:
+                candidates = page.locator(f"text={label}")
+                count = min(candidates.count(), 6)
+                for index in range(count):
+                    item = candidates.nth(index)
+                    if not item.is_visible():
+                        continue
+                    item.click(timeout=4000)
+                    time.sleep(0.8)
+                    return True
+            except Exception:  # noqa: BLE001 - try the next label
+                continue
+        return False
+
     def wait_for_session(self, timeout_ms: int = 120_000) -> dict[str, Any]:
         """Poll until the token exists off the login domain; return a status dict.
 
@@ -478,7 +522,13 @@ class BrowserSession:
                         str(page.evaluate("() => localStorage.getItem('AccessToken') || ''") or ""))}
 
         self._enter_login_form(page)
-        school_ok = self._select_school(page, school.strip())
+        # The portal opens on 学号/工号登录, where the account box asks for a
+        # student/staff number and a school must be chosen. A phone-number
+        # account can only sign in from 密码登录, so switch first; when the tab
+        # is absent the old single-form behaviour still applies.
+        password_tab = self._switch_to_password_tab(page)
+        school_ok = True if password_tab else self._select_school(
+            page, school.strip())
         user_box = self._first_visible(page, self._USER_SELECTORS)
         pass_box = self._first_visible(page, self._PASS_SELECTORS)
         if user_box is None or pass_box is None:
