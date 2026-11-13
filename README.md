@@ -13,13 +13,19 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
-## What's new in 0.8.1
+## What's new in 0.8.0
 
-0.8.0 could tell whether a document *had content*; it could not tell whether
-the teacher would accept it. This version adds a numbered 19-item compliance
-checklist that blocks the hard failures before upload, and fixes the
-"phantom submission" where an upload alone was reported as submitted. Suite
-is 310 passed.
+The complete experiment pipeline, plus a numbered pre-submission compliance
+checklist that blocks hard failures before upload and fixes the "phantom
+submission" where an upload alone was reported as submitted. Suite is 310
+passed.
+
+### Compliance checklist and the phantom-submission fix
+
+The pipeline could tell whether a document *had content*; it could not tell
+whether the teacher would accept it. This part adds a numbered 19-item
+compliance checklist that blocks the hard failures before upload, and fixes
+the "phantom submission" where an upload alone was reported as submitted.
 
 - **New `compliance.py`** — findings come in three levels: `block` (refuse to
   submit), `warn` (docked marks, still allowed), `manual` (cannot be judged
@@ -48,12 +54,11 @@ is 310 passed.
 - **Tests** — new `tests/test_compliance.py` (11 cases) plus strict/non-strict
   gate cases; suite is 310 passed.
 
-## What's new in 0.8.0
+### Experiment pipeline
 
-A complete experiment pipeline: read the experiment's requirements, search the
-course 资料 section (recursing into folders) for the 实验报告模板, download the
-materials, fill the template, and only submit after three inspection checks
-pass. Suite is 292 passed.
+Read the experiment's requirements, search **all sources** (实验附件 → 实验手册
+→ 资料, recursively) for the report template, download the materials, fill the
+template, and only submit after the inspection and compliance checks pass.
 
 - **New `materials.py`** — the 资料 section has no fixed route contract, so it
   is discovered rather than hard-coded: open the course home, find the
