@@ -13,6 +13,41 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.1
+
+0.8.0 could tell whether a document *had content*; it could not tell whether
+the teacher would accept it. This version adds a numbered 19-item compliance
+checklist that blocks the hard failures before upload, and fixes the
+"phantom submission" where an upload alone was reported as submitted. Suite
+is 310 passed.
+
+- **New `compliance.py`** — findings come in three levels: `block` (refuse to
+  submit), `warn` (docked marks, still allowed), `manual` (cannot be judged
+  automatically, listed as `skipped` instead of silently passing). Items cover
+  the teacher-template cover fields (school, major, class, student id, name,
+  teacher), 实验时间/学时, the 实验名称 field, section structure vs the
+  template, handbook requirement coverage, screenshots when the handbook
+  demands them, environment claims without evidence, reproducibility
+  (commands/seeds/paths/parameters), AI-sounding meta talk, duplicated
+  sections, table and long-line layout, and hash-named files.
+- **Stricter gate** — `verify_report` gains `strict_compliance` (default
+  `True`): any blocking item refuses the upload with the item number and the
+  missing detail. `answer_experiment` / `uplus_answer_experiment` gain
+  `force` to downgrade the checklist to warnings.
+- **No silent re-submission** — `answer_experiment` reads 「已提交」 and then
+  only generates, telling the caller to withdraw first.
+- **Phantom submission fixed** — `upload_report` clicks a real 「提交」
+  `button` (the old code clicked any `div` carrying that text, which did
+  nothing), accepts a confirmation dialog, then polls the page until
+  「已提交」+「撤回」 appear and raises otherwise. `submit_report` now
+  requires the 「已提交」 badge *and* either 「撤回」 or the file in the
+  submitted list — an upload's "转换成功" line is no longer success.
+- **Template search covers three sources** — 实验附件 → 实验手册 (new
+  `manual_links` capture) → 资料 (recursive), preferring a genuinely
+  downloadable file and reporting its `source`.
+- **Tests** — new `tests/test_compliance.py` (11 cases) plus strict/non-strict
+  gate cases; suite is 310 passed.
+
 ## What's new in 0.8.0
 
 A complete experiment pipeline: read the experiment's requirements, search the

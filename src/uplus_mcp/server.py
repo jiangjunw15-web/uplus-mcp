@@ -316,6 +316,7 @@ async def uplus_answer_experiment(
     student_name: str = "",
     student_id: str = "",
     template_path: str = "",
+    force: bool = False,
 ) -> dict:
     """Fill the experiment report, verify it, and submit it.
 
@@ -327,18 +328,24 @@ async def uplus_answer_experiment(
     The report is built from the downloaded 资料 template when one exists,
     otherwise from the built-in format. Before anything is uploaded the
     report must pass the inspection gate: non-empty body, no leftover
-    placeholders, and content that matches this experiment. A missing section
-    or a failed check returns the reasons and submits nothing.
+    placeholders, content that matches this experiment, and the compliance
+    checklist (teacher-template cover fields, 实验名称 field, screenshots when
+    the handbook demands them, handbook requirement coverage, AI-sounding
+    meta talk, repetition, layout). A failed check returns the reasons and
+    submits nothing; ``force=True`` downgrades the checklist to warnings.
 
     With ``submit=True`` (default) a passing report is uploaded and submitted,
-    and the page is re-read to confirm the submission registered.
-    ``submit=False`` stops after generating and verifying. ``student_name`` /
-    ``student_id`` override the identity in the personal config.
+    and the page is re-read until 「已提交」+「撤回」 appear — a mere upload is
+    never reported as a successful submission. An already-submitted
+    experiment is not re-submitted. ``submit=False`` stops after generating
+    and verifying. ``student_name`` / ``student_id`` override the identity in
+    the personal config.
     """
     return await _thread.run_async(
         _dispatch("answer_experiment", course_id, exp_id, stu_exp_id, sections,
                   submit=submit, student_name=student_name,
-                  student_id=student_id, template_path=template_path)
+                  student_id=student_id, template_path=template_path,
+                  force=force)
     )
 
 

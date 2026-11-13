@@ -538,11 +538,33 @@ def test_verify_report_accepts_complete_matching_report(tmp_path):
         "实验结果：测试通过，时间复杂度为 O(n)。",
         "实验总结：理解了同步与互斥的关键问题。",
     ])
+    # Content-level gate: the report is complete, matching and placeholder-free.
+    result = _operator(tmp_path).verify_report(
+        path, _detail(),
+        expected_sections=["实验实现", "实验结果", "实验总结"],
+        strict_compliance=False)
+    assert result["ok"] is True, result["reason"]
+    assert result["checks"]["topic_match"] is True
+
+
+def test_verify_report_blocks_report_without_teacher_template(tmp_path):
+    """A content-complete report still fails the strict gate when it is not
+    built on the teacher template (no cover fields, no 实验名称 row)."""
+    path = _docx(tmp_path, [
+        "本实验围绕进程同步展开，采用信号量完成生产者消费者模型。",
+        "实验实现：用信号量实现，代码见附录，核心逻辑完整。",
+        "实验结果：测试通过，时间复杂度为 O(n)。",
+        "实验总结：理解了同步与互斥的关键问题。",
+    ])
     result = _operator(tmp_path).verify_report(
         path, _detail(),
         expected_sections=["实验实现", "实验结果", "实验总结"])
-    assert result["ok"] is True, result["reason"]
-    assert result["checks"]["topic_match"] is True
+    assert result["ok"] is False
+    assert "合规核查" in result["reason"]
+    compliance_checks = result["checks"]["compliance"]
+    assert compliance_checks["ok"] is False
+    ids = {item["id"] for item in compliance_checks["blocking"]}
+    assert "1" in ids or "3" in ids
 
 
 def test_report_topic_match_is_none_when_name_cannot_judge():
@@ -571,7 +593,8 @@ class _FakeExpOp:
     def find_report_template(self, detail, max_depth=6):
         return None
 
-    def verify_report(self, path, detail, expected_sections=None):
+    def verify_report(self, path, detail, expected_sections=None,
+                      strict_compliance=True):
         return self.verification
 
     def submit_report(self, course_id, exp_id, stu_exp_id, path):

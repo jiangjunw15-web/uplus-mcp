@@ -21,7 +21,7 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout
 from .browser import BrowserSession, UplusError, AuthExpiredError
 from .config import Config
 from .models import Course
-from . import utils
+from . import compliance, utils
 
 
 # The experiment heading is ``实验N <topic>`` where N is a Chinese or an
@@ -75,7 +75,7 @@ class ExperimentDetail:
     attachments: list[Attachment] = field(default_factory=list)
     submitted_files: list[str] = field(default_factory=list)
     #: Download links for the files already submitted (captured on the
-    #: 实验提交物 tab). The audit uses these to=to pull the submitted report back
+    #: 实验提交物 tab). The audit uses these to pull the submitted report back
     #: and inspect it; an empty list means the audit can only read page text.
     submitted_links: list[Attachment] = field(default_factory=list)
     #: Download links found on the 实验手册 tab. The manual is sometimes a
@@ -306,30 +306,74 @@ class ExperimentOperator:
         file_input.set_input_files(str(safe_path))
         time.sleep(2.0)
 
-        # find and click submit button
-        result = page.evaluate(r"""
-            () => {
-                const all = document.querySelectorAll('button, a, div');
-                for (const el of all) {
-                    const t = (el.innerText || '').trim();
-                    if ((t === '提交' || t === '确认提交' || t === '上传提交') && el.offsetParent !== null) {
-                        el.click();
-                        return true;
-                    }
-                }
-                return false;
-            }
-        """)
+        # The uploader converts the file first (aaaa.docx 转换成功) and only
+        # then exposes the 「提交」 button. Clicking a div that merely contains
+        # the text 提交 does nothing, so the click is restricted to real
+        # buttons and the submission is polled until the badge flips.
+        if not self._click_submit(page):
+            raise UplusError("未找到可点击的「提交」按钮（文件可能仍在转换）")
 
-        if not result:
-            raise UplusError("未找到提交按钮")
-
-        time.sleep(3.0)
+        registered = self._wait_submitted(page, timeout=15.0)
+        if not registered:
+            raise UplusError(
+                "已点击「提交」但页面未出现「已提交」状态，提交未生效，请人工复核"
+            )
         return {
             "uploaded": True,
             "file": safe_path.name,
             "page_url": page.url,
         }
+
+    # ------------------------------------------------------------------ #
+    # submission primitives
+    # ------------------------------------------------------------------ #
+    def _click_submit(self, page: Page) -> bool:
+        """Click the real 「提交」 button and accept a confirmation dialog.
+
+        Returns ``False`` when no visible button carries that exact label —
+        which happens while the upload is still converting.
+        """
+        clicked = page.evaluate(r"""
+            () => {
+                const els = Array.from(document.querySelectorAll('button'));
+                const hit = els.find(e => {
+                    const t = (e.innerText || '').trim();
+                    return (t === '提交' || t === '确认提交') && e.offsetParent !== null;
+                });
+                if (!hit) return false;
+                hit.click();
+                return true;
+            }
+        """)
+        if not clicked:
+            return False
+        time.sleep(1.5)
+        # Some courses ask for confirmation before the submission registers.
+        try:
+            box = page.locator(".el-message-box, .el-dialog").first
+            if box.count() and box.is_visible():
+                ok_btn = box.locator(
+                    "button:has-text('确定'), button:has-text('确认')").first
+                if ok_btn.count():
+                    ok_btn.click(timeout=3000)
+                    time.sleep(1.0)
+        except Exception:  # noqa: BLE001 - a missing dialog is normal
+            pass
+        return True
+
+    def _wait_submitted(self, page: Page, timeout: float = 15.0) -> bool:
+        """Poll the page until it shows the submitted badge and 撤回 button."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                text = page.inner_text("body")
+            except Exception:  # noqa: BLE001 - page may be reloading
+                time.sleep(1.0)
+                continue
+            if "已提交" in text and "撤回" in text:
+                return True
+            time.sleep(1.0)
+        return False
 
     def submit_report(self, course_id: str, exp_id: str, stu_exp_id: str,
                       file_path: Path) -> dict:
@@ -351,10 +395,18 @@ class ExperimentOperator:
         time.sleep(1.0)
         text = page.inner_text("body")
         file_name = Path(file_path).name
-        confirmed = (
-            "已提交" in text
-            or (file_name and file_name in text)
-            or "撤回" in text
+        # Only the submitted badge plus a 撤回 button (or this file appearing
+        # in the submitted list) proves the submission registered. The page
+        # shows "实验报告：xxx.docx 转换成功" right after an upload, so
+        # treating "the file name appears somewhere" as success — which this
+        # method used to do — reports a phantom submission.
+        listed = [
+            f.strip()
+            for f in re.findall(r"实验报告[：:]\s*([^\n]+?)(?=下载|撤回|$)", text)
+            if f.strip()
+        ]
+        confirmed = "已提交" in text and (
+            "撤回" in text or any(file_name == f for f in listed)
         )
         if not confirmed:
             raise UplusError(
@@ -512,7 +564,8 @@ class ExperimentOperator:
     # report verification (the inspection gate)
     # ------------------------------------------------------------------ #
     def verify_report(self, path: Path, detail: ExperimentDetail,
-                      expected_sections: list[str] | None = None) -> dict:
+                      expected_sections: list[str] | None = None,
+                      strict_compliance: bool = True) -> dict:
         """Read-only inspection of a report before it may be submitted.
 
         Mirrors the homework audit: it refuses an empty or wrong submission
@@ -526,7 +579,12 @@ class ExperimentOperator:
           text (a heading with nothing under it is empty);
         * the report shares at least one topic word with the experiment's
           name/requirements — a report written for a *different* experiment
-          is the document analogue of answering the wrong question.
+          is the document analogue of answering the wrong question;
+        * the report passes the compliance checklist (teacher template cover,
+          experiment-name field, screenshots when the manual demands them,
+          manual requirement coverage, AI-sounding meta talk, repetition,
+          layout). ``strict_compliance=False`` downgrades those findings to
+          warnings instead of blocking.
 
         Returns ``{"ok": bool, "reason": str, "checks": {...}}``. ``ok`` is
         ``False`` with a filled ``reason`` when the caller must refuse to
@@ -589,6 +647,22 @@ class ExperimentOperator:
                 ),
                 "checks": checks,
             }
+
+        # 6) compliance checklist — 「能交」和「交了会被挑毛病」是两件事
+        try:
+            requirements = self.collect_requirements(detail)
+        except Exception:  # noqa: BLE001 - the checklist is best-effort here
+            requirements = ""
+        audit = compliance.check_report(
+            safe, manual_text=detail.manual_text or "", requirements=requirements)
+        checks["compliance"] = audit.as_dict()
+        if strict_compliance and not audit.ok:
+            first = audit.blocking[0]
+            more = len(audit.blocking) - 1
+            reason = f"合规核查未通过（{first.title}）：{first.detail}"
+            if more > 0:
+                reason += f"；另有 {more} 项硬伤"
+            return {"ok": False, "reason": reason, "checks": checks}
 
         return {"ok": True, "reason": "", "checks": checks}
 

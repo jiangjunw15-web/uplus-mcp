@@ -313,14 +313,20 @@ class PatrolEngine:
                           sections: dict[str, str] | str,
                           submit: bool = True, student_name: str = "",
                           student_id: str = "",
-                          template_path: str = "") -> dict:
+                          template_path: str = "",
+                          force: bool = False) -> dict:
         """Fill the experiment report template, verify it, and submit it.
 
         The gate mirrors ``answer_homework``: a report is only uploaded when
         every model-required section is present and the read-only
         verification passes (non-empty body, no leftover placeholders, topic
-        matches the experiment). A failure returns the reasons and submits
-        nothing, so an empty or wrong report can never be handed in.
+        matches the experiment, compliance checklist clean). A failure
+        returns the reasons and submits nothing, so an empty, off-template or
+        unverifiable report can never be handed in.
+
+        ``force=True`` keeps the generated file but downgrades the compliance
+        checklist to warnings — use it only when the user has decided to
+        submit a report that knowingly misses the teacher template.
         """
         op = self._experiment_operator()
         detail = op.read_detail(course_id, exp_id, stu_exp_id)
@@ -395,14 +401,23 @@ class PatrolEngine:
 
         verification = op.verify_report(
             output, detail,
-            expected_sections=list(report_generator.MODEL_REQUIRED_SECTIONS))
+            expected_sections=list(report_generator.MODEL_REQUIRED_SECTIONS),
+            strict_compliance=not force)
         result["verification"] = verification
+        result["compliance"] = (verification.get("checks") or {}).get("compliance")
         if not verification["ok"]:
             result["note"] = (
                 "报告校验未通过，已拒绝提交：" + verification["reason"]
             )
             return result
         result["can_submit"] = True
+        if detail.status == "已提交":
+            result["can_submit"] = False
+            result["note"] = (
+                "该实验在平台上已是「已提交」状态，未重复提交；"
+                "如需覆盖，请先撤回再重交。"
+            )
+            return result
         if not submit:
             result["note"] = "报告已生成并通过校验，按要求未提交（submit=False）。"
             return result
