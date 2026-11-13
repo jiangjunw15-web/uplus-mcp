@@ -13,7 +13,7 @@
   wheel and the sdist to this POM made the whole deploy fail with 400 and
   left the Packages panel empty - the one thing this project exists for.
 
-  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.8.0
+  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.8.1
   Keep <version> in sync with version in ../pyproject.toml at every release.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -23,7 +23,7 @@
 
   <groupId>com.github.jiangjunw15-web</groupId>
   <artifactId>uplus-mcp</artifactId>
-  <version>0.8.0</version>
+  <version>0.8.1</version>
   <packaging>pom</packaging>
 
   <name>uplus-mcp</name>
