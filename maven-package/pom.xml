@@ -13,7 +13,7 @@
   wheel and the sdist to this POM made the whole deploy fail with 400 and
   left the Packages panel empty - the one thing this project exists for.
 
-  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.7.8
+  Coordinates: com.github.jiangjunw15-web:uplus-mcp:0.8.0
   Keep <version> in sync with version in ../pyproject.toml at every release.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -23,11 +23,11 @@
 
   <groupId>com.github.jiangjunw15-web</groupId>
   <artifactId>uplus-mcp</artifactId>
-  <version>0.7.8</version>
+  <version>0.8.0</version>
   <packaging>pom</packaging>
 
   <name>uplus-mcp</name>
-  <description>Python MCP server for the QingSoft U+ platform; a metadata-only entry that registers the project in the GitHub Packages Maven registry. The installable wheel and sdist live in the GitHub Release.</description>
+  <description>Python MCP server for the QingSoft U+ platform: course/homework/experiment patrol, objective-question answering, and an end-to-end experiment pipeline (materials search, report-template filling, inspection gate). This Maven entry is metadata only and registers the project in the GitHub Packages Maven registry; the installable wheel and sdist live in the GitHub Release.</description>
   <url>https://github.com/jiangjunw15-web/uplus-mcp</url>
 
   <licenses>

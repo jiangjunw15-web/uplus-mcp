@@ -689,6 +689,10 @@ the GitHub Release with the wheel and sdist attached, and only then publishes
 the Maven package. A Maven failure therefore never costs the release, but it
 does end the run red with a named error instead of passing silently.
 
+Release notes come from `.github/release-notes/<tag>.md` when that file exists
+(for example `v0.8.0.md`); otherwise GitHub generates them from the commits, so
+a missing notes file never fails the run.
+
 ```
 maven-package/
   pom.xml              metadata-only Maven POM (com.github.jiangjunw15-web:uplus-mcp)

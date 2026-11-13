@@ -82,11 +82,28 @@ jobs:
           # agree with it; otherwise v0.8.0 would ship a 0.7.0 wheel.
           test "${RELEASE_TAG#v}" = "$PY_VER"
 
+      - id: release_notes
+        name: Pick the curated release notes for this tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          path=".github/release-notes/${RELEASE_TAG}.md"
+          if [ -f "$path" ]; then
+            echo "body_path=$path" >> "$GITHUB_OUTPUT"
+            echo "Using curated release notes: $path"
+          else
+            echo "No curated notes for ${RELEASE_TAG}; generated notes will be used."
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          # A curated file wins; otherwise GitHub generates notes from commits.
           generate_release_notes: true
+          body_path: ${{ steps.release_notes.outputs.body_path }}
           files: |
             dist/*.whl
             dist/*.tar.gz

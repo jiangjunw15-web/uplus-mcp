@@ -378,6 +378,8 @@ CLI 定时巡检（不答题不提交）：
 
 工作流会先跑测试再构建，校验 git tag 与 `pyproject.toml`、`maven-package/pom.xml` 里的版本是否一致，先创建带 wheel / sdist 的 GitHub Release，再发布 Maven 制品。因此 Maven 失败不会连累 Release，但会让整轮变红并给出明确报错，不再静默通过。
 
+Release 说明优先读取 `.github/release-notes/<tag>.md`（例如 `v0.8.0.md`）；没有对应文件时由 GitHub 按提交自动生成，不会因为缺少说明文件而失败。
+
 ```
 maven-package/
   pom.xml              仅含元数据的 Maven POM（com.github.jiangjunw15-web:uplus-mcp）
