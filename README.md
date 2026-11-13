@@ -15,7 +15,7 @@ for the step-by-step script an AI agent follows when onboarding a new user.
 
 ## What's new in 0.8.2
 
-Four places where the 0.8.1 compliance work still got stuck on the real
+Four places where the 0.8.0 compliance work still got stuck on the real
 platform. Suite is 321 passed, 1 skipped.
 
 - **Phone-number accounts can sign in automatically.** The school login page
