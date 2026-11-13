@@ -20,4 +20,4 @@ materials   Course 资料 section discovery, folder walk and file download.
 server      FastMCP server exposing the tools to MCP clients.
 """
 
-__version__ = "0.8.1"
+__version__ = "0.8.0"
