@@ -13,6 +13,53 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.0
+
+A complete experiment pipeline: read the experiment's requirements, search the
+course 资料 section (recursing into folders) for the 实验报告模板, download the
+materials, fill the template, and only submit after three inspection checks
+pass. Suite is 292 passed.
+
+- **New `materials.py`** — the 资料 section has no fixed route contract, so it
+  is discovered rather than hard-coded: open the course home, find the
+  「资料 / 资源 / 素材 / 文件」 entry in the sidebar, list the current folder,
+  **descend into folders** (deduplicated by `(name, href)`, depth-capped), and
+  match 「实验报告模板 / 报告模板 / 实验N」.
+- **Binary download** (previously the tool could only upload) —
+  `BrowserSession.fetch_bytes` tries an in-page `fetch` with `x-access-token`
+  (same-origin), then falls back to `context.request.get` (shared cookies, not
+  bound by CORS, reaches cross-origin OSS links); an entry with no href falls
+  back to an `expect_download` click. Every write is confined to
+  `allowed_io_paths`, under `reports/experiment_materials/`.
+- **Template filling** — `report_generator.fill_template` opens the *real
+  downloaded .docx template* and writes into the empty paragraph or table cell
+  following each section heading, replacing「（此处填写…）」「待填写」「TODO」
+  placeholders. `describe_template` reports the structure first;
+  `derive_sections` extracts the handbook's own section text verbatim. With no
+  template it falls back to the built-in format and runs the same filler.
+- **Four new MCP tools** — `uplus_download_experiment_materials`,
+  `uplus_inspect_experiment`, `uplus_answer_experiment`,
+  `uplus_audit_experiment`.
+- **The homework-style inspection gate** — `verify_report` refuses a report
+  before upload when it is too small / has too little body text (blank), still
+  carries a placeholder, or talks about a different experiment.
+  `answer_experiment` also requires every model-written section; a missing one
+  refuses generation and submission. After submitting, the page is re-read and
+  success is only reported when the submission registered. The older
+  `uplus_submit_experiment_report` now passes the same gate.
+- **Patrol integration** — unsubmitted experiments produce
+  `experiment_briefs` (the sections to write; nothing is downloaded or
+  submitted automatically), submitted experiments get a read-only audit, and
+  the Markdown report gains an "experiment completeness" table.
+- **A blocking gap fixed** — `Experiment` and the experiment-list scraper did
+  not carry `exp_id` / `stu_exp_id`, so `uplus_list_experiments` could not lead
+  to any follow-up tool. Both ids are returned now.
+- **Student name / number** — set `student_name` / `student_id` in the
+  gitignored `config/courses.json`; a tool call may override them. They are
+  written only into the local report .docx (gitignored), never into the repo or
+  the Markdown patrol report.
+- **Tests** — 42 new cases in `tests/test_lab.py`.
+
 ## What's new in 0.7.8
 
 Patrol now checks *already submitted* homework by default, detects partial
@@ -578,7 +625,13 @@ Code examples.
 | `uplus_check_login` | Verify whether the attached browser session is signed in |
 | `uplus_list_courses` | List courses under the signed-in account |
 | `uplus_list_homeworks` | List homework status; open answer pages to verify button truth on demand |
-| `uplus_list_experiments` | List experiments and submission state (submitted / outstanding / unknown) |
+| `uplus_list_experiments` | List experiments with `exp_id` / `stu_exp_id` and submission state (submitted / outstanding / unknown) |
+| `uplus_download_experiment_materials` | Download the experiment's attachments plus the 资料-section report template |
+| `uplus_inspect_experiment` | Return the experiment brief: requirements, template, `auto_sections` (from the handbook) and `needed_sections` (model-written) |
+| `uplus_answer_experiment` | Fill the template, run the inspection gate, upload and submit; re-reads the page to confirm |
+| `uplus_audit_experiment` | Read-only audit of a submitted experiment: blank report, leftover placeholders, wrong experiment |
+| `uplus_generate_experiment_report` | Build a standard report .docx from scratch (fallback when no template exists) |
+| `uplus_submit_experiment_report` | Upload and submit a report; `.docx` reports pass the same inspection gate first |
 | `uplus_inspect_homework` | Return status and a structured question brief for the client model |
 | `uplus_capture_question_image` | Screenshot one question block (diagram included) and return the image to the model |
 | `uplus_answer_homework` | Fill objective questions and optionally submit |

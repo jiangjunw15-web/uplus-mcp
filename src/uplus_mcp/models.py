@@ -314,6 +314,15 @@ class Experiment:
     deadline_ms: Optional[int] = None
     material: str = ""
     raw_text: str = ""
+    #: The course this experiment belongs to. Needed to rebuild the detail
+    #: route, which is ``/course/course/{course_id}/ExperimentPage/...``.
+    course_id: str = ""
+    #: The two ids embedded in the detail route
+    #: (``expInfo/{exp_id}/stu_experiments/{stu_exp_id}/labsubmit``). Without
+    #: them the list tool cannot lead anywhere: the detail, template and
+    #: submit steps all need both.
+    exp_id: str = ""
+    stu_exp_id: str = ""
 
 
 @dataclass

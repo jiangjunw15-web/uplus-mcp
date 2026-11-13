@@ -15,8 +15,10 @@ automatically.
 
 from __future__ import annotations
 
+import base64
 import json
 import time
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -242,6 +244,84 @@ class BrowserSession:
                 raise UplusError(f"接口 {url} 返回 {status}: {str(payload)[:200]}")
             return payload
         return last or {}
+
+    # ------------------------------------------------------------------ #
+    # binary download (no JSON assumption)
+    # ------------------------------------------------------------------ #
+    def fetch_bytes(self, url: str, *, timeout_ms: int = 30_000) -> bytes:
+        """Fetch a binary resource from the platform as raw bytes.
+
+        Two paths are tried in order so this works for both same-origin
+        resources (experiment attachments served from eduplus.net) and
+        cross-origin OSS signed links (a different host, where a page-side
+        ``fetch`` would be blocked by CORS):
+
+        1. In-page ``fetch`` with the access token and ``credentials:'include'``
+           — reuses the signed-in session and works for same-origin URLs.
+        2. ``context.request.get`` — Playwright's API request context shares
+           the browser cookies but is not subject to CORS, so it reaches a
+           cross-origin OSS link the page cannot.
+
+        Both return the response body as bytes; a non-2xx status raises
+        ``UplusError`` with the status and a short body excerpt.
+        """
+        page = self.page
+        # Same-origin in-page fetch: carries the token and cookies.
+        try:
+            result = page.evaluate(r"""
+            async ([url, timeoutMs]) => {
+                try {
+                    const token = localStorage.getItem('AccessToken') || '';
+                    const headers = {};
+                    if (token) { headers['x-access-token'] = token; }
+                    const ctrl = new AbortController();
+                    const id = setTimeout(() => ctrl.abort(), timeoutMs);
+                    const r = await fetch(url, {credentials: 'include', headers, signal: ctrl.signal});
+                    clearTimeout(id);
+                    const buf = await r.arrayBuffer();
+                    const bytes = new Uint8Array(buf);
+                    let bin = ''; const step = 0x8000;
+                    for (let i = 0; i < bytes.length; i += step) {
+                        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+                    }
+                    return {ok: r.ok, status: r.status, b64: btoa(bin)};
+                } catch (e) {
+                    return {ok: false, status: 0, error: String(e)};
+                }
+            }
+            """, [url, timeout_ms])
+            if result and result.get("ok") and result.get("b64"):
+                return base64.b64decode(result["b64"])
+        except Exception:  # noqa: BLE001 - page may be detached or cross-origin
+            pass
+        # Fallback: the APIRequestContext is not bound by CORS and shares
+        # the browser cookies, so it can reach a cross-origin OSS link.
+        if self._context is not None:
+            try:
+                resp = self._context.request.get(url, timeout=timeout_ms)
+                if resp.ok:
+                    return resp.body()
+                raise UplusError(
+                    f"下载失败：HTTP {resp.status}（{url}），"
+                    f"响应：{resp.text()[:200]}"
+                )
+            except UplusError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise UplusError(f"下载请求失败：{exc}（{url}）") from exc
+        raise UplusError(f"无法下载 {url}：页内 fetch 失败且无可用请求上下文")
+
+    def download_to(self, url: str, dest: Path) -> Path:
+        """Download ``url`` to ``dest`` (confined to the IO roots) and return it.
+
+        ``dest`` is resolved through ``utils.resolve_io_path`` so a confused
+        caller cannot write outside the configured directories.
+        """
+        safe_dest = utils.resolve_io_path(dest, self.config.io_roots)
+        data = self.fetch_bytes(url)
+        safe_dest.parent.mkdir(parents=True, exist_ok=True)
+        safe_dest.write_bytes(data)
+        return safe_dest
 
     # ------------------------------------------------------------------ #
     # login health check

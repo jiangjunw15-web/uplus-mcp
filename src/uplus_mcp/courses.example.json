@@ -11,6 +11,9 @@
   "profile_dir": "",
   "include_expired_courses": false,
 
+  "student_name": "",
+  "student_id": "",
+
   "courses": [
     {
       "id": "replace-with-your-course-id-1",

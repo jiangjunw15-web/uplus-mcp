@@ -51,6 +51,11 @@ class PatrolReport:
     experiments: list[ExperimentRow] = field(default_factory=list)
     takeover: list[dict] = field(default_factory=list)
     incomplete: list[dict] = field(default_factory=list)
+    #: One entry per submitted experiment the optional audit inspected. Each
+    #: entry is the dict returned by ``engine.audit_experiment``: empty
+    #: reports, leftover placeholders and wrong-experiment submissions land in
+    #: its ``issues`` list.
+    experiment_audits: list[dict] = field(default_factory=list)
     #: How many submitted homeworks the optional audit inspected, and how many
     #: answered multi-select questions it could not verify because the platform
     #: had not published the reference answer yet (still awaiting grading).
@@ -366,6 +371,26 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
             )
             lines.append("")
 
+    # ---- experiment completeness audit ----
+    if report.experiment_audits:
+        lines.append("## 实验提交完整性核查")
+        lines.append("")
+        lines.append("| 课程 | 实验 | 状态 | 文件取回 | 核查结果 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for item in report.experiment_audits:
+            fetched = "已回读" if item.get("auditable") else "仅页面"
+            if item.get("issues"):
+                outcome = "；".join(item["issues"])
+            elif item.get("auditable"):
+                outcome = "未发现空报告、残留占位符或错交实验"
+            else:
+                outcome = item.get("note") or "未能取回已提交文件"
+            lines.append(
+                f"| {item.get('course_name', '')} | {item.get('name', '')} | "
+                f"{item.get('status', '')} | {fetched} | {outcome} |"
+            )
+        lines.append("")
+
     # ---- takeover list ----
     if report.takeover:
         lines.append("## 需要人工接管")
@@ -376,7 +401,12 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
                 lines.append(f"  - 截止：{item['deadline']}")
         lines.append("")
 
-    lines.append("> 客观题由巡检流程自动作答；附件上传、实验报告、小组分工简答与编程题需本人完成。")
+    lines.append(
+        "> 客观题由巡检流程自动作答；实验报告可用 uplus_inspect_experiment → "
+        "uplus_answer_experiment 生成：服务端只引用实验手册原文，实验实现/结果分析/"
+        "总结由模型产出，填充后必须通过空报告、占位符、错交实验三道校验才会提交；"
+        "附件上传、小组分工简答与编程题仍需本人完成。"
+    )
     return "\n".join(lines)
 
 

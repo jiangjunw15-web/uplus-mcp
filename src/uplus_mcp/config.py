@@ -90,6 +90,12 @@ class Config:
     # temp dir; extend via config key ``allowed_io_paths`` or the
     # ``UPLUS_ALLOWED_PATHS`` environment variable (os.pathsep-separated).
     allowed_io_paths: list[str] = field(default_factory=list)
+    # The student's own name and number, used to fill the 姓名 / 学号 line of
+    # a generated experiment report. They live only in the gitignored
+    # ``config/courses.json`` — never in the repo, the Markdown patrol report
+    # or the shipped example — and a tool call may override them for one run.
+    student_name: str = ""
+    student_id: str = ""
 
     def __post_init__(self) -> None:
         # Keep the safe default available for directly-constructed configs
@@ -190,6 +196,10 @@ def load_config(path: Optional[str] = None) -> Config:
         profile_dir=str(data.get("profile_dir", "")),
         include_expired_courses=bool(data.get("include_expired_courses", False)),
         allowed_io_paths=_allowed_io_paths(data, report_dir),
+        # Personal identity for the report header. It is read from the
+        # gitignored personal config only; the shipped example leaves it empty.
+        student_name=str(data.get("student_name", "") or "").strip(),
+        student_id=str(data.get("student_id", "") or "").strip(),
     )
 
     # Environment overrides for per-machine settings.

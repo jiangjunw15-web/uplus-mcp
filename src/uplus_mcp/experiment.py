@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from playwright.sync_api import Page
+from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from .browser import BrowserSession, UplusError, AuthExpiredError
 from .config import Config
@@ -52,6 +52,14 @@ def extract_experiment_name(text: str) -> str:
 
 
 @dataclass
+class Attachment:
+    """One attachment on the 实验附件 tab."""
+    name: str
+    href: str = ""          # absolute URL, empty if only a label
+    kind: str = "file"       # "file" | "link" | "video"
+
+
+@dataclass
 class ExperimentDetail:
     """Full experiment detail read from the labsubmit page."""
     course_id: str
@@ -64,8 +72,12 @@ class ExperimentDetail:
     deadline: str = ""              # 截止时间 (display string)
     deadline_ms: Optional[int] = None
     manual_text: str = ""           # 实验手册 (requirements text)
-    attachments: list[str] = field(default_factory=list)
+    attachments: list[Attachment] = field(default_factory=list)
     submitted_files: list[str] = field(default_factory=list)
+    #: Download links for the files already submitted (captured on the
+    #: 实验提交物 tab). The audit uses these to pull the submitted report back
+    #: and inspect it; an empty list means the audit can only read page text.
+    submitted_links: list[Attachment] = field(default_factory=list)
     page_url: str = ""
 
 
@@ -131,6 +143,30 @@ class ExperimentOperator:
         m_files = re.findall(r"实验报告[：:]\s*([^\n]+?)(?=下载|撤回|$)", text)
         detail.submitted_files = [f.strip() for f in m_files if f.strip()]
 
+        # download links for the submitted file(s), captured while the
+        # 实验提交物 tab is still showing (before the tab switches below)
+        try:
+            links = page.evaluate(r"""
+                () => {
+                    const out = [];
+                    document.querySelectorAll('a').forEach(a => {
+                        const t = (a.innerText || '').trim();
+                        const href = a.href || '';
+                        if (!href) return;
+                        if (/下载/.test(t) || /download|attachment|file/i.test(href)) {
+                            out.push({name: t || '下载', href});
+                        }
+                    });
+                    return out;
+                }
+            """) or []
+            detail.submitted_links = [
+                Attachment(name=str(a.get("name", "")), href=str(a.get("href", "")))
+                for a in links if a.get("href")
+            ]
+        except Exception:
+            pass
+
         # read 实验手册 tab
         try:
             self._click_tab(page, "实验手册")
@@ -148,12 +184,17 @@ class ExperimentOperator:
                     const out = [];
                     document.querySelectorAll('a').forEach(a => {
                         const t = (a.innerText || '').trim();
-                        if (t && t.length < 200) out.push(t);
+                        if (t && t.length < 200) {
+                            out.push({name: t, href: a.href || ''});
+                        }
                     });
                     return out;
                 }
-            """)
-            detail.attachments = atts or []
+            """) or []
+            for a in atts:
+                detail.attachments.append(
+                    Attachment(name=str(a.get("name", "")), href=str(a.get("href", "")))
+                )
         except Exception:
             pass
 
@@ -266,3 +307,302 @@ class ExperimentOperator:
             "file": safe_path.name,
             "page_url": page.url,
         }
+
+    def submit_report(self, course_id: str, exp_id: str, stu_exp_id: str,
+                      file_path: Path) -> dict:
+        """Upload a report and **verify the submission actually registered**.
+
+        The plain ``upload_report`` returns ``uploaded: True`` as soon as the
+        submit button is clicked, exactly like the homework path before it
+        learned to read the page back. The submission can silently fail (the
+        uploader rejects the file, a confirm dialog appears, the request 500s),
+        and reporting success then is worse than reporting failure.
+
+        This method re-reads the page after submitting and only reports
+        success when the page shows the file among the submitted files or the
+        status badge switched to 已提交. Otherwise it raises ``UplusError``
+        so the caller never reports a phantom submission.
+        """
+        result = self.upload_report(course_id, exp_id, stu_exp_id, file_path)
+        page = self.open_detail(course_id, exp_id, stu_exp_id)
+        time.sleep(1.0)
+        text = page.inner_text("body")
+        file_name = Path(file_path).name
+        confirmed = (
+            "已提交" in text
+            or (file_name and file_name in text)
+            or "撤回" in text
+        )
+        if not confirmed:
+            raise UplusError(
+                "提交后页面未显示已提交状态或已上传文件，"
+                "提交可能未生效，请人工复核（未返回假成功）"
+            )
+        result["confirmed"] = True
+        result["page_url"] = page.url
+        return result
+
+    # ------------------------------------------------------------------ #
+    # requirements collection
+    # ------------------------------------------------------------------ #
+    def collect_requirements(self, detail: ExperimentDetail) -> str:
+        """Merge every requirement source into one text block.
+
+        Sources, in order:
+        1. ``提交物`` (material) — what the report must contain.
+        2. ``实验手册`` (manual) — the main requirement document.
+        3. ``实验附件`` attachment names — files that carry additional
+           requirements (the user said requirements usually live in the
+           manual and the attachments).
+
+        Returns the concatenated text, with each source on its own block.
+        """
+        parts: list[str] = []
+        if detail.material:
+            parts.append(f"提交物：{detail.material}")
+        if detail.manual_text:
+            parts.append(detail.manual_text)
+        if detail.attachments:
+            names = "、".join(a.name for a in detail.attachments if a.name)
+            if names:
+                parts.append(f"实验附件：{names}")
+        return "\n\n".join(parts).strip()
+
+    def find_report_template(self, detail: ExperimentDetail,
+                             max_depth: int = 6) -> Optional[dict]:
+        """Locate the 实验报告模板 in the course 资料 section.
+
+        The user's flow: if the experiment page carries no usable
+        requirements/template, go to the 资料 section and look for
+        「实验N」and「实验报告模板」 (recursing into folders). This method
+        does exactly that and downloads the first matching template.
+
+        Returns ``{"name", "path"}`` or ``None`` when no template is found.
+        A missing template is not an error: the caller falls back to the
+        built-in report generator.
+        """
+        from . import materials
+
+        exp_label = self._experiment_label(detail.name)
+        matcher = _template_matcher(exp_label)
+        try:
+            entries = materials.walk(
+                self.session, detail.course_id, matcher, max_depth=max_depth)
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 资料 is best-effort
+            raise UplusError(f"资料板块检索失败：{exc}") from exc
+        if not entries:
+            return None
+        # Prefer a file named exactly like a template, then any 实验N file.
+        entries.sort(key=_template_priority)
+        entry = entries[0]
+        if not entry.href:
+            return {"name": entry.name, "path": ""}
+        dest = self.config.report_folder / "experiment_materials" / _safe_filename(entry.name)
+        try:
+            path = materials.download(self.session, entry, dest)
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise UplusError(f"模板下载失败（{entry.name}）：{exc}") from exc
+        return {"name": entry.name, "path": str(path)}
+
+    # ------------------------------------------------------------------ #
+    # report verification (the inspection gate)
+    # ------------------------------------------------------------------ #
+    def verify_report(self, path: Path, detail: ExperimentDetail,
+                      expected_sections: list[str] | None = None) -> dict:
+        """Read-only inspection of a report before it may be submitted.
+
+        Mirrors the homework audit: it refuses an empty or wrong submission
+        rather than uploading a blank document.
+
+        Checks:
+        * the file exists, is a non-trivial size, and has readable body text
+          (a .docx that opens but is blank is still "empty");
+        * no placeholder text remains（"（此处填写…）"、"待填写"、"TODO"…）;
+        * when ``expected_sections`` is given, each named section has body
+          text (a heading with nothing under it is empty);
+        * the report shares at least one topic word with the experiment's
+          name/requirements — a report written for a *different* experiment
+          is the document analogue of answering the wrong question.
+
+        Returns ``{"ok": bool, "reason": str, "checks": {...}}``. ``ok`` is
+        ``False`` with a filled ``reason`` when the caller must refuse to
+        submit.
+        """
+        from .report_generator import extract_body_text, is_placeholder_text
+
+        safe = utils.resolve_io_path(path, self.config.io_roots, must_exist=True)
+        checks: dict = {}
+
+        # 1) non-trivial size first: a stub file is "empty" whether or not it
+        #    happens to be a parseable document.
+        checks["bytes"] = safe.stat().st_size
+        if safe.stat().st_size < 1024:
+            return {"ok": False, "reason": "报告文件过小（<1KB），疑似空文件", "checks": checks}
+
+        # 2) readable, non-trivial body
+        try:
+            body = extract_body_text(safe)
+        except Exception as exc:  # noqa: BLE001 - corrupt/unsupported file
+            return {"ok": False, "reason": f"无法读取报告内容：{exc}", "checks": checks}
+        checks["chars"] = len(body)
+        if len(body.strip()) < 30:
+            return {"ok": False, "reason": "报告正文有效内容不足，疑似空报告", "checks": checks}
+
+        # 3) leftover placeholders
+        leftovers = [
+            line.strip() for line in body.split("\n")
+            if line.strip() and is_placeholder_text(line.strip())
+        ]
+        checks["placeholders"] = leftovers[:10]
+        if leftovers:
+            shown = "、".join(leftovers[:3])
+            return {
+                "ok": False,
+                "reason": f"报告仍残留未填写占位内容（{shown}…），拒绝提交",
+                "checks": checks,
+            }
+
+        # 4) expected sections have body
+        if expected_sections:
+            missing = _missing_sections(body, expected_sections)
+            checks["missing_sections"] = missing
+            if missing:
+                return {
+                    "ok": False,
+                    "reason": "以下章节没有正文内容：" + "、".join(missing),
+                    "checks": checks,
+                }
+
+        # 5) report topic matches the experiment
+        matches = _report_matches_experiment(body, detail)
+        checks["topic_match"] = matches
+        if matches is False:
+            return {
+                "ok": False,
+                "reason": (
+                    f"报告内容与实验「{detail.name}」不匹配"
+                    "（未出现实验主题关键词），疑似交错了实验，拒绝提交"
+                ),
+                "checks": checks,
+            }
+
+        return {"ok": True, "reason": "", "checks": checks}
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _experiment_label(name: str) -> str:
+        """``实验一 进程同步`` -> ``实验一``; falls back to the full name."""
+        m = re.match(r"^(实验\s*[一二三四五六七八九十0-9]+)", name or "")
+        return m.group(1).replace(" ", "") if m else (name or "")
+
+
+def _template_matcher(exp_label: str):
+    """Build the predicate used to search 资料 for a template.
+
+    Matches either the experiment's own label (``实验一``) or a report
+    template name (``实验报告模板``/``报告模板``), so both the per-experiment
+    materials and the shared template are found.
+    """
+    label = (exp_label or "").replace(" ", "")
+
+    def matcher(entry) -> bool:
+        name = (entry.name or "").strip()
+        if not name:
+            return False
+        if "模板" in name and ("报告" in name or "实验" in name):
+            return True
+        if label and label in name.replace(" ", ""):
+            return True
+        return False
+
+    return matcher
+
+
+def _template_priority(entry) -> int:
+    """Rank matches: the explicit 「实验报告模板」 first, then any template,
+    then a per-experiment material file."""
+    name = entry.name or ""
+    compact = name.replace(" ", "")
+    if "实验报告模板" in compact:
+        return 0
+    if "报告模板" in compact:
+        return 1
+    if "模板" in name and "报告" in name:
+        return 2
+    if "模板" in name:
+        return 3
+    return 4
+
+
+def _safe_filename(name: str, fallback: str = "material") -> str:
+    """Turn a platform-provided name into a safe local file name."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip().strip(".")
+    return cleaned[:120] or fallback
+
+
+def _missing_sections(body: str, expected: list[str]) -> list[str]:
+    """Sections whose heading exists but has no real body text under it.
+
+    ``body`` is the flat text of the whole document (paragraphs and table
+    cells, newline-joined). For each expected section the heading is located
+    with the same matcher the filler uses, then every line up to the next
+    heading is checked: at least one must be real text, not a placeholder.
+    Inline text after the heading alias on the same line counts as body.
+    A section whose heading is missing entirely also counts as missing — a
+    template that never had the section cannot have been filled.
+    """
+    from .report_generator import (
+        canonical_section,
+        is_placeholder_text,
+        _inline_after_heading,
+    )
+
+    lines = body.split("\n")
+    headings = [
+        (index, canonical_section(line.strip()))
+        for index, line in enumerate(lines)
+    ]
+    headings = [(index, key) for index, key in headings if key]
+    missing: list[str] = []
+    for canonical in expected:
+        start = next(
+            (index for index, key in headings if key == canonical), None)
+        if start is None:
+            missing.append(canonical)
+            continue
+        inline = _inline_after_heading(lines[start].strip(), canonical)
+        body_lines = [inline] if inline else []
+        later = [index for index, _ in headings if index > start]
+        end = min(later) if later else len(lines)
+        body_lines.extend(
+            line.strip() for line in lines[start + 1:end] if line.strip())
+        if not body_lines or all(
+                is_placeholder_text(line) for line in body_lines):
+            missing.append(canonical)
+    return missing
+
+
+def _report_matches_experiment(body: str, detail: ExperimentDetail) -> Optional[bool]:
+    """True/False when the report's topic can be judged, ``None`` if not.
+
+    The comparison uses the experiment's *topic* (its name minus the 实验N
+    prefix). A report that mentions no part of the topic is almost certainly
+    a report for another experiment. When the topic is too short to judge
+    (e.g. the page gave no name), the check is skipped rather than guessed —
+    "unverifiable" must never be reported as "wrong".
+    """
+    topic = re.sub(r"^实验\s*[一二三四五六七八九十0-9]*\s*", "", detail.name or "").strip()
+    topic = re.sub(r"[^一-鿿A-Za-z0-9]", "", topic)
+    if len(topic) < 2:
+        return None
+    body_key = re.sub(r"\s+", "", body)
+    # Any 2-character window of the topic appearing in the report is enough:
+    # the topic may be phrased differently but the core words will recur.
+    windows = {topic[i:i + 2] for i in range(len(topic) - 1)}
+    return any(w and w in body_key for w in windows)

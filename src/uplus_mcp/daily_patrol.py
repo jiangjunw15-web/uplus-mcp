@@ -97,6 +97,19 @@ def main() -> int:
         if audit_summary.get("checked") and audit_summary.get("unjudged_multiselect"):
             print(f"\n另有 {audit_summary['unjudged_multiselect']} 道多选题因平台尚未公布"
                   "参考答案（待批改）无法核对是否漏选。")
+        if result.get("experiment_briefs"):
+            print("\n=== 待做实验 ===")
+            for brief in result["experiment_briefs"]:
+                needed = "、".join(brief.get("needed_sections") or []) or "无"
+                print(f"- [{brief['course_name']}] {brief['name']}："
+                      f"待写章节 {needed}（{brief.get('deadline', '')}）")
+        if result.get("experiment_audits"):
+            issues = [a for a in result["experiment_audits"] if a.get("issues")]
+            if issues:
+                print("\n=== 已提交实验核查 ===")
+                for item in issues:
+                    print(f"- [{item['course_name']}] {item['name']}："
+                          + "；".join(item["issues"]))
         if result["answer_briefs"]:
             brief_path = args.brief or str(Path(result["report_path"]).with_suffix(".brief.json"))
             Path(brief_path).write_text(

@@ -112,6 +112,32 @@
 - **时序**：打开实验页先等待 `.exp-item` 出现、短超时 `networkidle`；滚动到底再回顶触发懒加载；首读约 0.8 秒后二次快照，第二次卡片数不少于第一次时以第二次为准。
 - 材料正则 `提交物[：:]\s*([^\n]+)`；截止时间正则 `(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})`。
 
+## 7.2 课程「资料」板块与文件下载（实验材料 / 报告模板）
+
+`资料` 板块的路由没有固定契约，随课程而异，因此 `materials.py` **不硬编码路由**：
+
+1. 打开课程主页 `/course/course/{courseId}`，在左侧栏按文案匹配「资料 / 资源 / 素材 / 文件 / 课程资料 / 课程资源 / 教学资料 / 学习资料」找到入口并点击；选择器依次尝试 `.el-menu-item`、`.el-sub-menu__title`、`.nav-item`、`.sidebar-item`、`.left-nav a`、`.course-nav a`、`#leftNav a`、`.el-menu a`、`.el-aside a`，最后回退到全局 `<a>` 文本扫描。
+2. 读取当前层条目：优先 `.el-table__row` / `.file-row` / `.folder-row` / `.resource-row` / `.material-row`，回退为全局 `<a>` 扫描；名称含 `文件夹 / 目录 / folder` 或没有 href 的判为文件夹。大小列正则 `\d+\s*(KB|MB|GB|B)$`。
+3. 递归进入子文件夹：有 href 直接 `goto`，没有 href 点击该行文本；条目按 `(name, href)` 去重，深度上限默认 6。
+4. 模板匹配与优先级：名称含「实验报告模板」>「报告模板」>「模板 + 报告」>「模板」，然后才是「实验N」材料。
+
+文件下载（`BrowserSession.fetch_bytes`）：
+
+| 顺序 | 方式 | 适用 |
+| --- | --- | --- |
+| 1 | 页内 `fetch` + `x-access-token` + `credentials:'include'`，`arrayBuffer` 转 base64 回传 | 同源附件 |
+| 2 | `context.request.get(url)`（共享 Cookie、不受 CORS 限制） | 跨域 OSS 签名链接 |
+
+无 href 的条目退回 `page.expect_download()` 点击捕获。所有落盘路径都经 `utils.resolve_io_path` 限制在 `allowed_io_paths` 内；下载目录为 `reports/experiment_materials/`，已提交报告回读目录为 `reports/experiment_audit/`，生成报告目录为 `reports/experiment_reports/`（`*.docx` 已 gitignore）。
+
+## 7.3 实验报告模板填充口径
+
+- `TEMPLATE_SECTIONS` 定义规范章节与别名：实验目的 / 实验原理 / 实验内容 / 实验步骤 / 实验实现 / 实验结果 / 实验总结 / 实验要求。
+- `canonical_section` 只在整行等于别名，或别名后紧跟 `：/:/、/（/，` 等分隔符时认定标题；`要求掌握进程同步`、`结果是生产者` 这类正文句不会被误判。
+- `derive_sections` 从实验手册逐字抽取「目的 / 原理 / 内容 / 步骤 / 要求」，不改写。
+- `fill_template` 打开下载的模板，按标题定位其后第一个空段落或空表格单元格填入；无空位时在标题后插入新段落；表格中首格为章节名的行填首个空格。填充后回报 `filled / still_empty / still_placeholders`。
+- `verify_report` 的提交闸门：文件 <1KB、正文 <30 字、残留占位符（`（此处填写…）/ 待填写 / TODO / ____`）、报告主题与实验名零重合，任一命中即拒绝提交。
+
 ## 8. 课程配置格式
 
 个人课程清单保存在本地 gitignored 文件 `config/courses.json`，不进入公开仓库。`courses` 数组内每项字段格式：

@@ -1007,11 +1007,21 @@ class HomeworkOperator:
             let material = '', deadline = '';
             const m1 = text.match(/提交物[：:]\s*([^\n]+)/); if (m1) material = m1[1].trim();
             const m2 = text.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/); if (m2) deadline = m2[1];
+            // The detail route embeds both ids:
+            //   expInfo/{exp_id}/stu_experiments/{stu_exp_id}/labsubmit
+            // They are the only way from this list to the detail page, so the
+            // list tool must carry them or the experiment flow dead-ends here.
+            const link = row.querySelector('a[href*="expInfo"]');
+            const href = link ? (link.getAttribute('href') || '') : '';
+            const mm = href.match(/expInfo\/([a-zA-Z0-9_-]+)\/stu_experiments\/([a-zA-Z0-9_-]+)/);
             out.push({
               name: title,
               flag_text: flag ? (flag.innerText || '').trim() : null,
               flag_class: flag ? flag.className || '' : '',
-              material, deadline, raw: text.slice(0, 200)
+              material, deadline,
+              exp_id: mm ? mm[1] : '',
+              stu_exp_id: mm ? mm[2] : '',
+              raw: text.slice(0, 200)
             });
           });
           return out;
@@ -1041,12 +1051,17 @@ class HomeworkOperator:
                 const text = c.innerText;
                 const m1 = text.match(/提交物[：:]\s*([^\n]+)/);
                 const m2 = text.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/);
+                const link = c.querySelector('a[href*="expInfo"]');
+                const href = link ? (link.getAttribute('href') || '') : '';
+                const mm = href.match(/expInfo\/([a-zA-Z0-9_-]+)\/stu_experiments\/([a-zA-Z0-9_-]+)/);
                 out.push({
                   name: title,
                   flag_text: badge ? (badge.innerText || '').trim() : null,
                   flag_class: badge ? badge.className || '' : '',
                   material: m1 ? m1[1].trim() : '',
                   deadline: m2 ? m2[1] : '',
+                  exp_id: mm ? mm[1] : '',
+                  stu_exp_id: mm ? mm[2] : '',
                   raw: text.slice(0,200)
                 });
               });
@@ -1067,6 +1082,9 @@ class HomeworkOperator:
                     deadline_ms=deadline_ms,
                     material=raw.get("material", ""),
                     raw_text=raw.get("raw", ""),
+                    course_id=course.id,
+                    exp_id=raw.get("exp_id", ""),
+                    stu_exp_id=raw.get("stu_exp_id", ""),
                 )
             )
         return experiments
