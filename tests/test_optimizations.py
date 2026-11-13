@@ -189,3 +189,47 @@ def test_no_password_tab_falls_back_to_old_behaviour():
     page = _MappingPage({})
     session = _session()
     assert session._switch_to_password_tab(page) is False
+
+
+# --------------------------------------------------------------------------- #
+# the 提交 click must wait for the uploader to finish converting
+# --------------------------------------------------------------------------- #
+class _TextPage:
+    """A page whose body text follows a scripted sequence."""
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.reads = 0
+
+    def inner_text(self, selector):
+        index = min(self.reads, len(self.texts) - 1)
+        self.reads += 1
+        return self.texts[index]
+
+
+def test_wait_converted_skips_the_converting_window(tmp_path, monkeypatch):
+    monkeypatch.setattr("uplus_mcp.experiment.time.sleep", lambda *_: None)
+    page = _TextPage(["格式转换中...", "格式转换中...", "转换成功"])
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), _FlakySession(0))
+    assert op._wait_converted(page, timeout=60) is True
+    assert page.reads == 3
+
+
+def test_wait_converted_times_out(tmp_path, monkeypatch):
+    monkeypatch.setattr("uplus_mcp.experiment.time.sleep", lambda *_: None)
+    page = _TextPage(["格式转换中..."])
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), _FlakySession(0))
+    assert op._wait_converted(page, timeout=0.01) is False
+
+
+def test_section_alias_is_recognised_for_summary():
+    # The teacher's template says 「5. 实验结论及心得」; it must resolve to 实验总结.
+    assert rg.canonical_section("实验结论及心得") == "实验总结"
+    assert rg.canonical_section("5. 实验结论及心得") == "实验总结"
+
+
+def test_experiment_name_with_course_prefix():
+    from uplus_mcp.experiment import extract_experiment_name
+
+    text = "理论\n2026-2027-1-人工智能基础\n< 返回\n人工智能基础-实验3-知识提取实践\n未提交"
+    assert extract_experiment_name(text) == "人工智能基础-实验3-知识提取实践"

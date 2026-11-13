@@ -27,14 +27,23 @@ from . import compliance, utils
 # The experiment heading is ``实验N <topic>`` where N is a Chinese or an
 # Arabic numeral. Matching only 实验一/实验二 left every later experiment
 # (实验三 … 实验九) nameless.
-_EXPERIMENT_NAME_RE = re.compile(r"^实验\s*[一二三四五六七八九十0-9]")
+# The course name is often glued in front (``人工智能基础-实验3-知识提取实践``),
+# so an optional ``…-`` prefix is allowed; a line that carries a colon is a
+# field ("实验要求：…"), never a title.
+_EXPERIMENT_NAME_RE = re.compile(
+    r"^(?:[^：:]{0,30}[-\s])?实验\s*[一二三四五六七八九十0-9]+"
+)
 
 
 def extract_experiment_name(text: str) -> str:
     """First title line of an experiment detail page."""
     for line in text.split("\n"):
         stripped = line.strip()
-        if stripped and _EXPERIMENT_NAME_RE.match(stripped):
+        if not stripped or len(stripped) > 60:
+            continue
+        if "：" in stripped or ":" in stripped:
+            continue
+        if _EXPERIMENT_NAME_RE.match(stripped):
             return stripped
     # Fallback kept from the earlier heuristic: a topic line that carries no
     # 实验 prefix. It must look like a *title*, not a sentence: requirement
@@ -328,7 +337,14 @@ class ExperimentOperator:
             raise UplusError("页面未找到文件上传输入框")
 
         file_input.set_input_files(str(safe_path))
-        time.sleep(2.0)
+        # The uploader converts the file asynchronously. The 「提交」 button is
+        # visible the whole time but a click while the page still says
+        # 「格式转换中...」 silently does nothing — that is what produced
+        # "clicked 提交 但未生效". Wait for 「转换成功」 before clicking.
+        if not self._wait_converted(page, timeout=60.0):
+            raise UplusError(
+                "文件上传后 60 秒仍未显示「转换成功」，请人工复核（文件可能过大或格式不支持）"
+            )
 
         # The uploader converts the file first (aaaa.docx 转换成功) and only
         # then exposes the 「提交」 button. Clicking a div that merely contains
@@ -384,6 +400,28 @@ class ExperimentOperator:
         except Exception:  # noqa: BLE001 - a missing dialog is normal
             pass
         return True
+
+    def _wait_converted(self, page: Page, timeout: float = 60.0) -> bool:
+        """Poll until the uploader reports 「转换成功」 for the new file.
+
+        Right after ``set_input_files`` the page shows 「格式转换中...」 for a
+        few seconds. A 「提交」 click during that window is accepted by the UI
+        but never registers, so the conversion has to finish first.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                text = page.inner_text("body")
+            except Exception:  # noqa: BLE001 - page may be re-rendering
+                time.sleep(1.0)
+                continue
+            if "转换中" in text:
+                time.sleep(1.0)
+                continue
+            if "转换成功" in text:
+                return True
+            time.sleep(1.0)
+        return False
 
     def _wait_submitted(self, page: Page, timeout: float = 15.0) -> bool:
         """Poll the page until it shows the submitted badge and 撤回 button."""

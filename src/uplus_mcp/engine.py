@@ -331,6 +331,14 @@ class PatrolEngine:
         op = self._experiment_operator()
         detail = op.read_detail(course_id, exp_id, stu_exp_id)
         supplied = _parse_sections(sections)
+        # The caller may name a section the way the teacher's template does
+        # ("实验结论及心得"). Normalising the key through the same alias table
+        # the template filler uses keeps such a section from being reported
+        # missing just because it is not spelled "实验总结".
+        supplied = {
+            (report_generator.canonical_section(name) or name): body
+            for name, body in supplied.items()
+        }
         requirements = op.collect_requirements(detail)
         brief = self._experiment_brief(detail, requirements)
         auto_sections = brief["auto_sections"]
