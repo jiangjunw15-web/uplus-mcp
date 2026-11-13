@@ -235,9 +235,10 @@ class PatrolEngine:
         """Read an experiment and produce the authoring brief.
 
         The brief is the experiment analogue of ``inspect_homework``: it
-        carries the requirements, the downloaded template (when the 资料
-        section has one), and the exact sections the model must write.
-        Nothing is filled, uploaded or submitted.
+        carries the requirements, the downloaded template (searched across
+        实验附件 → 实验手册 → 资料, preferring whichever yields a downloadable
+        file), and the exact sections the model must write. Nothing is filled,
+        uploaded or submitted.
         """
         op = self._experiment_operator()
         detail = op.read_detail(course_id, exp_id, stu_exp_id)
@@ -284,9 +285,14 @@ class PatrolEngine:
                 {"name": a.name, "href": a.href, "kind": a.kind}
                 for a in detail.attachments
             ],
+            "manual_links": [
+                {"name": a.name, "href": a.href}
+                for a in detail.manual_links
+            ],
             "requirements": requirements[:6000],
             "manual_text": (detail.manual_text or "")[:8000],
             "template": template,
+            "template_source": (template or {}).get("source", ""),
             "template_error": template_error,
             "template_description": template_description,
             "auto_sections": auto_sections,
@@ -533,6 +539,7 @@ class PatrolEngine:
         downloaded: list[dict] = []
         errors: list[str] = []
 
+        # ---- 1) 实验附件: download every attachment with an href ----
         for attachment in detail.attachments:
             if not attachment.href:
                 continue
@@ -545,12 +552,30 @@ class PatrolEngine:
             except AuthExpiredError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep downloading others
-                errors.append(f"{attachment.name}：{exc}")
+                errors.append(f"实验附件 {attachment.name}：{exc}")
                 continue
             downloaded.append({"name": attachment.name, "path": str(path),
                                "source": "实验附件"})
 
-        # 资料 section: walk (folders included) and download every match.
+        # ---- 2) 实验手册: download every file link on the manual tab ----
+        for link in detail.manual_links:
+            if not link.href:
+                continue
+            filename = link.name or "manual"
+            if not re.search(r"\.[A-Za-z0-9]{1,6}$", filename):
+                filename += ".bin"
+            try:
+                path = self.session.download_to(
+                    link.href, folder / _safe_stem(filename))
+            except AuthExpiredError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep downloading others
+                errors.append(f"实验手册 {link.name}：{exc}")
+                continue
+            downloaded.append({"name": link.name, "path": str(path),
+                               "source": "实验手册"})
+
+        # ---- 3) 资料 section: walk (folders included) and download every match ----
         from . import materials
         from .experiment import _template_matcher, _template_priority
 
@@ -579,16 +604,24 @@ class PatrolEngine:
             except AuthExpiredError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep downloading others
-                errors.append(f"{entry.name}：{exc}")
+                errors.append(f"资料 {entry.name}：{exc}")
                 continue
             downloaded.append({"name": entry.name, "path": str(path),
                                "source": "资料"})
-            # Entries are priority-sorted, so the first download is the best
-            # template candidate the pipeline should use.
-            if template is None:
-                template = {"name": entry.name, "path": str(path)}
+
+        # ---- pick the best template across all downloaded files ----
+        # The template search already checked 实验附件 → 实验手册 → 资料 in
+        # priority order via find_report_template; reuse its pick so the
+        # template field is consistent with what answer_experiment would use.
+        try:
+            template = op.find_report_template(detail)
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"模板选择：{exc}")
 
         hidden = [a.name for a in detail.attachments if not a.href]
+        hidden_manual = [a.name for a in detail.manual_links if not a.href]
         return {
             "course_id": course_id,
             "exp_id": exp_id,
@@ -599,8 +632,10 @@ class PatrolEngine:
             "downloaded": downloaded,
             "errors": errors,
             "unavailable_attachments": hidden,
+            "unavailable_manual_links": hidden_manual,
             "unavailable_materials": unavailable_materials,
             "template": template,
+            "template_source": (template or {}).get("source", ""),
             "folder": str(folder),
             "note": (
                 "实验附件与资料里所有匹配的实验材料 / 报告模板都已下载到本地；"

@@ -257,13 +257,17 @@ async def uplus_submit_experiment_report(
 async def uplus_download_experiment_materials(
     course_id: str, exp_id: str, stu_exp_id: str
 ) -> dict:
-    """Download an experiment's attachments and its 资料-section report template.
+    """Download an experiment's materials from **all** sources.
+
+    Downloads every attachment from the 实验附件 tab, every file link from
+    the 实验手册 tab, and every matching file from the course 资料 section
+    (recursing into folders). The best template across all sources is
+    identified and reported in ``template`` / ``template_source``.
 
     Read-only against the platform. Use it after ``uplus_list_experiments``
     (which returns ``exp_id`` / ``stu_exp_id``) when you want the requirement
     files and the template on disk before authoring the report. Files go to
-    ``reports/experiment_materials/``. It walks the course 资料 section —
-    including folders — for a file named like 「实验N」 or 「实验报告模板」.
+    ``reports/experiment_materials/``.
     """
     return await _thread.run_async(
         _dispatch("download_experiment_materials", course_id, exp_id, stu_exp_id)
@@ -277,8 +281,10 @@ async def uplus_inspect_experiment(
     """Read an experiment and return the authoring brief.
 
     Opens the experiment detail page, reads 实验提交物 / 实验手册 / 实验附件,
-    and (when ``find_template``) searches the course 资料 section, including
-    its folders, for the 「实验报告模板」 and downloads it.
+    and (when ``find_template``) searches **all three sources** for a
+    downloadable report template — 实验附件 first, then downloadable files on
+    the 实验手册 tab, then the course 资料 section (including its folders).
+    The first source that yields a downloadable template file wins.
 
     The result separates:
 
@@ -290,6 +296,8 @@ async def uplus_inspect_experiment(
       ``{"sections": {"实验实现": "...", ...}}`` and call
       ``uplus_answer_experiment``.
 
+    ``template_source`` reports which source the template came from
+    (``实验附件`` / ``实验手册`` / ``资料``) or empty when no template was found.
     Nothing is filled, uploaded or submitted by this tool.
     """
     return await _thread.run_async(

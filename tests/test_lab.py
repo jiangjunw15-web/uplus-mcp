@@ -25,6 +25,8 @@ from uplus_mcp.experiment import (
     _report_matches_experiment,
     _template_matcher,
     _template_priority,
+    Attachment,
+    _NameOnly,
 )
 from uplus_mcp.models import Course, Experiment
 from uplus_mcp.operator import HomeworkOperator
@@ -558,6 +560,8 @@ class _FakeExpOp:
                                              "checks": {}}
         self.submitted: list = []
 
+    _experiment_label = staticmethod(ExperimentOperator._experiment_label)
+
     def read_detail(self, *args):
         return self.detail
 
@@ -739,3 +743,162 @@ def test_read_experiments_carries_exp_and_stu_exp_ids(monkeypatch):
     assert exp.stu_exp_id == "def456"
     assert exp.course_id == "c1"
     assert exp.submitted is False
+
+# --------------------------------------------------------------------------- #
+# template search across all sources (实验附件 → 实验手册 → 资料)
+# --------------------------------------------------------------------------- #
+class _DownloadSession:
+    """Session that records downloads instead of hitting the network."""
+
+    def __init__(self, tmp_path):
+        self.folder = tmp_path / "experiment_materials"
+        self.calls: list[str] = []
+        self._tmp = tmp_path
+
+    def download_to(self, url, dest):
+        from pathlib import Path
+        self.calls.append(url)
+        target = Path(dest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"PK fake docx")
+        return target
+
+    def open(self, path):
+        raise AssertionError("资料 walk should not run when 附件/手册 matched")
+
+
+def test_find_template_prefers_downloadable_attachment(tmp_path):
+    detail = _detail(attachments=[
+        Attachment(name="实验一 进程同步.zip", href="http://x/e1.zip"),
+        Attachment(name="实验报告模板.docx", href="http://x/tpl.docx"),
+    ])
+    session = _DownloadSession(tmp_path)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), session)
+    hit = op.find_report_template(detail)
+    assert hit is not None
+    assert hit["name"] == "实验报告模板.docx"
+    assert hit["source"] == "实验附件"
+    assert "http://x/tpl.docx" in session.calls
+
+
+def test_find_template_falls_back_to_manual_link(tmp_path):
+    # The attachment carries a name that matches nothing, so the search
+    # continues to the 实验手册 links.
+    detail = _detail(
+        attachments=[Attachment(name="课程大纲.docx", href="http://x/outline.docx")],
+        manual_links=[Attachment(name="实验报告模板.docx", href="http://x/manual.docx")],
+    )
+    session = _DownloadSession(tmp_path)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), session)
+    hit = op.find_report_template(detail)
+    assert hit is not None
+    assert hit["source"] == "实验手册"
+    assert "http://x/manual.docx" in session.calls
+    assert "http://x/outline.docx" not in session.calls
+
+def test_find_template_skips_attachment_without_href(tmp_path):
+    detail = _detail(
+        attachments=[Attachment(name="实验报告模板.docx", href="")],
+        manual_links=[Attachment(name="实验报告模板.docx", href="http://x/m.docx")],
+    )
+    session = _DownloadSession(tmp_path)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), session)
+    hit = op.find_report_template(detail)
+    assert hit is not None
+    assert hit["source"] == "实验手册"
+
+
+def test_find_template_returns_none_when_no_match_anywhere(tmp_path):
+    detail = _detail(
+        attachments=[Attachment(name="课程大纲.docx", href="http://x/outline.docx")],
+        manual_links=[Attachment(name="课程说明.docx", href="http://x/readme.docx")],
+    )
+
+    class _NoMaterialSession(_DownloadSession):
+        def open(self, path):
+            raise AssertionError("资料 walk should not run without a match")
+
+    session = _NoMaterialSession(tmp_path)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), session)
+    # No 资料 walk happens because the matcher never matched; the walk is
+    # skipped only when nothing at all matched.
+    from uplus_mcp import materials as materials_mod
+
+    import unittest.mock as mock
+    with mock.patch.object(materials_mod, "walk", return_value=[]):
+        hit = op.find_report_template(detail)
+    assert hit is None
+
+
+def test_find_template_ranks_attachment_by_priority(tmp_path):
+    detail = _detail(attachments=[
+        Attachment(name="实验一 材料.zip", href="http://x/e1.zip"),
+        Attachment(name="实验报告模板.docx", href="http://x/tpl.docx"),
+        Attachment(name="报告模板.docx", href="http://x/r.docx"),
+    ])
+    session = _DownloadSession(tmp_path)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), session)
+    hit = op.find_report_template(detail)
+    assert hit is not None
+    assert hit["name"] == "实验报告模板.docx"
+    assert "http://x/tpl.docx" in session.calls
+
+
+def test_read_detail_captures_manual_links(tmp_path):
+    class _TabPage:
+        def __init__(self):
+            self.url = "https://www.eduplus.net/course/course/c1/ExperimentPage/x/y/labsubmit"
+
+        def wait_for_load_state(self, *a, **k):
+            return None
+
+        def inner_text(self, selector="body"):
+            return "实验一 进程同步\n提交物：实验报告\n2026-12-31 23:59"
+
+        def evaluate(self, script, arg=None):
+            # The tab-switch helper and the link collectors each have their
+            # own script; the link one is the last that matches 'a.href'.
+            if "exp-info-tab-btn" in script:
+                return True
+            if "a.href" in script:
+                return [{"name": "实验报告模板.docx", "href": "http://x/tpl.docx"}]
+            return []
+
+    class _Session:
+        def open(self, url):
+            return _TabPage()
+
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), _Session())
+    detail = op.read_detail("c1", "e1", "s1")
+    assert detail.manual_links
+    assert detail.manual_links[0].name == "实验报告模板.docx"
+    assert detail.manual_links[0].href == "http://x/tpl.docx"
+
+
+def test_download_experiment_materials_covers_all_sources(tmp_path):
+    from uplus_mcp.experiment import Attachment as Att
+
+    detail = _detail(
+        attachments=[Att(name="附件一.pdf", href="http://x/a1.pdf")],
+        manual_links=[Att(name="实验手册.docx", href="http://x/manual.docx")],
+    )
+    op = _FakeExpOp(detail)
+    engine = _engine(tmp_path, op)
+
+    class _Session:
+        def download_to(self, url, dest):
+            from pathlib import Path
+            target = Path(dest)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"PK")
+            return target
+
+    engine.session = _Session()
+    from unittest import mock
+    from uplus_mcp import materials as materials_mod
+    with mock.patch.object(materials_mod, "walk", return_value=[]), \
+            mock.patch.object(_FakeExpOp, "find_report_template", return_value=None):
+        result = engine.download_experiment_materials("c1", "e1", "s1")
+    sources = {item["source"] for item in result["downloaded"]}
+    assert sources == {"实验附件", "实验手册"}
+    assert {item["name"] for item in result["downloaded"]} == {"附件一.pdf", "实验手册.docx"}

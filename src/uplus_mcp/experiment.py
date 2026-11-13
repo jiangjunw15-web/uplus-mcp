@@ -75,9 +75,13 @@ class ExperimentDetail:
     attachments: list[Attachment] = field(default_factory=list)
     submitted_files: list[str] = field(default_factory=list)
     #: Download links for the files already submitted (captured on the
-    #: 实验提交物 tab). The audit uses these to pull the submitted report back
+    #: 实验提交物 tab). The audit uses these to=to pull the submitted report back
     #: and inspect it; an empty list means the audit can only read page text.
     submitted_links: list[Attachment] = field(default_factory=list)
+    #: Download links found on the 实验手册 tab. The manual is sometimes a
+    #: downloadable .docx/.pdf rather than inline text, and that file may carry
+    #: the report template or the requirements we need.
+    manual_links: list[Attachment] = field(default_factory=list)
     page_url: str = ""
 
 
@@ -167,11 +171,30 @@ class ExperimentOperator:
         except Exception:
             pass
 
-        # read 实验手册 tab
+        # read 实验手册 tab — the manual may be inline text *and* carry
+        # downloadable files (a .docx handbook, a template, reference code).
+        # Both are captured: the text for requirement extraction, the links
+        # for template / material download.
         try:
             self._click_tab(page, "实验手册")
             time.sleep(1.0)
             detail.manual_text = page.inner_text("body")
+            manual_atts = page.evaluate(r"""
+                () => {
+                    const out = [];
+                    document.querySelectorAll('a').forEach(a => {
+                        const t = (a.innerText || '').trim();
+                        const href = a.href || '';
+                        if (!href || !t || t.length > 200) return;
+                        out.push({name: t, href});
+                    });
+                    return out;
+                }
+            """) or []
+            for a in manual_atts:
+                detail.manual_links.append(
+                    Attachment(name=str(a.get("name", "")), href=str(a.get("href", "")))
+                )
         except Exception:
             pass
 
@@ -370,20 +393,52 @@ class ExperimentOperator:
 
     def find_report_template(self, detail: ExperimentDetail,
                              max_depth: int = 6) -> Optional[dict]:
-        """Locate the 实验报告模板 in the course 资料 section.
+        """Locate the best report template across **all** experiment sources.
 
-        The user's flow: if the experiment page carries no usable
-        requirements/template, go to the 资料 section and look for
-        「实验N」and「实验报告模板」 (recursing into folders). This method
-        does exactly that and downloads the first matching template.
+        The user's requirement: check everything — 实验附件, 实验手册
+        (downloadable files on the manual tab), and the course 资料 section
+        (recursing into folders) — and prefer whichever source actually
+        yields a downloadable template file.
 
-        Returns ``{"name", "path"}`` or ``None`` when no template is found.
-        A missing template is not an error: the caller falls back to the
-        built-in report generator.
+        Search order (first downloadable match wins):
+
+        1. **实验附件** — attachments on the 实验附件 tab whose name matches
+           「实验报告模板 / 报告模板 / 实验N」 and carry a download href.
+        2. **实验手册** — downloadable files on the 实验手册 tab (the manual
+           is sometimes a .docx that *is* the template, or carries one).
+        3. **资料** — the course 资料 section, walked recursively into
+           folders, matching the same names.
+
+        Within each source, entries are ranked by :func:`_template_priority`
+        (an explicit「实验报告模板」beats a bare「模板」beats a per-experiment
+        file). A source that has a matching name but no download href is
+        noted but skipped — the caller wants a file it can actually open.
+
+        Returns ``{"name", "path", "source"}`` with ``path`` pointing at the
+        downloaded file, or ``None`` when no downloadable template is found
+        in any source. A missing template is not an error: the caller falls
+        back to the built-in report generator.
         """
+        exp_label = self._experiment_label(detail.name)
+        dest_dir = self.config.report_folder / "experiment_materials"
+
+        # ---- 1) 实验附件 ----
+        hit = self._best_downloadable_attachment(
+            detail.attachments, exp_label, dest_dir)
+        if hit:
+            hit["source"] = "实验附件"
+            return hit
+
+        # ---- 2) 实验手册 (downloadable files on the manual tab) ----
+        hit = self._best_downloadable_attachment(
+            detail.manual_links, exp_label, dest_dir)
+        if hit:
+            hit["source"] = "实验手册"
+            return hit
+
+        # ---- 3) 资料 (recursive folder walk) ----
         from . import materials
 
-        exp_label = self._experiment_label(detail.name)
         matcher = _template_matcher(exp_label)
         try:
             entries = materials.walk(
@@ -394,19 +449,64 @@ class ExperimentOperator:
             raise UplusError(f"资料板块检索失败：{exc}") from exc
         if not entries:
             return None
-        # Prefer a file named exactly like a template, then any 实验N file.
-        entries.sort(key=_template_priority)
-        entry = entries[0]
-        if not entry.href:
-            return {"name": entry.name, "path": ""}
-        dest = self.config.report_folder / "experiment_materials" / _safe_filename(entry.name)
+        # Prefer a downloadable file; rank by template priority.
+        downloadable = [e for e in entries if e.href]
+        downloadable.sort(key=_template_priority)
+        if not downloadable:
+            # Report the best match's name even though it has no href, so the
+            # caller can tell the user where the template is but that it must
+            # be downloaded manually.
+            entries.sort(key=_template_priority)
+            return {"name": entries[0].name, "path": "", "source": "资料"}
+        entry = downloadable[0]
+        dest = dest_dir / _safe_filename(entry.name)
         try:
             path = materials.download(self.session, entry, dest)
         except AuthExpiredError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise UplusError(f"模板下载失败（{entry.name}）：{exc}") from exc
-        return {"name": entry.name, "path": str(path)}
+        return {"name": entry.name, "path": str(path), "source": "资料"}
+
+    def _best_downloadable_attachment(
+        self, attachments: list[Attachment], exp_label: str,
+        dest_dir: Path) -> Optional[dict]:
+        """Pick the best downloadable template-like attachment from a list.
+
+        Used for both 实验附件 and 实验手册 links. Returns
+        ``{"name", "path"}`` for the first downloadable match (ranked by
+        :func:`_template_priority`), or ``None`` when nothing in the list
+        both matches the template name *and* carries a download href.
+        """
+        label = (exp_label or "").replace(" ", "")
+        candidates: list[tuple[int, Attachment]] = []
+        for att in attachments:
+            if not att.href or not att.name:
+                continue
+            name = att.name.strip()
+            compact = name.replace(" ", "")
+            # Match: a template name, or this experiment's own label.
+            is_template = (
+                ("模板" in name and ("报告" in name or "实验" in name))
+                or (label and label in compact)
+            )
+            if not is_template:
+                continue
+            priority = _template_priority(
+                _NameOnly(name))  # reuse the ranking function
+            candidates.append((priority, att))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda pair: pair[0])
+        _, best = candidates[0]
+        dest = dest_dir / _safe_filename(best.name)
+        try:
+            path = self.session.download_to(best.href, dest)
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise UplusError(f"模板下载失败（{best.name}）：{exc}") from exc
+        return {"name": best.name, "path": str(path)}
 
     # ------------------------------------------------------------------ #
     # report verification (the inspection gate)
@@ -522,6 +622,13 @@ def _template_matcher(exp_label: str):
         return False
 
     return matcher
+
+
+class _NameOnly:
+    """Adapter so ``_template_priority`` can rank a bare attachment name."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
 def _template_priority(entry) -> int:
