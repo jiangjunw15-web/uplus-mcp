@@ -242,10 +242,14 @@ def _check_sections(text: str, stats: dict) -> list[Issue]:
             found.append(key)
     stats["sections"] = found
 
-    if "实验内容" in found:
-        issues.append(_warn("4", "多出「实验内容」章节",
-                            "教师模板只有 实验名称/目的/要求/步骤，没有这一章",
-                            "并入「实验要求」或删除"))
+    # Only chapters that are genuinely foreign to the teacher template are
+    # flagged. "实验内容" used to be hardcoded as foreign, which fired on
+    # templates that do carry it — a false alarm on a correct report.
+    extra = [s for s in found if s not in order]
+    if extra:
+        issues.append(_warn("4", "出现模板外章节",
+                            "模板没有的章节：" + "、".join(extra),
+                            "并入相邻章节或删除"))
     positions = [order.index(s) for s in found if s in order]
     if positions != sorted(positions):
         issues.append(_warn("4b", "章节顺序与模板不一致",
@@ -273,7 +277,13 @@ def _check_manual_coverage(text: str, manual_text: str, stats: dict) -> list[Iss
     items = _manual_items(manual_text)
     stats["manual_items"] = len(items)
     if not items:
-        return []
+        # A handbook that could not be read is not the same as "all
+        # requirements covered". Saying nothing let a report pass a check that
+        # never ran, so this is reported as unverifiable instead.
+        return [_warn("5", "手册要求未能解析，本项未核对",
+                      "手册正文没有取到（ONLYOFFICE 内嵌页面读不出文本），"
+                      "无法逐条比对要求",
+                      "人工对照手册确认报告覆盖了每一条要求")]
     covered, missing = 0, []
     for item in items:
         fragments = [f for f in re.split(r"[，。；、（）()：:]", item) if len(f) >= 4]

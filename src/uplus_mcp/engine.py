@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from . import report as report_mod
@@ -15,7 +16,7 @@ from .browser import BrowserSession, AuthExpiredError, UplusError
 from .config import Config
 from .experiment import ExperimentDetail, ExperimentOperator
 from .models import HomeworkStatus, HomeworkTask, QuestionType
-from .operator import HomeworkOperator
+from .operator import HomeworkOperator, classify_experiment_flag
 from .platform import PlatformClient
 from . import journal, report_generator, solver, utils
 
@@ -167,17 +168,28 @@ class PatrolEngine:
                 })
         return rows
 
-    def list_experiments(self, course_id: str) -> list[dict]:
+    def list_experiments(self, course_id: str, verify: bool = True) -> list[dict]:
+        """List the course's experiments with a trustworthy submitted flag.
+
+        The list page's badge is not a reliable judge: the live test read
+        ``submitted: false`` for every experiment, including one the platform
+        itself displayed as 已提交 on its detail page. So each row is
+        re-checked against the detail page (已提交 + 撤回) and the badge is only
+        kept as a fallback, marked with ``status_source``.
+        """
         course = next(
             (c for c in self.client.list_my_courses() if c.id == course_id), None
         )
         if course is None:
             raise UplusError(f"未找到课程 {course_id}，请先确认课程 ID")
         experiments = self.operator.read_experiments(course)
-        return [
-            {
+        exp_op = self._experiment_operator()
+        rows: list[dict] = []
+        for e in experiments:
+            row = {
                 "name": e.name,
                 "submitted": e.submitted,
+                "submitted_source": "list_badge",
                 "deadline_ms": e.deadline_ms,
                 "deadline": utils.deadline_label(e.deadline_ms),
                 "material": e.material,
@@ -186,8 +198,19 @@ class PatrolEngine:
                 "exp_id": e.exp_id,
                 "stu_exp_id": e.stu_exp_id,
             }
-            for e in experiments
-        ]
+            if verify and e.exp_id and e.stu_exp_id:
+                try:
+                    detail = exp_op.read_detail(course_id, e.exp_id,
+                                                e.stu_exp_id)
+                    row["status"] = detail.status
+                    row["submitted"] = classify_experiment_flag(
+                        detail.status, "")
+                    row["submitted_files"] = list(detail.submitted_files)
+                    row["submitted_source"] = "detail_page"
+                except Exception as exc:  # noqa: BLE001 - keep the list usable
+                    row["submitted_source"] = f"list_badge（复核失败：{exc}）"
+            rows.append(row)
+        return rows
 
     # ------------------------------------------------------------------ #
     # experiments: inspect / answer / audit
@@ -342,10 +365,11 @@ class PatrolEngine:
         requirements = op.collect_requirements(detail)
         brief = self._experiment_brief(detail, requirements)
         auto_sections = brief["auto_sections"]
-        # The caller may override any server-derived section, but the server
-        # never overwrites the caller.
-        merged: dict[str, str] = dict(auto_sections)
-        merged.update(supplied)
+        # The report has to describe what the student actually did. Copying the
+        # handbook's 目的/内容/步骤 verbatim produced reports that merely restated
+        # the manual, so the handbook text is now a hint handed back to the caller
+        # (``auto_sections``) instead of being written into the document.
+        merged: dict[str, str] = dict(supplied)
 
         missing = [
             name for name in report_generator.MODEL_REQUIRED_SECTIONS
@@ -373,6 +397,7 @@ class PatrolEngine:
             result["note"] = (
                 "以下章节缺少内容，未生成、未提交（服务端不编造内容）："
                 + "、".join(missing)
+                + "。手册里的对应段落只作参考（见 auto_sections），报告正文要写实际做了什么。"
             )
             return result
 
@@ -438,8 +463,16 @@ class PatrolEngine:
             result["note"] = f"提交失败：{exc}（报告已保留在本地，可人工复核）"
             return result
         result["submission"] = submission
-        result["submitted"] = True
-        result["note"] = "报告已填充、校验通过并提交成功（页面已确认）。"
+        # Only a state that survived a reload counts as submitted.
+        if submission.get("status_verified", True):
+            result["submitted"] = True
+            result["note"] = "报告已填充、校验通过并提交成功（刷新复核仍为已提交）。"
+        else:
+            result["submitted"] = False
+            result["note"] = (
+                "提交后刷新页面，状态回退为「未提交」，服务端没有落库；"
+                "文件仍在上传区，请在页面上再点一次「提交」，或稍后重试。"
+            )
         return result
 
     def _build_report(self, detail: ExperimentDetail, sections: dict[str, str],
@@ -463,6 +496,8 @@ class PatrolEngine:
                 fallback_reason = f"模板无法使用（{exc}），已改用内置报告格式"
         # No usable template: build a skeleton whose sections are empty slots,
         # then run the same filler so both paths share verification behaviour.
+        # The skeleton carries the teacher's cover, because without the cover
+        # fields the compliance gate rejects every generated report.
         skeleton = output.with_name(output.stem + "_skeleton.docx")
         report_generator.generate_report(
             title=detail.name or "实验报告",
@@ -471,6 +506,7 @@ class PatrolEngine:
             steps=[],
             requirements=[],
             output_path=skeleton,
+            cover=self._report_cover(detail, student_name, student_id),
         )
         try:
             info = report_generator.fill_template(
@@ -481,6 +517,27 @@ class PatrolEngine:
         if fallback_reason:
             info["template_fallback"] = fallback_reason
         return info
+
+    def _report_cover(self, detail: ExperimentDetail, student_name: str,
+                      student_id: str) -> dict:
+        """Cover payload for a generated report (teacher template front page).
+
+        Values come from the gitignored personal config; a blank one is still
+        written as an empty label so the field exists and the compliance
+        checklist reports a fillable warning instead of a missing field.
+        """
+        today = datetime.now().strftime("%Y年%m月%d日")
+        return {
+            "school": self.config.student_school,
+            "major": self.config.student_major,
+            "class_name": self.config.student_class,
+            "student_name": student_name,
+            "student_id": student_id,
+            "teacher": self.config.student_teacher,
+            "date": today,
+            "hours": "",
+            "title": detail.name,
+        }
 
     def audit_experiment(self, course_id: str, exp_id: str, stu_exp_id: str,
                          download: bool = True) -> dict:

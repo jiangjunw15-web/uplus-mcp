@@ -233,3 +233,141 @@ def test_experiment_name_with_course_prefix():
 
     text = "理论\n2026-2027-1-人工智能基础\n< 返回\n人工智能基础-实验3-知识提取实践\n未提交"
     assert extract_experiment_name(text) == "人工智能基础-实验3-知识提取实践"
+
+
+# --------------------------------------------------------------------------- #
+# the generated report must be fillable, covered and free of empty headings
+# --------------------------------------------------------------------------- #
+COVER = {
+    "school": "中北大学软件学院",
+    "major": "软件工程",
+    "class_name": "24130412",
+    "student_name": "王政凯",
+    "student_id": "2413041221",
+    "teacher": "张晓波",
+    "date": "2026年11月13日",
+    "hours": "4",
+}
+
+
+def test_generated_skeleton_carries_the_teacher_cover(tmp_path):
+    out = tmp_path / "skeleton.docx"
+    rg.generate_report("实验三 知识提取", "", "", [], [], out, cover=COVER)
+    body = rg.extract_body_text(out)
+    for label in ("中北大学软件学院", "实验报告", "实验名称：", "专业：软件工程",
+                  "班级：24130412", "学号：2413041221", "姓名：王政凯",
+                  "辅导教师：张晓波", "实验时间：2026年11月13日", "学时数：4"):
+        assert label in body
+
+
+def test_blank_cover_field_still_renders_its_label(tmp_path):
+    out = tmp_path / "skeleton.docx"
+    rg.generate_report("实验三", "", "", [], [], out,
+                       cover={**COVER, "hours": "", "teacher": ""})
+    body = rg.extract_body_text(out)
+    # The label must exist (a missing field blocks); the blank value only warns.
+    assert "学时数：" in body and "辅导教师：" in body
+
+
+def test_skeleton_has_no_empty_scaffold_headings(tmp_path):
+    out = tmp_path / "skeleton.docx"
+    rg.generate_report("实验三", "", "", [], [], out, cover=COVER)
+    body = rg.extract_body_text(out)
+    # These were carried over from the old skeleton: they reproduced the
+    # handbook's wording and stayed empty in every generated report.
+    for stale in ("算法伪代码：", "实现代码：", "时间复杂度分析：",
+                  "测试用例结果：", "（此处填写"):
+        assert stale not in body
+
+
+def test_every_section_body_lands_and_no_heading_is_left_empty(tmp_path):
+    skeleton = tmp_path / "skeleton.docx"
+    rg.generate_report("实验三", "", "", [], [], skeleton, cover=COVER)
+    filled = rg.fill_template(
+        skeleton,
+        {"实验目的": "掌握实体识别", "实验内容": "12 句语料", "实验步骤": "1) 建语料",
+         "实验实现": "jieba.posseg 取 nr/nt/ns", "实验结果": "41 实体、27 三元组",
+         "实验总结": "规则法可解释但泛化差"},
+        tmp_path / "report.docx", "王政凯", "2413041221")
+    assert filled["still_empty"] == []
+    assert filled["still_placeholders"] == []
+    body = rg.extract_body_text(tmp_path / "report.docx")
+    assert "jieba.posseg 取 nr/nt/ns" in body
+    # 实验要求 was never supplied, so its empty heading must be pruned away.
+    assert "实验要求" in filled["pruned_sections"]
+    assert "实验要求" not in body
+
+
+def test_empty_section_heading_is_pruned(tmp_path):
+    skeleton = tmp_path / "skeleton.docx"
+    rg.generate_report("实验三", "", "", [], [], skeleton, cover=COVER)
+    filled = rg.fill_template(
+        skeleton, {"实验目的": "目的正文"}, tmp_path / "r.docx", "", "")
+    body = rg.extract_body_text(tmp_path / "r.docx")
+    # Only 实验目的 got content; every other skeleton heading is gone.
+    for name in ("实验内容", "实验步骤", "实验实现", "实验结果",
+                 "实验总结", "实验要求"):
+        assert name not in body
+    assert "实验目的" in body
+
+
+def test_long_body_is_split_at_sentence_boundaries():
+    text = "。".join(["这是一句用来测试长段落拆分行为的描述"] * 12) + "。"
+    chunks = rg._split_long_text(text, limit=180)
+    assert len(chunks) > 1
+    assert all(len(c) <= 180 for c in chunks)
+    # Nothing is lost in the split.
+    assert sum(len(c) for c in chunks) >= len(text) - 2
+
+
+def test_tiny_body_is_kept_whole():
+    assert rg._split_long_text("短句。", limit=180) == ["短句。"]
+
+
+# --------------------------------------------------------------------------- #
+# compliance: unreadable handbook must not read as "all requirements covered"
+# --------------------------------------------------------------------------- #
+def _minimal_report(tmp_path, cover=True):
+    from docx import Document
+
+    doc = Document()
+    if cover:
+        for line in rg._cover_lines(COVER, "实验三 知识提取"):
+            doc.add_paragraph(line)
+    doc.add_heading("实验三 知识提取", level=1)
+    body = (
+        "本次用 jieba.posseg 对 12 句语料做实体识别，脚本路径为 "
+        "scripts/ner.py，运行命令 python scripts/ner.py，随机种子 seed=2026，"
+        "参数 window=1。共识别 41 个实体、抽取 27 条三元组，实体准确率 0.89，"
+        "关系抽取准确率 0.82，仍在同一批语料上做人工核对。"
+    )
+    for name in ("实验目的", "实验内容", "实验步骤", "实验实现",
+                 "实验结果", "实验总结"):
+        doc.add_heading(name, level=2)
+        doc.add_paragraph(body)
+    path = tmp_path / "实验三-知识提取实践.docx"
+    doc.save(str(path))
+    return path
+
+
+def test_unreadable_handbook_warns_instead_of_silently_passing(tmp_path):
+    from uplus_mcp.compliance import check_report
+
+    path = _minimal_report(tmp_path)
+    report = check_report(path, manual_text="", requirements="")
+    ids = [i.id for i in report.issues]
+    assert "5" in ids
+    issue = next(i for i in report.issues if i.id == "5")
+    assert issue.level == "warn"
+    assert "未核对" in issue.title
+
+
+def test_experiment_content_section_is_not_a_false_alarm(tmp_path):
+    from uplus_mcp.compliance import check_report
+
+    path = _minimal_report(tmp_path)
+    report = check_report(path, manual_text="", requirements="")
+    titles = [i.title for i in report.issues]
+    assert "多出「实验内容」章节" not in titles
+    assert "出现模板外章节" not in titles
+

@@ -331,9 +331,14 @@ def fill_template(
                 slot = nxt
                 break
         if slot is not None:
-            _set_paragraph_text(slot, body_map[canonical])
+            chunks = _split_long_text(body_map[canonical])
+            _set_paragraph_text(slot, chunks[0])
+            anchor = slot
         else:
-            _insert_paragraph_after(paragraph, body_map[canonical])
+            chunks = _split_long_text(body_map[canonical])
+            anchor = _insert_paragraph_after(paragraph, chunks[0])
+        for chunk in chunks[1:]:
+            anchor = _insert_paragraph_after(anchor, chunk)
         filled.append(canonical)
         filled_set.add(canonical)
 
@@ -395,6 +400,8 @@ def fill_template(
 
     still_empty = [name for name in body_map if name not in filled_set]
 
+    pruned = _prune_empty_sections(doc)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     return {
@@ -402,7 +409,47 @@ def fill_template(
         "still_empty": still_empty,
         "still_placeholders": still_placeholders,
         "student_stamped": stamped,
+        "pruned_sections": pruned,
     }
+
+
+def _prune_empty_sections(doc) -> list[str]:
+    """Drop headings whose section body stayed empty.
+
+    A skeleton ships every section as an empty slot. If the caller never
+    supplies one of them, leaving the heading behind produces a report with
+    "实验实现" followed by nothing — the reader sees an unfinished section and
+    the layout check has nothing to judge. Removing the empty heading (and its
+    blank paragraphs) keeps the document honest.
+    """
+    paragraphs = list(doc.paragraphs)
+    pruned: list[str] = []
+    drop: list = []
+    for index, paragraph in enumerate(paragraphs):
+        style_name = paragraph.style.name if paragraph.style else ""
+        if not style_name.startswith("Heading"):
+            continue
+        if not canonical_section(paragraph.text or ""):
+            continue
+        body: list[str] = []
+        blanks: list = []
+        for follower in paragraphs[index + 1:]:
+            follower_style = follower.style.name if follower.style else ""
+            if follower_style.startswith("Heading"):
+                break
+            if (follower.text or "").strip():
+                body.append(follower.text.strip())
+                break
+            blanks.append(follower)
+        if not body:
+            pruned.append(paragraph.text.strip())
+            drop.extend([paragraph, *blanks])
+    for paragraph in drop:
+        element = paragraph._element
+        parent = element.getparent()
+        if parent is not None:
+            parent.remove(element)
+    return pruned
 
 
 def _clear_cell(cell) -> None:
@@ -437,6 +484,67 @@ def _apply_east_asian_font(doc: Document, font_name: str = CN_FONT) -> None:
         rfonts.set(qn("w:eastAsia"), font_name)
 
 
+#: Sections a generated skeleton carries, in the teacher template's order.
+SKELETON_SECTIONS = (
+    "实验目的", "实验内容", "实验步骤", "实验实现",
+    "实验结果", "实验总结", "实验要求",
+)
+
+
+def _cover_lines(cover: dict, title: str) -> list[str]:
+    """Render the teacher-template cover as one paragraph per field.
+
+    Every label is always written, even when its value is empty: a missing
+    label is a hard compliance failure, while a blank value is only a warning
+    the student can fix by editing the file.
+    """
+    school = (cover.get("school") or "").strip()
+    out: list[str] = []
+    if school:
+        out.append(school)
+    out.append("实验报告")
+    out.append(f"实验名称：{cover.get('title') or title}")
+    out.append(f"专业：{cover.get('major', '')}")
+    out.append(f"班级：{cover.get('class_name', '')}")
+    out.append(f"学号：{cover.get('student_id', '')}")
+    out.append(f"姓名：{cover.get('student_name', '')}")
+    out.append(f"辅导教师：{cover.get('teacher', '')}")
+    out.append(f"实验时间：{cover.get('date', '')}")
+    out.append(f"学时数：{cover.get('hours', '')}")
+    return out
+
+
+def _split_long_text(text: str, limit: int = 180) -> list[str]:
+    """Split a long body into paragraph-sized chunks at sentence boundaries.
+
+    A 200-character wall of text overflows the page margin and trips the
+    layout check, so section bodies are written as several paragraphs.
+    """
+    text = (text or "").strip()
+    if not text:
+        return [""]
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    for sentence in re.split(r"(?<=[。；;！？!?])", text):
+        if not sentence:
+            continue
+        if len(buf) + len(sentence) <= limit:
+            buf += sentence
+            continue
+        if buf.strip():
+            chunks.append(buf.strip())
+        piece = sentence
+        while len(piece) > limit:
+            chunks.append(piece[:limit])
+            piece = piece[limit:]
+        buf = piece
+    if buf.strip():
+        chunks.append(buf.strip())
+    return chunks or [text[:limit]]
+
+
 def generate_report(
     title: str,
     purpose: str,
@@ -446,6 +554,7 @@ def generate_report(
     output_path: Path,
     student_name: str = "",
     student_id: str = "",
+    cover: dict | None = None,
 ) -> Path:
     """Generate a standard experiment report .docx from scratch.
 
@@ -474,6 +583,14 @@ def generate_report(
     style.font.size = Pt(12)
     _apply_east_asian_font(doc)
 
+    # The teacher's cover. Without it a generated report can never pass the
+    # compliance gate (专业/班级/学号/姓名/辅导教师/实验时间/学时数 are all
+    # required), which is exactly how "no template found" used to mean
+    # "nothing can ever be submitted".
+    if cover:
+        for line in _cover_lines(cover, title):
+            doc.add_paragraph(line)
+
     # title
     heading = doc.add_heading(title, level=1)
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -487,47 +604,20 @@ def generate_report(
         if student_id:
             info.add_run(f"学号：{student_id}")
 
-    # purpose
-    doc.add_heading("实验目的", level=2)
-    doc.add_paragraph(purpose)
-
-    # content
-    doc.add_heading("实验内容", level=2)
-    doc.add_paragraph(content)
-
-    # steps
-    doc.add_heading("实验步骤", level=2)
-    for i, step in enumerate(steps, 1):
-        doc.add_paragraph(f"{i}. {step}")
-
-    # implementation
-    doc.add_heading("实验实现", level=2)
-    doc.add_paragraph("（此处填写算法伪代码与实现代码）")
-    doc.add_paragraph("")
-    doc.add_paragraph("算法伪代码：")
-    doc.add_paragraph("")
-    doc.add_paragraph("")
-    doc.add_paragraph("实现代码：")
-    doc.add_paragraph("")
-    doc.add_paragraph("")
-
-    # analysis
-    doc.add_heading("实验结果", level=2)
-    doc.add_paragraph("（此处填写时间复杂度分析、测试用例结果）")
-    doc.add_paragraph("")
-    doc.add_paragraph("时间复杂度分析：")
-    doc.add_paragraph("")
-    doc.add_paragraph("测试用例结果：")
-    doc.add_paragraph("")
-
-    # summary
-    doc.add_heading("实验总结", level=2)
-    doc.add_paragraph("（此处填写实验中的关键问题和难点总结）")
-
-    # requirements (reference)
-    doc.add_heading("实验报告要求", level=2)
-    for req in requirements:
-        doc.add_paragraph(f"• {req}")
+    # One empty slot per section, in the teacher's order. The filler looks for
+    # exactly this shape, so a skeleton generated here can be reopened and
+    # filled later. Seeds are written in place when the caller supplies them.
+    seeds = {
+        "实验目的": purpose,
+        "实验内容": content,
+        "实验步骤": "\n".join(steps) if steps else "",
+        "实验要求": "\n".join(requirements) if requirements else "",
+    }
+    for name in SKELETON_SECTIONS:
+        doc.add_heading(name, level=2)
+        body = (seeds.get(name) or "").strip()
+        for chunk in (_split_long_text(body) if body else [""]):
+            doc.add_paragraph(chunk)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

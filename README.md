@@ -13,6 +13,48 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.3
+
+A full live run (login → list → generate → verify → upload → submit) exposed
+two things: reports carried the handbook's own wording instead of what the
+student actually did, and a submission that the page called successful was not
+kept by the server. Suite is 334 passed, 1 skipped.
+
+- **Report bodies hold real work, not handbook text.** `answer_experiment` used
+  to merge the sections derived from the manual straight into the report; the
+  handbook now comes back as an `auto_sections` hint and is never written into
+  the document. Missing sections are reported as missing — nothing is invented.
+- **A generated report carries the teacher cover.** With no template found, the
+  built-in skeleton had no cover, so the compliance gate blocked it and no
+  experiment could ever be submitted. `generate_report(..., cover=...)` writes
+  school / 实验报告 / 实验名称 / 专业 / 班级 / 学号 / 姓名 / 辅导教师 / 实验时间 /
+  学时数; a blank value keeps its label so the gate warns about a fillable field
+  instead of a missing one. New config keys `student_school`, `student_major`,
+  `student_class`, `student_teacher` stay in the gitignored personal config.
+- **No empty headings or scaffold labels.** The skeleton used to hardcode
+  「（此处填写算法伪代码与实现代码）」「算法伪代码：」「实现代码：」
+  「时间复杂度分析：」「测试用例结果：」and an empty 「实验报告要求」 chapter.
+  Each section is now one empty slot, and `_prune_empty_sections` removes any
+  heading whose body stayed empty after filling.
+- **Long bodies split at sentence boundaries**, so nothing trips the 180-character
+  layout check.
+- **Two compliance fixes.** Item 4 no longer hardcodes 「多出实验内容」 (it fired
+  on templates that do carry that chapter); item 5 now reports
+  「手册要求未能解析，本项未核对」 instead of silently passing when no requirement
+  could be parsed.
+- **A submission counts only after a server-side re-check.** The page showed
+  已提交 + 撤回 right after the click, then came back as 未提交 on the next visit
+  with the file still sitting there. `submit_report` reloads and re-checks, re-clicks
+  once if it fell back, and returns `status_verified`; `engine` reports
+  `submitted: true` only when that check passed.
+- **Experiment status comes from the detail page.** The list badge reported
+  `submitted: false` for every experiment, including ones the platform itself
+  showed as 已提交. `list_experiments(verify=True)` re-checks each row against
+  the detail page and reports `status`, `submitted_files` and `submitted_source`.
+- **Submitted files expose the download button.** The platform renders 「下载」 as
+  a `<button>`, so `submitted_links` was always empty; `submitted_download_buttons`
+  now records it.
+
 ## What's new in 0.8.2
 
 Four places where the 0.8.0 compliance work still got stuck on the real

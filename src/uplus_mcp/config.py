@@ -96,6 +96,13 @@ class Config:
     # or the shipped example — and a tool call may override them for one run.
     student_name: str = ""
     student_id: str = ""
+    # Cover fields of the teacher's report template (学校/专业/班级/辅导教师).
+    # Optional: when empty the cover still carries the label so the report is
+    # structurally complete, and the compliance check warns about the blank.
+    student_school: str = ""
+    student_major: str = ""
+    student_class: str = ""
+    student_teacher: str = ""
 
     def __post_init__(self) -> None:
         # Keep the safe default available for directly-constructed configs
@@ -200,6 +207,10 @@ def load_config(path: Optional[str] = None) -> Config:
         # gitignored personal config only; the shipped example leaves it empty.
         student_name=str(data.get("student_name", "") or "").strip(),
         student_id=str(data.get("student_id", "") or "").strip(),
+        student_school=str(data.get("student_school", "") or "").strip(),
+        student_major=str(data.get("student_major", "") or "").strip(),
+        student_class=str(data.get("student_class", "") or "").strip(),
+        student_teacher=str(data.get("student_teacher", "") or "").strip(),
     )
 
     # Environment overrides for per-machine settings.

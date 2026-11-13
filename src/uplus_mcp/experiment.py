@@ -87,6 +87,10 @@ class ExperimentDetail:
     #: 实验提交物 tab). The audit uses these to pull the submitted report back
     #: and inspect it; an empty list means the audit can only read page text.
     submitted_links: list[Attachment] = field(default_factory=list)
+    #: 「下载」 buttons seen on the 实验提交物 tab. The platform renders the
+    #: download control as a <button>, so ``submitted_links`` stays empty even
+    #: though a file was submitted; these labels are the evidence of that.
+    submitted_download_buttons: list[str] = field(default_factory=list)
     #: Download links found on the 实验手册 tab. The manual is sometimes a
     #: downloadable .docx/.pdf rather than inline text, and that file may carry
     #: the report template or the requirements we need.
@@ -201,6 +205,21 @@ class ExperimentOperator:
                 Attachment(name=str(a.get("name", "")), href=str(a.get("href", "")))
                 for a in links if a.get("href")
             ]
+            # The live page renders 「下载」 as a <button>, not an <a>, so the
+            # href scan finds nothing. Record the buttons so the audit can say
+            # "download only available by clicking" instead of claiming there
+            # is no submitted file to compare against.
+            buttons = page.evaluate(r"""
+                () => {
+                    const out = [];
+                    document.querySelectorAll('button').forEach(b => {
+                        const t = (b.innerText || '').trim();
+                        if (/下载/.test(t)) out.push(t);
+                    });
+                    return out;
+                }
+            """) or []
+            detail.submitted_download_buttons = [str(b) for b in buttons]
         except Exception:
             pass
 
@@ -358,11 +377,48 @@ class ExperimentOperator:
             raise UplusError(
                 "已点击「提交」但页面未出现「已提交」状态，提交未生效，请人工复核"
             )
+        # The badge flips optimistically: the live test saw 已提交 + 撤回 right
+        # after the click, then the page came back as 未提交 on the next visit,
+        # with the file still sitting there unconverted-on-the-server. Reload
+        # and re-check, and re-click once if the server did not keep it.
+        stable, attempts = self._confirm_stable_submission(page)
         return {
             "uploaded": True,
             "file": safe_path.name,
             "page_url": page.url,
+            "status_verified": stable,
+            "submit_clicks": attempts,
+            **({} if stable else {
+                "warning": "刷新后状态回退为未提交，服务端可能未落库，请在页面上再点一次「提交」确认",
+            }),
         }
+
+    def _confirm_stable_submission(self, page: Page,
+                                   timeout: float = 12.0,
+                                   retries: int = 1) -> tuple[bool, int]:
+        """Reload and re-check the submission; re-click once if it fell back.
+
+        Returns ``(still_submitted, clicks_used)``. A submission that only
+        exists in the front-end's optimistic badge is not a submission — the
+        next page load showed 未提交 and no 撤回 button.
+        """
+        clicks = 1
+        for attempt in range(retries + 1):
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=45_000)
+            except TypeError:
+                page.reload()
+            except Exception:
+                return False, clicks
+            if self._wait_submitted(page, timeout=timeout):
+                return True, clicks
+            if attempt < retries:
+                if not self._click_submit(page):
+                    return False, clicks
+                clicks += 1
+                if not self._wait_submitted(page, timeout=timeout):
+                    return False, clicks
+        return False, clicks
 
     # ------------------------------------------------------------------ #
     # submission primitives
