@@ -159,7 +159,11 @@ async def uplus_list_experiments(course_id: str) -> list[dict]:
 
 @mcp.tool()
 async def uplus_read_experiment_detail(course_id: str, exp_id: str, stu_exp_id: str) -> dict:
-    """Read experiment detail: requirements, material, deadline, submitted files."""
+    """Read experiment detail: requirements, material, deadline, submitted files.
+
+    Read-only: this tool opens the experiment page and reports what it says.
+    It never fills, uploads or submits anything.
+    """
     from .experiment import ExperimentOperator
     def work() -> dict:
         _ensure_engine()
@@ -179,81 +183,6 @@ async def uplus_read_experiment_detail(course_id: str, exp_id: str, stu_exp_id: 
 
 
 @mcp.tool()
-async def uplus_generate_experiment_report(
-    title: str,
-    purpose: str,
-    content: str,
-    output_path: str,
-    student_name: str = "",
-    student_id: str = "",
-) -> dict:
-    """Generate a standard experiment report .docx file.
-
-    ``output_path`` must stay inside the configured allowed directories
-    (the report folder and the system temp dir by default; extend via
-    ``allowed_io_paths`` in config or ``UPLUS_ALLOWED_PATHS``).
-    """
-    from . import utils
-    from .report_generator import generate_algorithm_report
-
-    def work() -> dict:
-        cfg = _config()
-        safe_path = utils.resolve_io_path(output_path, cfg.io_roots)
-        path = generate_algorithm_report(
-            title=title,
-            purpose=purpose,
-            content=content,
-            output_path=safe_path,
-            student_name=student_name,
-            student_id=student_id,
-        )
-        return {"generated": True, "path": str(path), "size": path.stat().st_size}
-
-    # Building the .docx is blocking work: keep it off the asyncio loop.
-    return await _thread.run_async(work)
-
-
-@mcp.tool()
-async def uplus_submit_experiment_report(
-    course_id: str,
-    exp_id: str,
-    stu_exp_id: str,
-    file_path: str,
-) -> dict:
-    """Upload and submit an experiment report file.
-
-    ``file_path`` must stay inside the configured allowed directories (see
-    ``uplus_generate_experiment_report``). A ``.docx`` report first passes the
-    same inspection the experiment pipeline uses — non-empty body, no leftover
-    placeholders, topic matching the experiment — and is refused when it fails,
-    so a blank or wrong report is never uploaded. After submitting, the page
-    is re-read and success is only reported when the submission registered.
-    """
-    from . import utils
-    from .experiment import ExperimentOperator
-
-    def work() -> dict:
-        _ensure_engine()
-        safe_path = utils.resolve_io_path(
-            file_path, _config().io_roots, must_exist=True)
-        op = ExperimentOperator(_state["engine"].config, _state["engine"].session)
-        if safe_path.suffix.lower() == ".docx":
-            detail = op.read_detail(course_id, exp_id, stu_exp_id)
-            verification = op.verify_report(safe_path, detail)
-            if not verification["ok"]:
-                return {
-                    "uploaded": False,
-                    "verification": verification,
-                    "note": "报告校验未通过，已拒绝提交：" + verification["reason"],
-                }
-            result = op.submit_report(course_id, exp_id, stu_exp_id, safe_path)
-            result["verification"] = verification
-            return result
-        return op.submit_report(course_id, exp_id, stu_exp_id, safe_path)
-    return await _thread.run_async(work)
-
-
-@mcp.tool()
 async def uplus_download_experiment_materials(
     course_id: str, exp_id: str, stu_exp_id: str
 ) -> dict:
@@ -264,106 +193,13 @@ async def uplus_download_experiment_materials(
     (recursing into folders). The best template across all sources is
     identified and reported in ``template`` / ``template_source``.
 
-    Read-only against the platform. Use it after ``uplus_list_experiments``
-    (which returns ``exp_id`` / ``stu_exp_id``) when you want the requirement
-    files and the template on disk before authoring the report. Files go to
-    ``reports/experiment_materials/``.
+    Read-only against the platform — nothing is filled, uploaded or submitted.
+    Use it after ``uplus_list_experiments`` (which returns ``exp_id`` /
+    ``stu_exp_id``) when you want the requirement files and the template on
+    disk. Files go to ``reports/experiment_materials/``.
     """
     return await _thread.run_async(
         _dispatch("download_experiment_materials", course_id, exp_id, stu_exp_id)
-    )
-
-
-@mcp.tool()
-async def uplus_inspect_experiment(
-    course_id: str, exp_id: str, stu_exp_id: str, find_template: bool = True
-) -> dict:
-    """Read an experiment and return the authoring brief.
-
-    Opens the experiment detail page, reads 实验提交物 / 实验手册 / 实验附件,
-    and (when ``find_template``) searches **all three sources** for a
-    downloadable report template — 实验附件 first, then downloadable files on
-    the 实验手册 tab, then the course 资料 section (including its folders).
-    The first source that yields a downloadable template file wins.
-
-    The result separates:
-
-    * ``auto_sections`` — 目的 / 内容 / 步骤 / 要求 copied verbatim from the
-      handbook; the server fills these and never rewrites them.
-    * ``needed_sections`` — 实验实现 / 实验结果 / 实验总结 (plus any template
-      section with no handbook text). Write these yourself from the
-      requirements and attachments, then return
-      ``{"sections": {"实验实现": "...", ...}}`` and call
-      ``uplus_answer_experiment``.
-
-    ``template_source`` reports which source the template came from
-    (``实验附件`` / ``实验手册`` / ``资料``) or empty when no template was found.
-    Nothing is filled, uploaded or submitted by this tool.
-    """
-    return await _thread.run_async(
-        _dispatch("inspect_experiment", course_id, exp_id, stu_exp_id,
-                  find_template=find_template)
-    )
-
-
-@mcp.tool()
-async def uplus_answer_experiment(
-    course_id: str,
-    exp_id: str,
-    stu_exp_id: str,
-    sections: dict[str, str] | str,
-    submit: bool = True,
-    student_name: str = "",
-    student_id: str = "",
-    template_path: str = "",
-    force: bool = False,
-) -> dict:
-    """Fill the experiment report, verify it, and submit it.
-
-    ``sections`` maps a section name (实验实现 / 实验结果 / 实验总结 …) to its
-    text — the output of ``uplus_inspect_experiment``'s ``needed_sections``.
-    Server-derived sections from the handbook are merged in automatically; a
-    supplied value overrides them.
-
-    The report is built from the downloaded 资料 template when one exists,
-    otherwise from the built-in format. Before anything is uploaded the
-    report must pass the inspection gate: non-empty body, no leftover
-    placeholders, content that matches this experiment, and the compliance
-    checklist (teacher-template cover fields, 实验名称 field, screenshots when
-    the handbook demands them, handbook requirement coverage, AI-sounding
-    meta talk, repetition, layout). A failed check returns the reasons and
-    submits nothing; ``force=True`` downgrades the checklist to warnings.
-
-    With ``submit=True`` (default) a passing report is uploaded and submitted,
-    and the page is re-read until 「已提交」+「撤回」 appear — a mere upload is
-    never reported as a successful submission. An already-submitted
-    experiment is not re-submitted. ``submit=False`` stops after generating
-    and verifying. ``student_name`` / ``student_id`` override the identity in
-    the personal config.
-    """
-    return await _thread.run_async(
-        _dispatch("answer_experiment", course_id, exp_id, stu_exp_id, sections,
-                  submit=submit, student_name=student_name,
-                  student_id=student_id, template_path=template_path,
-                  force=force)
-    )
-
-
-@mcp.tool()
-async def uplus_audit_experiment(
-    course_id: str, exp_id: str, stu_exp_id: str, download: bool = True
-) -> dict:
-    """Read-only completeness audit for a submitted experiment.
-
-    Pulls the submitted report back when the page exposes a download link and
-    checks it for an empty body, leftover placeholders and a report written
-    for a different experiment. When the file cannot be downloaded, the audit
-    says so and only checks the page record — it never reports an unchecked
-    report as clean. It withdraws and submits nothing.
-    """
-    return await _thread.run_async(
-        _dispatch("audit_experiment", course_id, exp_id, stu_exp_id,
-                  download=download)
     )
 
 

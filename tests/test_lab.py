@@ -1,8 +1,8 @@
-"""Tests for the experiment (lab) pipeline: 资料 walk, download, template fill,
-submission gate and read-only audit.
+"""Tests for experiment retrieval: 资料 walk, download, template discovery
+and detail-page scraping.
 
 These are pure/offline tests: fake pages and fake sessions stand in for
-Playwright, and report documents are written to ``tmp_path``. They mirror the
+Playwright, and downloaded files are written to ``tmp_path``. They mirror the
 conventions used across the suite (hand-written fakes, ``Mock`` only for
 collaborators, ``Config(report_dir=str(tmp_path))``, Chinese
 ``pytest.raises(match=...)``).
@@ -18,11 +18,10 @@ from docx import Document
 from uplus_mcp import materials, report_generator as rg
 from uplus_mcp.browser import BrowserSession, UplusError
 from uplus_mcp.config import Config
-from uplus_mcp.engine import PatrolEngine, _parse_sections, _safe_stem
+from uplus_mcp.engine import PatrolEngine
 from uplus_mcp.experiment import (
     ExperimentDetail,
     ExperimentOperator,
-    _report_matches_experiment,
     _template_matcher,
     _template_priority,
     Attachment,
@@ -477,247 +476,6 @@ def test_fill_template_reports_unfilled_placeholder(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# report verification (the submit gate)
-# --------------------------------------------------------------------------- #
-def _operator(tmp_path):
-    return ExperimentOperator(Config(report_dir=str(tmp_path)), session=None)
-
-
-def test_verify_report_rejects_tiny_file(tmp_path):
-    tiny = tmp_path / "tiny.docx"
-    tiny.write_bytes(b"x" * 100)
-    result = _operator(tmp_path).verify_report(tiny, _detail())
-    assert result["ok"] is False
-    assert "过小" in result["reason"]
-
-
-def test_verify_report_rejects_blank_body(tmp_path):
-    path = _docx(tmp_path, ["实验实现", "实验总结"])
-    result = _operator(tmp_path).verify_report(path, _detail())
-    assert result["ok"] is False
-    assert "空报告" in result["reason"]
-
-
-def test_verify_report_rejects_leftover_placeholders(tmp_path):
-    path = _docx(tmp_path, [
-        "本报告围绕进程同步展开，采用信号量完成生产者消费者模型。",
-        "（此处填写时间复杂度分析、测试用例结果）",
-    ])
-    result = _operator(tmp_path).verify_report(path, _detail())
-    assert result["ok"] is False
-    assert "占位" in result["reason"]
-
-
-def test_verify_report_rejects_report_for_another_experiment(tmp_path):
-    path = _docx(tmp_path, [
-        "本报告讨论快速排序与二分查找的时间复杂度分析，并给出测试结果。",
-        "实验实现：排序代码",
-    ])
-    result = _operator(tmp_path).verify_report(path, _detail())
-    assert result["ok"] is False
-    assert "不匹配" in result["reason"]
-
-
-def test_verify_report_rejects_missing_required_section(tmp_path):
-    path = _docx(tmp_path, [
-        "本实验实现进程同步，采用信号量完成生产者消费者模型并测试通过。",
-        "实验实现：用信号量实现，代码见附录。",
-        "实验总结：理解了同步与互斥。",
-    ])
-    result = _operator(tmp_path).verify_report(
-        path, _detail(),
-        expected_sections=["实验实现", "实验结果", "实验总结"])
-    assert result["ok"] is False
-    assert "实验结果" in result["reason"]
-
-
-def test_verify_report_accepts_complete_matching_report(tmp_path):
-    path = _docx(tmp_path, [
-        "本实验围绕进程同步展开，采用信号量完成生产者消费者模型。",
-        "实验实现：用信号量实现，代码见附录，核心逻辑完整。",
-        "实验结果：测试通过，时间复杂度为 O(n)。",
-        "实验总结：理解了同步与互斥的关键问题。",
-    ])
-    # Content-level gate: the report is complete, matching and placeholder-free.
-    result = _operator(tmp_path).verify_report(
-        path, _detail(),
-        expected_sections=["实验实现", "实验结果", "实验总结"],
-        strict_compliance=False)
-    assert result["ok"] is True, result["reason"]
-    assert result["checks"]["topic_match"] is True
-
-
-def test_verify_report_blocks_report_without_teacher_template(tmp_path):
-    """A content-complete report still fails the strict gate when it is not
-    built on the teacher template (no cover fields, no 实验名称 row)."""
-    path = _docx(tmp_path, [
-        "本实验围绕进程同步展开，采用信号量完成生产者消费者模型。",
-        "实验实现：用信号量实现，代码见附录，核心逻辑完整。",
-        "实验结果：测试通过，时间复杂度为 O(n)。",
-        "实验总结：理解了同步与互斥的关键问题。",
-    ])
-    result = _operator(tmp_path).verify_report(
-        path, _detail(),
-        expected_sections=["实验实现", "实验结果", "实验总结"])
-    assert result["ok"] is False
-    assert "合规核查" in result["reason"]
-    compliance_checks = result["checks"]["compliance"]
-    assert compliance_checks["ok"] is False
-    ids = {item["id"] for item in compliance_checks["blocking"]}
-    assert "1" in ids or "3" in ids
-
-
-def test_report_topic_match_is_none_when_name_cannot_judge():
-    assert _report_matches_experiment(
-        "任意内容", _detail(name="")) is None
-
-
-# --------------------------------------------------------------------------- #
-# engine: inspect / answer / audit
-# --------------------------------------------------------------------------- #
-class _FakeExpOp:
-    def __init__(self, detail, verification=None):
-        self.detail = detail
-        self.verification = verification or {"ok": True, "reason": "",
-                                             "checks": {}}
-        self.submitted: list = []
-
-    _experiment_label = staticmethod(ExperimentOperator._experiment_label)
-
-    def read_detail(self, *args):
-        return self.detail
-
-    def collect_requirements(self, detail):
-        return detail.material + "\n" + detail.manual_text
-
-    def find_report_template(self, detail, max_depth=6):
-        return None
-
-    def verify_report(self, path, detail, expected_sections=None,
-                      strict_compliance=True):
-        return self.verification
-
-    def submit_report(self, course_id, exp_id, stu_exp_id, path):
-        self.submitted.append((course_id, exp_id, stu_exp_id, str(path)))
-        return {"uploaded": True, "confirmed": True, "file": str(path)}
-
-
-def _engine(tmp_path, op):
-    cfg = Config(report_dir=str(tmp_path),
-                 courses=[Course(id="c1", name="课程")])
-    engine = PatrolEngine(cfg, session=None, client=None, operator=None)
-    engine._experiment_operator = lambda: op  # type: ignore[assignment]
-    return engine
-
-
-def test_parse_sections_accepts_maps_and_fenced_json():
-    assert _parse_sections({"sections": {"实验实现": "x"}}) == {"实验实现": "x"}
-    assert _parse_sections('```json\n{"实验实现": "y"}\n```') == {"实验实现": "y"}
-    assert _parse_sections("not json") == {}
-    assert _parse_sections(None) == {}
-
-
-def test_answer_experiment_refuses_when_required_sections_missing(tmp_path):
-    op = _FakeExpOp(_detail())
-    engine = _engine(tmp_path, op)
-    result = engine.answer_experiment(
-        "c1", "e1", "s1", {"实验实现": "代码"})
-    assert result["submitted"] is False
-    assert "实验结果" in result["missing_sections"]
-    assert result["generated"] is False
-    assert op.submitted == []
-
-
-def test_answer_experiment_generates_verifies_and_submits(tmp_path):
-    op = _FakeExpOp(_detail())
-    engine = _engine(tmp_path, op)
-    sections = {
-        "实验实现": "用信号量实现生产者消费者",
-        "实验结果": "测试通过，复杂度 O(n)",
-        "实验总结": "理解了互斥",
-    }
-    result = engine.answer_experiment("c1", "e1", "s1", sections)
-    assert result["generated"] is True
-    assert result["submitted"] is True
-    assert result["submission"]["confirmed"] is True
-    assert len(op.submitted) == 1
-    report = result["path"] if "path" in result else result["report_path"]
-    assert report.endswith(".docx")
-
-
-def test_answer_experiment_does_not_submit_when_verification_fails(tmp_path):
-    op = _FakeExpOp(_detail(),
-                    verification={"ok": False, "reason": "报告仍残留占位内容",
-                                  "checks": {}})
-    engine = _engine(tmp_path, op)
-    sections = {
-        "实验实现": "代码",
-        "实验结果": "结果",
-        "实验总结": "总结",
-    }
-    result = engine.answer_experiment("c1", "e1", "s1", sections)
-    assert result["generated"] is True
-    assert result["can_submit"] is False
-    assert result["submitted"] is False
-    assert "占位" in result["note"]
-    assert op.submitted == []
-
-
-def test_answer_experiment_submit_false_only_generates(tmp_path):
-    op = _FakeExpOp(_detail())
-    engine = _engine(tmp_path, op)
-    sections = {
-        "实验实现": "代码", "实验结果": "结果", "实验总结": "总结",
-    }
-    result = engine.answer_experiment(
-        "c1", "e1", "s1", sections, submit=False)
-    assert result["generated"] is True
-    assert result["submitted"] is False
-    assert op.submitted == []
-
-
-def test_audit_experiment_unsubmitted_reports_nothing_to_audit(tmp_path):
-    op = _FakeExpOp(_detail(status="未提交"))
-    engine = _engine(tmp_path, op)
-    result = engine.audit_experiment("c1", "e1", "s1")
-    assert result["auditable"] is False
-    assert "尚未提交" in result["note"]
-
-
-def test_audit_experiment_without_download_link_says_so(tmp_path):
-    detail = _detail(status="已提交", submitted_files=["实验报告.docx"])
-    op = _FakeExpOp(detail)
-    engine = _engine(tmp_path, op)
-    result = engine.audit_experiment("c1", "e1", "s1")
-    assert result["auditable"] is False
-    assert "未取得已提交文件" in result["note"]
-    assert result["issues"] == []
-
-
-def test_audit_experiment_downloads_and_flags_bad_report(tmp_path):
-    from uplus_mcp.experiment import Attachment
-
-    detail = _detail(status="已提交", submitted_files=["实验报告.docx"],
-                     submitted_links=[Attachment(
-                         name="实验报告.docx", href="http://x/report.docx")])
-    op = _FakeExpOp(detail,
-                    verification={"ok": False, "reason": "报告正文有效内容不足，疑似空报告",
-                                  "checks": {}})
-
-    class _Session:
-        def download_to(self, url, dest):
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"PK fake")
-            return dest
-
-    engine = _engine(tmp_path, op)
-    engine.session = _Session()
-    result = engine.audit_experiment("c1", "e1", "s1")
-    assert result["auditable"] is True
-    assert result["issues"] and "空报告" in result["issues"][0]
-
-
-# --------------------------------------------------------------------------- #
 # list scraping carries the ids the rest of the flow needs
 # --------------------------------------------------------------------------- #
 class _ExpListPage:
@@ -899,28 +657,43 @@ def test_read_detail_captures_manual_links(tmp_path):
 
 
 def test_download_experiment_materials_covers_all_sources(tmp_path):
+    """Read-only material download still walks 附件 and 手册 after the
+    fill/submit pipeline was removed."""
+    from pathlib import Path
+    from unittest import mock
+
+    from uplus_mcp import materials as materials_mod
     from uplus_mcp.experiment import Attachment as Att
 
     detail = _detail(
         attachments=[Att(name="附件一.pdf", href="http://x/a1.pdf")],
         manual_links=[Att(name="实验手册.docx", href="http://x/manual.docx")],
     )
-    op = _FakeExpOp(detail)
-    engine = _engine(tmp_path, op)
+
+    class _ReadOp:
+        _experiment_label = staticmethod(
+            ExperimentOperator._experiment_label)
+
+        def read_detail(self, *args):
+            return detail
+
+        def collect_requirements(self, d):
+            return ""
+
+        def find_report_template(self, d):
+            return None
 
     class _Session:
         def download_to(self, url, dest):
-            from pathlib import Path
             target = Path(dest)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"PK")
             return target
 
-    engine.session = _Session()
-    from unittest import mock
-    from uplus_mcp import materials as materials_mod
-    with mock.patch.object(materials_mod, "walk", return_value=[]), \
-            mock.patch.object(_FakeExpOp, "find_report_template", return_value=None):
+    cfg = Config(report_dir=str(tmp_path))
+    engine = PatrolEngine(cfg, session=_Session(), client=None, operator=None)
+    engine._experiment_operator = lambda: _ReadOp()
+    with mock.patch.object(materials_mod, "walk", return_value=[]):
         result = engine.download_experiment_materials("c1", "e1", "s1")
     sources = {item["source"] for item in result["downloaded"]}
     assert sources == {"实验附件", "实验手册"}

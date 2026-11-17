@@ -69,12 +69,10 @@ cp src/uplus_mcp/courses.example.json config/courses.json
 | `uplus_list_courses` | 列出账号下当前学期课程（已截止课程默认跳过） |
 | `uplus_list_homeworks` | 列出课程作业与状态；`refresh_page_state=true` 时打开页面复核按钮文案 |
 | `uplus_list_experiments` | 列出课程实验，返回 `exp_id` / `stu_exp_id` 与已提交 / 未提交 / 状态未知三态 |
-| `uplus_download_experiment_materials` | 下载实验附件，并在课程「资料」（含子文件夹）中找并下载「实验报告模板」 |
-| `uplus_inspect_experiment` | 读取实验提交物 / 实验手册 / 实验附件，返回审题包：`auto_sections`（手册原样引用）与 `needed_sections`（模型补写） |
-| `uplus_answer_experiment` | 填充下载的模板 → 三道校验（空报告 / 占位符 / 错交实验）→ 上传 → 提交 → 回读确认；缺章节或校验不过即拒绝提交 |
-| `uplus_audit_experiment` | 只读核查已提交实验：空报告、残留占位符、报告与实验不符；无法取回文件时明确说明 |
-| `uplus_generate_experiment_report` | 无模板时从零生成标准报告 .docx |
-| `uplus_submit_experiment_report` | 上传并提交报告；`.docx` 先过同一道校验闸门，提交后回读确认 |
+| `uplus_read_experiment_detail` | 只读实验详情：要求、提交物、截止时间与已提交文件 |
+| `uplus_download_experiment_materials` | 下载实验附件，并在课程「资料」（含子文件夹）中找并下载「实验报告模板」（只读） |
+
+> 实验部分**只做检索与查看**：服务端读取实验列表、详情并下载要求/模板；实验报告的填写、上传与提交由本人完成。
 | `uplus_inspect_homework` | 读取作业状态与题目审题包，供客户端模型作答 |
 | `uplus_answer_homework` | 按 `{question_id: answer}` 填写客观题；题目未答完或出错时自动暂缓提交，`force_submit=true` 可人工强制提交 |
 | `uplus_repair_homework` | 对已提交待批改的作业执行「撤回 → 补齐漏答/漏选 → 重新提交」；撤回前必须备齐所有已知缺口答案，已出分作业拒绝撤回 |
@@ -227,8 +225,8 @@ A: 老师尚未发布作业时列表即为空，属于正常状态；「AI 练�
 **Q: 为什么有些题被归到「需要人工接管」？**
 A: 简答、编程、小组 PPT 与附件题（`qsnType=7`）需要本人原创内容或本地文件，服务端不会编造答案或上传伪造文件；实验状态无法从页面识别时归入「状态未知」，由本人人工复核。
 
-**Q: 实验报告能自动生成吗？会不会把空报告交上去？**
-A: 可以走 `uplus_inspect_experiment` → `uplus_answer_experiment`。服务端只把实验手册里能直接引用的目的 / 原理 / 内容 / 步骤 / 要求原样填入；实验实现、结果分析与总结由模型依据手册和附件产出。提交前必须通过三道校验——正文不足（空报告）、残留占位符（`（此处填写…）` / `待填写` / `TODO`）、报告主题与实验不符（交错实验）——任一命中即拒绝上传；提交后还会回读页面确认生效。用户仍应核对生成内容属实。
+**Q: 实验报告能自动生成吗？**
+A: 不能。插件对实验只做检索与查看：列出实验、读取详情、下载手册/附件/模板到 `reports/experiment_materials/`，供你离线查阅。报告的填写、上传和提交必须由本人完成；服务端不会代写或代交实验报告。
 
 **Q: 浏览器窗口是否可以后台运行？**
 A: 本服务附加用户本机 Edge / Chrome 的可见会话，不另起独立无头内核；所有操作都在用户眼前的窗口里进行，便于人工接管登录、验证码与附件上传。

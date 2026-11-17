@@ -6,19 +6,16 @@ tools in ``server.py`` are thin wrappers around an ``PatrolEngine`` instance.
 
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime
-from pathlib import Path
 
 from . import report as report_mod
 from .browser import BrowserSession, AuthExpiredError, UplusError
 from .config import Config
-from .experiment import ExperimentDetail, ExperimentOperator
+from .experiment import ExperimentOperator
 from .models import HomeworkStatus, HomeworkTask, QuestionType
 from .operator import HomeworkOperator, classify_experiment_flag
 from .platform import PlatformClient
-from . import journal, report_generator, solver, utils
+from . import journal, solver, utils
 
 
 class PatrolEngine:
@@ -213,394 +210,10 @@ class PatrolEngine:
         return rows
 
     # ------------------------------------------------------------------ #
-    # experiments: inspect / answer / audit
+    # experiments: read-only retrieval
     # ------------------------------------------------------------------ #
     def _experiment_operator(self) -> ExperimentOperator:
         return ExperimentOperator(self.config, self.session)
-
-    def _student_identity(self, student_name: str = "",
-                          student_id: str = "") -> tuple[str, str]:
-        """Per-call identity overrides the configured one.
-
-        The configured values live in the gitignored personal config only;
-        they are never written to the patrol report or the repo.
-        """
-        name = (student_name or self.config.student_name or "").strip()
-        number = (student_id or self.config.student_id or "").strip()
-        return name, number
-
-    @staticmethod
-    def _experiment_brief(detail: ExperimentDetail,
-                          requirements: str) -> dict:
-        """Work out which sections the server fills and which the model must.
-
-        The server copies what the handbook itself states (目的 / 内容 /
-        步骤 / 要求); the model supplies the work that cannot be copied —
-        the implementation and the analysis. Nothing is invented here.
-        """
-        derived = report_generator.derive_sections(detail.manual_text or "")
-        auto_sections = {
-            name: text for name, text in derived.items()
-            if name in report_generator.MANUAL_DERIVABLE_SECTIONS
-        }
-        needed: list[str] = []
-        for name in report_generator.MODEL_REQUIRED_SECTIONS:
-            if not (auto_sections.get(name) or "").strip():
-                needed.append(name)
-        return {
-            "auto_sections": auto_sections,
-            "needed_sections": needed,
-            "requirements": requirements,
-        }
-
-    def inspect_experiment(self, course_id: str, exp_id: str,
-                           stu_exp_id: str, find_template: bool = True) -> dict:
-        """Read an experiment and produce the authoring brief.
-
-        The brief is the experiment analogue of ``inspect_homework``: it
-        carries the requirements, the downloaded template (searched across
-        实验附件 → 实验手册 → 资料, preferring whichever yields a downloadable
-        file), and the exact sections the model must write. Nothing is filled,
-        uploaded or submitted.
-        """
-        op = self._experiment_operator()
-        detail = op.read_detail(course_id, exp_id, stu_exp_id)
-        requirements = op.collect_requirements(detail)
-        brief = self._experiment_brief(detail, requirements)
-        auto_sections = brief["auto_sections"]
-        needed = list(brief["needed_sections"])
-
-        template: dict | None = None
-        template_error = ""
-        template_description: dict | None = None
-        if find_template:
-            try:
-                template = op.find_report_template(detail)
-            except AuthExpiredError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - 资料 is best-effort
-                template_error = str(exc)
-            if template and template.get("path"):
-                try:
-                    template_description = report_generator.describe_template(
-                        Path(template["path"]))
-                except Exception as exc:  # noqa: BLE001
-                    template_error = f"模板解析失败：{exc}"
-        if template_description:
-            for name in template_description.get("recognised", []):
-                canonical = report_generator.canonical_section(name) or name
-                if canonical not in auto_sections and canonical not in needed:
-                    needed.append(canonical)
-
-        return {
-            "course_id": course_id,
-            "course_name": self.course_name(course_id),
-            "exp_id": exp_id,
-            "stu_exp_id": stu_exp_id,
-            "name": detail.name,
-            "status": detail.status,
-            "environment": detail.environment,
-            "material": detail.material,
-            "deadline": detail.deadline,
-            "deadline_label": utils.deadline_label(detail.deadline_ms),
-            "submitted_files": detail.submitted_files,
-            "attachments": [
-                {"name": a.name, "href": a.href, "kind": a.kind}
-                for a in detail.attachments
-            ],
-            "manual_links": [
-                {"name": a.name, "href": a.href}
-                for a in detail.manual_links
-            ],
-            "requirements": requirements[:6000],
-            "manual_text": (detail.manual_text or "")[:8000],
-            "template": template,
-            "template_source": (template or {}).get("source", ""),
-            "template_error": template_error,
-            "template_description": template_description,
-            "auto_sections": auto_sections,
-            "needed_sections": needed,
-            "instructions": (
-                "服务端已把实验手册里能直接引用的章节放进 auto_sections（实验目的 / "
-                "实验内容 / 实验步骤 / 实验要求），这些会原样填入、不再改写。"
-                "请只针对 needed_sections 逐节写出真实内容（实验实现：伪代码与代码；"
-                "实验结果：测试结果与复杂度分析；实验总结：关键问题与难点）。"
-                "内容必须依据实验要求与附件作答，不要编造与实验无关的内容。"
-                "完成后返回 JSON：{\"sections\": {\"实验实现\": \"...\", "
-                "\"实验结果\": \"...\", \"实验总结\": \"...\"}}，再调用 "
-                "uplus_answer_experiment 完成填充与提交。"
-            ),
-        }
-
-    def answer_experiment(self, course_id: str, exp_id: str, stu_exp_id: str,
-                          sections: dict[str, str] | str,
-                          submit: bool = True, student_name: str = "",
-                          student_id: str = "",
-                          template_path: str = "",
-                          force: bool = False) -> dict:
-        """Fill the experiment report template, verify it, and submit it.
-
-        The gate mirrors ``answer_homework``: a report is only uploaded when
-        every model-required section is present and the read-only
-        verification passes (non-empty body, no leftover placeholders, topic
-        matches the experiment, compliance checklist clean). A failure
-        returns the reasons and submits nothing, so an empty, off-template or
-        unverifiable report can never be handed in.
-
-        ``force=True`` keeps the generated file but downgrades the compliance
-        checklist to warnings — use it only when the user has decided to
-        submit a report that knowingly misses the teacher template.
-        """
-        op = self._experiment_operator()
-        detail = op.read_detail(course_id, exp_id, stu_exp_id)
-        supplied = _parse_sections(sections)
-        # The caller may name a section the way the teacher's template does
-        # ("实验结论及心得"). Normalising the key through the same alias table
-        # the template filler uses keeps such a section from being reported
-        # missing just because it is not spelled "实验总结".
-        supplied = {
-            (report_generator.canonical_section(name) or name): body
-            for name, body in supplied.items()
-        }
-        requirements = op.collect_requirements(detail)
-        brief = self._experiment_brief(detail, requirements)
-        auto_sections = brief["auto_sections"]
-        # The report has to describe what the student actually did. Copying the
-        # handbook's 目的/内容/步骤 verbatim produced reports that merely restated
-        # the manual, so the handbook text is now a hint handed back to the caller
-        # (``auto_sections``) instead of being written into the document.
-        merged: dict[str, str] = dict(supplied)
-
-        missing = [
-            name for name in report_generator.MODEL_REQUIRED_SECTIONS
-            if not (merged.get(name) or "").strip()
-        ]
-        result: dict = {
-            "course_id": course_id,
-            "course_name": self.course_name(course_id),
-            "exp_id": exp_id,
-            "stu_exp_id": stu_exp_id,
-            "name": detail.name,
-            "status": detail.status,
-            "auto_sections": sorted(auto_sections),
-            "sections": sorted(merged),
-            "missing_sections": missing,
-            "generated": False,
-            "report_path": "",
-            "verification": None,
-            "submitted": False,
-            "can_submit": False,
-            "submission": None,
-            "note": "",
-        }
-        if missing:
-            result["note"] = (
-                "以下章节缺少内容，未生成、未提交（服务端不编造内容）："
-                + "、".join(missing)
-                + "。手册里的对应段落只作参考（见 auto_sections），报告正文要写实际做了什么。"
-            )
-            return result
-
-        template: dict | None = None
-        if template_path:
-            safe_template = utils.resolve_io_path(
-                template_path, self.config.io_roots, must_exist=True)
-            template = {"name": safe_template.name, "path": str(safe_template)}
-        else:
-            try:
-                template = op.find_report_template(detail)
-            except AuthExpiredError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - fall back to generator
-                result["note"] = f"资料模板检索失败（{exc}），改用内置报告格式。"
-        result["template"] = template
-
-        name, number = self._student_identity(student_name, student_id)
-        out_dir = self.config.report_folder / "experiment_reports"
-        stem = _safe_stem(detail.name or f"experiment_{exp_id}")
-        output = out_dir / f"{stem}.docx"
-
-        try:
-            fill_info = self._build_report(
-                detail, merged, template, output, name, number)
-        except UplusError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            result["note"] = f"报告生成失败：{exc}"
-            return result
-        result["generated"] = True
-        result["report_path"] = str(output)
-        result["fill"] = fill_info
-
-        verification = op.verify_report(
-            output, detail,
-            expected_sections=list(report_generator.MODEL_REQUIRED_SECTIONS),
-            strict_compliance=not force)
-        result["verification"] = verification
-        result["compliance"] = (verification.get("checks") or {}).get("compliance")
-        if not verification["ok"]:
-            result["note"] = (
-                "报告校验未通过，已拒绝提交：" + verification["reason"]
-            )
-            return result
-        result["can_submit"] = True
-        if detail.status == "已提交":
-            result["can_submit"] = False
-            result["note"] = (
-                "该实验在平台上已是「已提交」状态，未重复提交；"
-                "如需覆盖，请先撤回再重交。"
-            )
-            return result
-        if not submit:
-            result["note"] = "报告已生成并通过校验，按要求未提交（submit=False）。"
-            return result
-
-        try:
-            submission = op.submit_report(course_id, exp_id, stu_exp_id, output)
-        except AuthExpiredError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - report, never fake success
-            result["note"] = f"提交失败：{exc}（报告已保留在本地，可人工复核）"
-            return result
-        result["submission"] = submission
-        # Only a state that survived a reload counts as submitted.
-        if submission.get("status_verified", True):
-            result["submitted"] = True
-            result["note"] = "报告已填充、校验通过并提交成功（刷新复核仍为已提交）。"
-        else:
-            result["submitted"] = False
-            result["note"] = (
-                "提交后刷新页面，状态回退为「未提交」，服务端没有落库；"
-                "文件仍在上传区，请在页面上再点一次「提交」，或稍后重试。"
-            )
-        return result
-
-    def _build_report(self, detail: ExperimentDetail, sections: dict[str, str],
-                      template: dict | None, output: Path,
-                      student_name: str, student_id: str) -> dict:
-        """Fill a downloaded template, or generate then fill a skeleton.
-
-        A template that cannot be opened (a legacy ``.doc`` renamed to
-        ``.docx``, a corrupt download, an unsupported layout) falls back to
-        the built-in format rather than failing the whole run; the reason is
-        reported in ``template_fallback`` so the caller knows why.
-        """
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fallback_reason = ""
-        if template and template.get("path"):
-            try:
-                return report_generator.fill_template(
-                    Path(template["path"]), sections, output,
-                    student_name=student_name, student_id=student_id)
-            except Exception as exc:  # noqa: BLE001 - fall back, do not abort
-                fallback_reason = f"模板无法使用（{exc}），已改用内置报告格式"
-        # No usable template: build a skeleton whose sections are empty slots,
-        # then run the same filler so both paths share verification behaviour.
-        # The skeleton carries the teacher's cover, because without the cover
-        # fields the compliance gate rejects every generated report.
-        skeleton = output.with_name(output.stem + "_skeleton.docx")
-        report_generator.generate_report(
-            title=detail.name or "实验报告",
-            purpose="",
-            content="",
-            steps=[],
-            requirements=[],
-            output_path=skeleton,
-            cover=self._report_cover(detail, student_name, student_id),
-        )
-        try:
-            info = report_generator.fill_template(
-                skeleton, sections, output,
-                student_name=student_name, student_id=student_id)
-        finally:
-            skeleton.unlink(missing_ok=True)
-        if fallback_reason:
-            info["template_fallback"] = fallback_reason
-        return info
-
-    def _report_cover(self, detail: ExperimentDetail, student_name: str,
-                      student_id: str) -> dict:
-        """Cover payload for a generated report (teacher template front page).
-
-        Values come from the gitignored personal config; a blank one is still
-        written as an empty label so the field exists and the compliance
-        checklist reports a fillable warning instead of a missing field.
-        """
-        today = datetime.now().strftime("%Y年%m月%d日")
-        return {
-            "school": self.config.student_school,
-            "major": self.config.student_major,
-            "class_name": self.config.student_class,
-            "student_name": student_name,
-            "student_id": student_id,
-            "teacher": self.config.student_teacher,
-            "date": today,
-            "hours": "",
-            "title": detail.name,
-        }
-
-    def audit_experiment(self, course_id: str, exp_id: str, stu_exp_id: str,
-                         download: bool = True) -> dict:
-        """Read-only completeness audit for one submitted experiment.
-
-        Pulls the submitted report back (when a download link exists) and
-        runs the same verification the submit gate uses: empty body, leftover
-        placeholders, and a report that talks about a different experiment.
-        When the file cannot be downloaded, it falls back to the page's own
-        record and says so — an unchecked report is never reported as clean.
-        """
-        op = self._experiment_operator()
-        detail = op.read_detail(course_id, exp_id, stu_exp_id)
-        result: dict = {
-            "course_id": course_id,
-            "course_name": self.course_name(course_id),
-            "exp_id": exp_id,
-            "stu_exp_id": stu_exp_id,
-            "name": detail.name,
-            "status": detail.status,
-            "deadline": detail.deadline,
-            "submitted_files": detail.submitted_files,
-            "auditable": False,
-            "verification": None,
-            "issues": [],
-            "note": "",
-        }
-        submitted = detail.status == "已提交" or bool(detail.submitted_files)
-        if not submitted:
-            result["note"] = (
-                "实验尚未提交，无需巡检；如需作答请先调用 uplus_inspect_experiment"
-            )
-            return result
-        if not detail.submitted_files:
-            result["issues"].append("页面未显示任何已提交文件，疑似空提交")
-        link = next((item for item in detail.submitted_links if item.href), None)
-        if not download or link is None:
-            result["note"] = (
-                "未取得已提交文件的下载链接，只核对了页面显示信息；"
-                "如平台支持下载，请人工打开实验提交物确认内容"
-            )
-            return result
-        try:
-            filename = link.name or "submitted"
-            if not re.search(r"\.[A-Za-z0-9]{1,5}$", filename):
-                filename += ".docx"
-            dest = (self.config.report_folder / "experiment_audit"
-                    / _safe_stem(filename))
-            path = self.session.download_to(link.href, dest)
-        except AuthExpiredError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - audit is best-effort
-            result["note"] = f"已提交文件下载失败：{exc}"
-            return result
-        result["auditable"] = True
-        result["downloaded"] = str(path)
-        verification = op.verify_report(path, detail)
-        result["verification"] = verification
-        if not verification["ok"]:
-            result["issues"].append(verification["reason"])
-        else:
-            result["note"] = "已回读已提交报告，未发现空报告、占位符或错交实验。"
-        return result
 
     def download_experiment_materials(self, course_id: str, exp_id: str,
                                       stu_exp_id: str) -> dict:
@@ -692,7 +305,7 @@ class PatrolEngine:
         # ---- pick the best template across all downloaded files ----
         # The template search already checked 实验附件 → 实验手册 → 资料 in
         # priority order via find_report_template; reuse its pick so the
-        # template field is consistent with what answer_experiment would use.
+        # reported template is the one the user should read locally.
         try:
             template = op.find_report_template(detail)
         except AuthExpiredError:
@@ -1128,8 +741,6 @@ class PatrolEngine:
         repair_briefs: list[dict] = []
         auto_submissions: list[dict] = []
         incomplete: list[dict] = []
-        experiment_briefs: list[dict] = []
-        experiment_audits: list[dict] = []
 
         for course in self._iter_courses():
             for task in self.client.list_homeworks(course.id):
@@ -1332,58 +943,15 @@ class PatrolEngine:
                 experiments = self.operator.read_experiments(course)
                 for exp in experiments:
                     snapshot.experiments.append(report_mod.ExperimentRow(course.name, exp))
-                    can_reach = bool(exp.exp_id and exp.stu_exp_id)
+                    # The experiment pipeline is retrieval-only: the patrol
+                    # reports what the platform says and hands the rest to the
+                    # human. It no longer builds an authoring brief or audits a
+                    # submitted report, because nothing here fills or submits.
                     if exp.submitted is False:
-                        detail_text = (
-                            f"实验未提交，提交物：{exp.material or '实验报告/成果物'}"
-                        )
-                        if can_reach and not utils.is_expired(exp.deadline_ms):
-                            # Produce the TODO brief the model answers before
-                            # calling uplus_answer_experiment. The patrol does
-                            # NOT download the template or submit anything: it
-                            # only lists what still needs writing.
-                            try:
-                                op = self._experiment_operator()
-                                exp_detail = op.read_detail(
-                                    course.id, exp.exp_id, exp.stu_exp_id)
-                                requirements = op.collect_requirements(exp_detail)
-                                brief = self._experiment_brief(
-                                    exp_detail, requirements)
-                                experiment_briefs.append({
-                                    "course_id": course.id,
-                                    "course_name": course.name,
-                                    "exp_id": exp.exp_id,
-                                    "stu_exp_id": exp.stu_exp_id,
-                                    "name": exp_detail.name or exp.name,
-                                    "material": exp_detail.material,
-                                    "deadline": utils.deadline_label(
-                                        exp.deadline_ms),
-                                    "attachments": [
-                                        {"name": a.name, "href": a.href}
-                                        for a in exp_detail.attachments
-                                    ],
-                                    "auto_sections": brief["auto_sections"],
-                                    "needed_sections": brief["needed_sections"],
-                                    "requirements": requirements[:4000],
-                                    "note": (
-                                        "为 needed_sections 写出真实内容后调用 "
-                                        "uplus_answer_experiment(course_id, exp_id, "
-                                        "stu_exp_id, sections) 填充、校验并提交；"
-                                        "auto_sections 由服务端原样填入。"
-                                    ),
-                                })
-                                if brief["needed_sections"]:
-                                    detail_text += (
-                                        "；待写章节：" +
-                                        "、".join(brief["needed_sections"])
-                                    )
-                            except AuthExpiredError:
-                                raise
-                            except Exception as exc:  # noqa: BLE001
-                                detail_text += f"；读取实验详情失败：{exc}"
+                        detail = f"实验未提交，提交物：{exp.material or '实验报告/成果物'}"
                         snapshot.takeover.append({
                             "course": course.name, "title": exp.name,
-                            "detail": detail_text,
+                            "detail": detail,
                             "deadline": utils.deadline_label(exp.deadline_ms),
                         })
                     elif exp.submitted is None:
@@ -1392,31 +960,6 @@ class PatrolEngine:
                             "detail": "实验状态未知，需本人进入实验栏目人工复核",
                             "deadline": utils.deadline_label(exp.deadline_ms),
                         })
-                    elif audit and can_reach:
-                        # Submitted: run the read-only completeness audit so a
-                        # blank or wrong report is surfaced instead of being
-                        # silently trusted.
-                        try:
-                            audit_result = self.audit_experiment(
-                                course.id, exp.exp_id, exp.stu_exp_id)
-                        except AuthExpiredError:
-                            raise
-                        except Exception as exc:  # noqa: BLE001
-                            snapshot.takeover.append({
-                                "course": course.name, "title": exp.name,
-                                "detail": f"实验提交完整性核查失败：{exc}",
-                                "deadline": utils.deadline_label(exp.deadline_ms),
-                            })
-                        else:
-                            experiment_audits.append(audit_result)
-                            if audit_result["issues"]:
-                                snapshot.takeover.append({
-                                    "course": course.name,
-                                    "title": audit_result["name"] or exp.name,
-                                    "detail": "已提交实验存在问题：" + "；".join(
-                                        audit_result["issues"]),
-                                    "deadline": utils.deadline_label(exp.deadline_ms),
-                                })
             except AuthExpiredError:
                 raise
             except Exception as exc:
@@ -1425,7 +968,6 @@ class PatrolEngine:
                     "detail": f"读取失败：{exc}",
                 })
 
-        snapshot.experiment_audits = experiment_audits
         markdown = report_mod.render_markdown(snapshot, warning_hours=self.config.deadline_warning_hours)
         report_path = report_mod.persist(markdown, self.config)
 
@@ -1448,55 +990,15 @@ class PatrolEngine:
             "repair_briefs": repair_briefs,
             "auto_submissions": auto_submissions,
             "incomplete_homeworks": incomplete,
-            "experiment_briefs": experiment_briefs,
-            "experiment_audits": experiment_audits,
             "takeover": snapshot.takeover,
             "report_path": str(report_path),
         }
 
 
 # --------------------------------------------------------------------------- #
-# experiment helpers (module-level, used by the engine methods above)
+# helpers
 # --------------------------------------------------------------------------- #
-def _parse_sections(raw: dict[str, str] | str | None) -> dict[str, str]:
-    """Normalize a model response into ``{section_name: text}``.
-
-    Accepts ``{"sections": {...}}``, a bare ``{...}`` map, or a JSON string
-    (optionally inside a Markdown fence), mirroring
-    ``solver.parse_model_answers`` for the experiment side.
-    """
-    if raw is None:
-        return {}
-    if isinstance(raw, dict):
-        data = raw
-    else:
-        text = str(raw).strip()
-        if not text:
-            return {}
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
-        if fenced:
-            text = fenced.group(1)
-        else:
-            start, end = text.find("{"), text.rfind("}")
-            if start != -1 and end > start:
-                text = text[start:end + 1]
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-    if not isinstance(data, dict):
-        return {}
-    sections = data.get("sections", data)
-    if not isinstance(sections, dict):
-        return {}
-    return {
-        str(key): str(value)
-        for key, value in sections.items()
-        if value is not None and str(value).strip()
-    }
-
-
 def _safe_stem(name: str, fallback: str = "experiment") -> str:
-    """A safe local file name for a report / downloaded material."""
+    """A safe local file name for a downloaded material."""
     cleaned = re.sub(r'[<>:"/\|?*\x00-\x1f]', "_", name or "").strip().strip(".")
     return cleaned[:120] or fallback

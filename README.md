@@ -13,6 +13,28 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.4
+
+Two fixes requested after field use:
+
+- **Page-mapping failures now skip, not veto.** On single-question pages the
+  stem→position map can fail for an individual question. It used to be recorded
+  as an error, and `can_submit` requires zero errors — so one unmappable
+  question stopped the entire homework from being submitted. Such questions are
+  now recorded in `skipped_questions` with `blocking=false`, reported in the
+  new `unlocated_skips` counter, and excluded from the submit gate. A question
+  is still never answered blind: if the page cannot be mapped or the stem does
+  not match after navigation, it is skipped rather than typed into the wrong
+  question. Genuine gaps (no model answer) remain blocking.
+- **Experiments are retrieval-only.** The report-writing pipeline is removed:
+  `uplus_answer_experiment`, `uplus_audit_experiment`,
+  `uplus_generate_experiment_report` and `uplus_submit_experiment_report` are
+  gone. Kept: `uplus_list_experiments`, `uplus_read_experiment_detail`,
+  `uplus_download_experiment_materials` (attachments, handbook links and
+  recursive 资料 template search). The patrol still lists experiments and
+  flags outstanding ones, but no longer generates or audits reports. Homework
+  answering is unchanged.
+
 ## What's new in 0.8.3
 
 A full live run (login → list → generate → verify → upload → submit) exposed
@@ -736,12 +758,12 @@ Code examples.
 | `uplus_list_courses` | List courses under the signed-in account |
 | `uplus_list_homeworks` | List homework status; open answer pages to verify button truth on demand |
 | `uplus_list_experiments` | List experiments with `exp_id` / `stu_exp_id` and submission state (submitted / outstanding / unknown) |
-| `uplus_download_experiment_materials` | Download the experiment's attachments plus the 资料-section report template |
-| `uplus_inspect_experiment` | Return the experiment brief: requirements, template, `auto_sections` (from the handbook) and `needed_sections` (model-written) |
-| `uplus_answer_experiment` | Fill the template, run the inspection gate, upload and submit; re-reads the page to confirm |
-| `uplus_audit_experiment` | Read-only audit of a submitted experiment: blank report, leftover placeholders, wrong experiment |
-| `uplus_generate_experiment_report` | Build a standard report .docx from scratch (fallback when no template exists) |
-| `uplus_submit_experiment_report` | Upload and submit a report; `.docx` reports pass the same inspection gate first |
+| `uplus_read_experiment_detail` | Read an experiment's requirements, material, deadline and submitted files (read-only) |
+| `uplus_download_experiment_materials` | Download the experiment's attachments plus the 资料-section report template (read-only) |
+
+> Experiments are **retrieval and viewing only**: the server lists experiments,
+> reads their detail pages and downloads requirements/templates. Filling in,
+> uploading and submitting experiment reports is done by the student.
 | `uplus_inspect_homework` | Return status and a structured question brief for the client model |
 | `uplus_capture_question_image` | Screenshot one question block (diagram included) and return the image to the model |
 | `uplus_answer_homework` | Fill objective questions and optionally submit |

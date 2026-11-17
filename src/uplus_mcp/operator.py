@@ -740,6 +740,7 @@ class HomeworkOperator:
             "objective_answered": 0,
             "can_submit": False,
             "subjective_skipped": 0,
+            "unlocated_skips": 0,
             "skipped_questions": [],
             "errors": [],
             "note": "",
@@ -775,6 +776,29 @@ class HomeworkOperator:
         # the n-th occurrence selects the right container for each.
         stem_occurrence: dict[str, int] = {}
 
+        def record_skip(detail: Question, reason: str, *,
+                        blocking: bool = True,
+                        subjective: bool = False) -> None:
+            """Park a question that cannot be answered and keep going.
+
+            ``blocking`` separates "this question is genuinely unfinished"
+            (no answer yet, subjective work) from "this question could not be
+            located on the page". A page-mapping failure is the second kind:
+            it is a page-shape problem, not missing work, so it is reported but
+            never allowed to veto the rest of the homework. Both kinds are
+            listed in ``skipped_questions`` so nothing disappears silently.
+            """
+            outcome["skipped"] += 1
+            outcome["skipped_questions"].append({
+                "question_id": detail.question_id,
+                "order": detail.order,
+                "type": detail.type.label,
+                "stem": detail.stem[:120],
+                "subjective": subjective,
+                "blocking": blocking,
+                "reason": reason,
+            })
+
         for meta in questions:
             detail = self.client.question_detail(meta.question_id)
             occurrence = 0
@@ -782,21 +806,28 @@ class HomeworkOperator:
                 key = text_key(detail.stem)
                 occurrence = stem_occurrence.get(key, 0)
                 stem_occurrence[key] = occurrence + 1
-            page_pos = detail.order
             if single_view:
-                page_pos = self._page_position(positions, detail.stem, detail.order,
-                                               used=used_positions)
+                # An empty map (the stem walk produced nothing) keeps the legacy
+                # API-order fallback; the stem verification below is what
+                # actually prevents a wrong-question write, and it runs on this
+                # path too.
+                page_pos = self._page_position(positions, detail.stem,
+                                               detail.order, used=used_positions)
                 if page_pos is None:
-                    outcome["errors"].append(
-                        f"第{detail.order}题在页面上找不到对应题干，已跳过（不冒险点错题）"
+                    record_skip(
+                        detail,
+                        "在页面上找不到对应题干，已跳过（不冒险点错题）",
+                        blocking=False,
                     )
                     continue
                 # Verify the page really shows this stem before typing: the
                 # answer-card click can silently miss, and filling whatever
                 # question is open would answer the wrong one.
                 if not self.navigate_to_question(page, page_pos, detail.stem):
-                    outcome["errors"].append(
-                        f"第{detail.order}题跳转后题干校验不一致，已跳过（不冒险写错题）"
+                    record_skip(
+                        detail,
+                        "跳转后题干校验不一致，已跳过（不冒险写错题）",
+                        blocking=False,
                     )
                     continue
             # Every objective question counts toward the total, including ones
@@ -831,19 +862,10 @@ class HomeworkOperator:
                         unverifiable_partial = True
                 if not need_refill:
                     if unverifiable_partial:
-                        outcome["skipped"] += 1
-                        outcome["skipped_questions"].append(
-                            {
-                                "question_id": detail.question_id,
-                                "order": detail.order,
-                                "type": detail.type.label,
-                                "stem": detail.stem[:120],
-                                "subjective": False,
-                                "reason": (
-                                    f"多选已答 {detail.my_answer}，但缺少模型答案，"
-                                    "无法核对是否漏选"
-                                ),
-                            }
+                        record_skip(
+                            detail,
+                            f"多选已答 {detail.my_answer}，但缺少模型答案，"
+                            "无法核对是否漏选",
                         )
                     else:
                         outcome["answered"] += 1
@@ -851,31 +873,12 @@ class HomeworkOperator:
                             outcome["objective_answered"] += 1
                     continue
             if not detail.auto_answerable:
-                outcome["skipped"] += 1
-                outcome["skipped_questions"].append(
-                    {
-                        "question_id": detail.question_id,
-                        "order": detail.order,
-                        "type": detail.type.label,
-                        "stem": detail.stem[:120],
-                        "subjective": True,
-                        "reason": "主观题/编程题/附件题，需本人完成",
-                    }
-                )
+                record_skip(detail, "主观题/编程题/附件题，需本人完成",
+                            subjective=True)
                 continue
             raw_answer = answers.get(detail.question_id) or answers.get(str(detail.order))
             if raw_answer is None:
-                outcome["skipped"] += 1
-                outcome["skipped_questions"].append(
-                    {
-                        "question_id": detail.question_id,
-                        "order": detail.order,
-                        "type": detail.type.label,
-                        "stem": detail.stem[:120],
-                        "subjective": False,
-                        "reason": "缺少模型答案，待人工/LLM 补充",
-                    }
-                )
+                record_skip(detail, "缺少模型答案，待人工/LLM 补充")
                 continue
             try:
                 normalized = self.fill_question(page, detail, raw_answer,
@@ -892,11 +895,24 @@ class HomeworkOperator:
         subjective_skips = sum(
             1 for item in outcome["skipped_questions"] if item.get("subjective")
         )
-        blocking_skips = outcome["skipped"]
+        # A question parked because the page could not be mapped is not missing
+        # work: the answer was ready, the page refused to reveal the question.
+        # It is reported in ``unlocated_skips`` and never counts against the
+        # submit gate, so one unreadable page position cannot cost the whole
+        # homework its submission.
+        unlocated_skips = sum(
+            1 for item in outcome["skipped_questions"]
+            if item.get("blocking") is False
+        )
+        blocking_skips = outcome["skipped"] - unlocated_skips
         if allow_subjective_skips:
             blocking_skips -= subjective_skips
         outcome["subjective_skipped"] = subjective_skips
+        outcome["unlocated_skips"] = unlocated_skips
         outcome["blocking_skips"] = blocking_skips
+        # An unlocatable question already ``continue``d before
+        # ``objective_total`` was counted, so answered and total stay
+        # comparable: the gate compares the reachable questions only.
         outcome["can_submit"] = (
             not outcome["errors"]
             and blocking_skips == 0

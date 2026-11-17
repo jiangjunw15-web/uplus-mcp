@@ -1,11 +1,12 @@
-"""Experiment automation: read requirements, generate report, upload submit.
+"""Experiment retrieval: read requirements and discover/download templates.
 
 Routes captured against eduplus.net on 2026-10-28:
 - Experiment list:  /course/course/{course_id}/ExperimentPage?userRole=
 - Experiment detail: /course/course/{course_id}/ExperimentPage/expInfo/{exp_id}/stu_experiments/{stu_exp_id}/labsubmit
 
 The detail page has four tabs: 实验提交物 / 实验手册 / 实验视频 / 实验附件.
-Submission is a single file upload (usually .docx 实验报告).
+This module is read-only: it parses the detail page and locates downloadable
+materials; it never fills, uploads or submits a report.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout
 from .browser import BrowserSession, UplusError, AuthExpiredError
 from .config import Config
 from .models import Course
-from . import compliance, utils
+from . import utils
 
 
 # The experiment heading is ``实验N <topic>`` where N is a Chinese or an
@@ -337,206 +338,7 @@ class ExperimentOperator:
         return rows or []
 
     # ------------------------------------------------------------------ #
-    # upload submission
-    # ------------------------------------------------------------------ #
-    def upload_report(self, course_id: str, exp_id: str, stu_exp_id: str,
-                      file_path: Path) -> dict:
-        """Upload a .docx report file to the experiment submission page."""
-        safe_path = utils.resolve_io_path(
-            file_path, self.config.io_roots, must_exist=True)
-        page = self.open_detail(course_id, exp_id, stu_exp_id)
-
-        # make sure we're on 实验提交物 tab
-        self._click_tab(page, "实验提交物")
-        time.sleep(0.5)
-
-        # find file input
-        file_input = page.locator('input[type="file"]').first
-        if not file_input.count():
-            raise UplusError("页面未找到文件上传输入框")
-
-        file_input.set_input_files(str(safe_path))
-        # The uploader converts the file asynchronously. The 「提交」 button is
-        # visible the whole time but a click while the page still says
-        # 「格式转换中...」 silently does nothing — that is what produced
-        # "clicked 提交 但未生效". Wait for 「转换成功」 before clicking.
-        if not self._wait_converted(page, timeout=60.0):
-            raise UplusError(
-                "文件上传后 60 秒仍未显示「转换成功」，请人工复核（文件可能过大或格式不支持）"
-            )
-
-        # The uploader converts the file first (aaaa.docx 转换成功) and only
-        # then exposes the 「提交」 button. Clicking a div that merely contains
-        # the text 提交 does nothing, so the click is restricted to real
-        # buttons and the submission is polled until the badge flips.
-        if not self._click_submit(page):
-            raise UplusError("未找到可点击的「提交」按钮（文件可能仍在转换）")
-
-        registered = self._wait_submitted(page, timeout=15.0)
-        if not registered:
-            raise UplusError(
-                "已点击「提交」但页面未出现「已提交」状态，提交未生效，请人工复核"
-            )
-        # The badge flips optimistically: the live test saw 已提交 + 撤回 right
-        # after the click, then the page came back as 未提交 on the next visit,
-        # with the file still sitting there unconverted-on-the-server. Reload
-        # and re-check, and re-click once if the server did not keep it.
-        stable, attempts = self._confirm_stable_submission(page)
-        return {
-            "uploaded": True,
-            "file": safe_path.name,
-            "page_url": page.url,
-            "status_verified": stable,
-            "submit_clicks": attempts,
-            **({} if stable else {
-                "warning": "刷新后状态回退为未提交，服务端可能未落库，请在页面上再点一次「提交」确认",
-            }),
-        }
-
-    def _confirm_stable_submission(self, page: Page,
-                                   timeout: float = 12.0,
-                                   retries: int = 1) -> tuple[bool, int]:
-        """Reload and re-check the submission; re-click once if it fell back.
-
-        Returns ``(still_submitted, clicks_used)``. A submission that only
-        exists in the front-end's optimistic badge is not a submission — the
-        next page load showed 未提交 and no 撤回 button.
-        """
-        clicks = 1
-        for attempt in range(retries + 1):
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=45_000)
-            except TypeError:
-                page.reload()
-            except Exception:
-                return False, clicks
-            if self._wait_submitted(page, timeout=timeout):
-                return True, clicks
-            if attempt < retries:
-                if not self._click_submit(page):
-                    return False, clicks
-                clicks += 1
-                if not self._wait_submitted(page, timeout=timeout):
-                    return False, clicks
-        return False, clicks
-
-    # ------------------------------------------------------------------ #
-    # submission primitives
-    # ------------------------------------------------------------------ #
-    def _click_submit(self, page: Page) -> bool:
-        """Click the real 「提交」 button and accept a confirmation dialog.
-
-        Returns ``False`` when no visible button carries that exact label —
-        which happens while the upload is still converting.
-        """
-        clicked = page.evaluate(r"""
-            () => {
-                const els = Array.from(document.querySelectorAll('button'));
-                const hit = els.find(e => {
-                    const t = (e.innerText || '').trim();
-                    return (t === '提交' || t === '确认提交') && e.offsetParent !== null;
-                });
-                if (!hit) return false;
-                hit.click();
-                return true;
-            }
-        """)
-        if not clicked:
-            return False
-        time.sleep(1.5)
-        # Some courses ask for confirmation before the submission registers.
-        try:
-            box = page.locator(".el-message-box, .el-dialog").first
-            if box.count() and box.is_visible():
-                ok_btn = box.locator(
-                    "button:has-text('确定'), button:has-text('确认')").first
-                if ok_btn.count():
-                    ok_btn.click(timeout=3000)
-                    time.sleep(1.0)
-        except Exception:  # noqa: BLE001 - a missing dialog is normal
-            pass
-        return True
-
-    def _wait_converted(self, page: Page, timeout: float = 60.0) -> bool:
-        """Poll until the uploader reports 「转换成功」 for the new file.
-
-        Right after ``set_input_files`` the page shows 「格式转换中...」 for a
-        few seconds. A 「提交」 click during that window is accepted by the UI
-        but never registers, so the conversion has to finish first.
-        """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                text = page.inner_text("body")
-            except Exception:  # noqa: BLE001 - page may be re-rendering
-                time.sleep(1.0)
-                continue
-            if "转换中" in text:
-                time.sleep(1.0)
-                continue
-            if "转换成功" in text:
-                return True
-            time.sleep(1.0)
-        return False
-
-    def _wait_submitted(self, page: Page, timeout: float = 15.0) -> bool:
-        """Poll the page until it shows the submitted badge and 撤回 button."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                text = page.inner_text("body")
-            except Exception:  # noqa: BLE001 - page may be reloading
-                time.sleep(1.0)
-                continue
-            if "已提交" in text and "撤回" in text:
-                return True
-            time.sleep(1.0)
-        return False
-
-    def submit_report(self, course_id: str, exp_id: str, stu_exp_id: str,
-                      file_path: Path) -> dict:
-        """Upload a report and **verify the submission actually registered**.
-
-        The plain ``upload_report`` returns ``uploaded: True`` as soon as the
-        submit button is clicked, exactly like the homework path before it
-        learned to read the page back. The submission can silently fail (the
-        uploader rejects the file, a confirm dialog appears, the request 500s),
-        and reporting success then is worse than reporting failure.
-
-        This method re-reads the page after submitting and only reports
-        success when the page shows the file among the submitted files or the
-        status badge switched to 已提交. Otherwise it raises ``UplusError``
-        so the caller never reports a phantom submission.
-        """
-        result = self.upload_report(course_id, exp_id, stu_exp_id, file_path)
-        page = self.open_detail(course_id, exp_id, stu_exp_id)
-        time.sleep(1.0)
-        text = page.inner_text("body")
-        file_name = Path(file_path).name
-        # Only the submitted badge plus a 撤回 button (or this file appearing
-        # in the submitted list) proves the submission registered. The page
-        # shows "实验报告：xxx.docx 转换成功" right after an upload, so
-        # treating "the file name appears somewhere" as success — which this
-        # method used to do — reports a phantom submission.
-        listed = [
-            f.strip()
-            for f in re.findall(r"实验报告[：:]\s*([^\n]+?)(?=下载|撤回|$)", text)
-            if f.strip()
-        ]
-        confirmed = "已提交" in text and (
-            "撤回" in text or any(file_name == f for f in listed)
-        )
-        if not confirmed:
-            raise UplusError(
-                "提交后页面未显示已提交状态或已上传文件，"
-                "提交可能未生效，请人工复核（未返回假成功）"
-            )
-        result["confirmed"] = True
-        result["page_url"] = page.url
-        return result
-
-    # ------------------------------------------------------------------ #
-    # requirements collection
+    # retrieval helpers (read-only: requirements and template discovery)
     # ------------------------------------------------------------------ #
     def collect_requirements(self, detail: ExperimentDetail) -> str:
         """Merge every requirement source into one text block.
@@ -545,10 +347,7 @@ class ExperimentOperator:
         1. ``提交物`` (material) — what the report must contain.
         2. ``实验手册`` (manual) — the main requirement document.
         3. ``实验附件`` attachment names — files that carry additional
-           requirements (the user said requirements usually live in the
-           manual and the attachments).
-
-        Returns the concatenated text, with each source on its own block.
+           requirements.
         """
         parts: list[str] = []
         if detail.material:
@@ -565,48 +364,29 @@ class ExperimentOperator:
                              max_depth: int = 6) -> Optional[dict]:
         """Locate the best report template across **all** experiment sources.
 
-        The user's requirement: check everything — 实验附件, 实验手册
-        (downloadable files on the manual tab), and the course 资料 section
-        (recursing into folders) — and prefer whichever source actually
-        yields a downloadable template file.
+        Search order (first downloadable match wins): 实验附件 → 实验手册 →
+        course 资料 (walked recursively into folders). Downloads the file so
+        the caller can read it locally; nothing is filled, uploaded or
+        submitted here.
 
-        Search order (first downloadable match wins):
-
-        1. **实验附件** — attachments on the 实验附件 tab whose name matches
-           「实验报告模板 / 报告模板 / 实验N」 and carry a download href.
-        2. **实验手册** — downloadable files on the 实验手册 tab (the manual
-           is sometimes a .docx that *is* the template, or carries one).
-        3. **资料** — the course 资料 section, walked recursively into
-           folders, matching the same names.
-
-        Within each source, entries are ranked by :func:`_template_priority`
-        (an explicit「实验报告模板」beats a bare「模板」beats a per-experiment
-        file). A source that has a matching name but no download href is
-        noted but skipped — the caller wants a file it can actually open.
-
-        Returns ``{"name", "path", "source"}`` with ``path`` pointing at the
-        downloaded file, or ``None`` when no downloadable template is found
-        in any source. A missing template is not an error: the caller falls
-        back to the built-in report generator.
+        Returns ``{"name", "path", "source"}`` or ``None`` when no downloadable
+        template is found. A missing template is not an error.
         """
         exp_label = self._experiment_label(detail.name)
         dest_dir = self.config.report_folder / "experiment_materials"
 
-        # ---- 1) 实验附件 ----
         hit = self._best_downloadable_attachment(
             detail.attachments, exp_label, dest_dir)
         if hit:
             hit["source"] = "实验附件"
             return hit
 
-        # ---- 2) 实验手册 (downloadable files on the manual tab) ----
         hit = self._best_downloadable_attachment(
             detail.manual_links, exp_label, dest_dir)
         if hit:
             hit["source"] = "实验手册"
             return hit
 
-        # ---- 3) 资料 (recursive folder walk) ----
         from . import materials
 
         matcher = _template_matcher(exp_label)
@@ -619,13 +399,9 @@ class ExperimentOperator:
             raise UplusError(f"资料板块检索失败：{exc}") from exc
         if not entries:
             return None
-        # Prefer a downloadable file; rank by template priority.
         downloadable = [e for e in entries if e.href]
         downloadable.sort(key=_template_priority)
         if not downloadable:
-            # Report the best match's name even though it has no href, so the
-            # caller can tell the user where the template is but that it must
-            # be downloaded manually.
             entries.sort(key=_template_priority)
             return {"name": entries[0].name, "path": "", "source": "资料"}
         entry = downloadable[0]
@@ -655,15 +431,13 @@ class ExperimentOperator:
                 continue
             name = att.name.strip()
             compact = name.replace(" ", "")
-            # Match: a template name, or this experiment's own label.
             is_template = (
                 ("模板" in name and ("报告" in name or "实验" in name))
                 or (label and label in compact)
             )
             if not is_template:
                 continue
-            priority = _template_priority(
-                _NameOnly(name))  # reuse the ranking function
+            priority = _template_priority(_NameOnly(name))
             candidates.append((priority, att))
         if not candidates:
             return None
@@ -678,115 +452,6 @@ class ExperimentOperator:
             raise UplusError(f"模板下载失败（{best.name}）：{exc}") from exc
         return {"name": best.name, "path": str(path)}
 
-    # ------------------------------------------------------------------ #
-    # report verification (the inspection gate)
-    # ------------------------------------------------------------------ #
-    def verify_report(self, path: Path, detail: ExperimentDetail,
-                      expected_sections: list[str] | None = None,
-                      strict_compliance: bool = True) -> dict:
-        """Read-only inspection of a report before it may be submitted.
-
-        Mirrors the homework audit: it refuses an empty or wrong submission
-        rather than uploading a blank document.
-
-        Checks:
-        * the file exists, is a non-trivial size, and has readable body text
-          (a .docx that opens but is blank is still "empty");
-        * no placeholder text remains（"（此处填写…）"、"待填写"、"TODO"…）;
-        * when ``expected_sections`` is given, each named section has body
-          text (a heading with nothing under it is empty);
-        * the report shares at least one topic word with the experiment's
-          name/requirements — a report written for a *different* experiment
-          is the document analogue of answering the wrong question;
-        * the report passes the compliance checklist (teacher template cover,
-          experiment-name field, screenshots when the manual demands them,
-          manual requirement coverage, AI-sounding meta talk, repetition,
-          layout). ``strict_compliance=False`` downgrades those findings to
-          warnings instead of blocking.
-
-        Returns ``{"ok": bool, "reason": str, "checks": {...}}``. ``ok`` is
-        ``False`` with a filled ``reason`` when the caller must refuse to
-        submit.
-        """
-        from .report_generator import extract_body_text, is_placeholder_text
-
-        safe = utils.resolve_io_path(path, self.config.io_roots, must_exist=True)
-        checks: dict = {}
-
-        # 1) non-trivial size first: a stub file is "empty" whether or not it
-        #    happens to be a parseable document.
-        checks["bytes"] = safe.stat().st_size
-        if safe.stat().st_size < 1024:
-            return {"ok": False, "reason": "报告文件过小（<1KB），疑似空文件", "checks": checks}
-
-        # 2) readable, non-trivial body
-        try:
-            body = extract_body_text(safe)
-        except Exception as exc:  # noqa: BLE001 - corrupt/unsupported file
-            return {"ok": False, "reason": f"无法读取报告内容：{exc}", "checks": checks}
-        checks["chars"] = len(body)
-        if len(body.strip()) < 30:
-            return {"ok": False, "reason": "报告正文有效内容不足，疑似空报告", "checks": checks}
-
-        # 3) leftover placeholders
-        leftovers = [
-            line.strip() for line in body.split("\n")
-            if line.strip() and is_placeholder_text(line.strip())
-        ]
-        checks["placeholders"] = leftovers[:10]
-        if leftovers:
-            shown = "、".join(leftovers[:3])
-            return {
-                "ok": False,
-                "reason": f"报告仍残留未填写占位内容（{shown}…），拒绝提交",
-                "checks": checks,
-            }
-
-        # 4) expected sections have body
-        if expected_sections:
-            missing = _missing_sections(body, expected_sections)
-            checks["missing_sections"] = missing
-            if missing:
-                return {
-                    "ok": False,
-                    "reason": "以下章节没有正文内容：" + "、".join(missing),
-                    "checks": checks,
-                }
-
-        # 5) report topic matches the experiment
-        matches = _report_matches_experiment(body, detail)
-        checks["topic_match"] = matches
-        if matches is False:
-            return {
-                "ok": False,
-                "reason": (
-                    f"报告内容与实验「{detail.name}」不匹配"
-                    "（未出现实验主题关键词），疑似交错了实验，拒绝提交"
-                ),
-                "checks": checks,
-            }
-
-        # 6) compliance checklist — 「能交」和「交了会被挑毛病」是两件事
-        try:
-            requirements = self.collect_requirements(detail)
-        except Exception:  # noqa: BLE001 - the checklist is best-effort here
-            requirements = ""
-        audit = compliance.check_report(
-            safe, manual_text=detail.manual_text or "", requirements=requirements)
-        checks["compliance"] = audit.as_dict()
-        if strict_compliance and not audit.ok:
-            first = audit.blocking[0]
-            more = len(audit.blocking) - 1
-            reason = f"合规核查未通过（{first.title}）：{first.detail}"
-            if more > 0:
-                reason += f"；另有 {more} 项硬伤"
-            return {"ok": False, "reason": reason, "checks": checks}
-
-        return {"ok": True, "reason": "", "checks": checks}
-
-    # ------------------------------------------------------------------ #
-    # helpers
-    # ------------------------------------------------------------------ #
     @staticmethod
     def _experiment_label(name: str) -> str:
         """``实验一 进程同步`` -> ``实验一``; falls back to the full name."""

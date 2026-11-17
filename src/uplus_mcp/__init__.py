@@ -13,11 +13,11 @@ launcher    Locate or launch Edge/Chrome with the CDP debug port enabled.
 solver      Answer normalization and structured question payloads for an LLM.
 report      Markdown patrol report builder and persistence.
 journal     Local record of submitted answers, used by audits and repairs.
-report_generator  Experiment report .docx builder and template filler.
-compliance  Pre-submission checklist: teacher template, screenshots, meta voice.
-experiment  Experiment detail reading, requirement collection, report verification.
+report_generator  Report .docx builder and template filler (library use).
+compliance  Report checklist library (not wired into the MCP tool set).
+experiment  Experiment detail reading, requirements and template discovery (read-only).
 materials   Course 资料 section discovery, folder walk and file download.
 server      FastMCP server exposing the tools to MCP clients.
 """
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"

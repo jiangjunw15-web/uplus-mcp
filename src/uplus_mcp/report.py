@@ -51,10 +51,8 @@ class PatrolReport:
     experiments: list[ExperimentRow] = field(default_factory=list)
     takeover: list[dict] = field(default_factory=list)
     incomplete: list[dict] = field(default_factory=list)
-    #: One entry per submitted experiment the optional audit inspected. Each
-    #: entry is the dict returned by ``engine.audit_experiment``: empty
-    #: reports, leftover placeholders and wrong-experiment submissions land in
-    #: its ``issues`` list.
+    #: Kept for forward/backward compatibility with older patrol snapshots.
+    #: The experiment audit was removed in 0.8.4: experiments are retrieval-only.
     experiment_audits: list[dict] = field(default_factory=list)
     #: How many submitted homeworks the optional audit inspected, and how many
     #: answered multi-select questions it could not verify because the platform
@@ -402,10 +400,11 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
         lines.append("")
 
     lines.append(
-        "> 客观题由巡检流程自动作答；实验报告可用 uplus_inspect_experiment → "
-        "uplus_answer_experiment 生成：服务端只引用实验手册原文，实验实现/结果分析/"
-        "总结由模型产出，填充后必须通过空报告、占位符、错交实验三道校验才会提交；"
-        "附件上传、小组分工简答与编程题仍需本人完成。"
+        "> 客观题由巡检流程自动作答；实验部分只做检索与查看：可用 "
+        "uplus_list_experiments / uplus_read_experiment_detail / "
+        "uplus_download_experiment_materials 读取要求与资料，"
+        "实验报告的填写与提交需由本人完成；"
+        "附件上传、小组分工简答与编程题也仍需本人完成。"
     )
     return "\n".join(lines)
 
