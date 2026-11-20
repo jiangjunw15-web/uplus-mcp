@@ -13,6 +13,41 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.9
+
+The platform does not guarantee the order of its course, homework or experiment
+feeds, and mixing the all-course homework list with per-course experiment calls
+made the browser jump between courses on every run. This release fixes the order
+and adds a single-course scan:
+
+- **Stable course order.** Configured courses keep the order written in
+  `courses.json`; a live feed is sorted by name + id, so a changed API order no
+  longer changes the result.
+- **Stable homework order.** Within a course, tasks are sorted by due date,
+  then title, then task id; tasks without a deadline go last.
+- **Stable experiment order.** `实验N` is parsed from Chinese or Arabic numerals
+  (实验一 → 实验二 → 实验十); unnumbered titles go last.
+- **New `uplus_scan_course(course_id, refresh_page_state=True,
+  verify_experiments=False)`.** It reads exactly one course: one homework feed
+  call, one answer-page load per *unsubmitted* homework, then one experiment
+  list page. It returns `homeworks`, `experiments` and `summary`; no other
+  course is touched. With `verify_experiments=True` it also opens each
+  experiment detail page in the same pass; the default keeps the fast list
+  badge.
+- **Faster/clearer list tools.** `uplus_list_experiments` gains an optional
+  `verify` flag (`False` reads the list badge only, one page load for the whole
+  course). `uplus_list_homeworks(refresh_page_state=True)` still opens only
+  unsubmitted homework pages. `uplus_patrol` is now explicitly course-major:
+  all of one course's homeworks, then its experiments, then the next course.
+- **Recommended retrieval flow.** Follow the order returned by
+  `uplus_list_courses` and call `uplus_scan_course` once per course; finish that
+  course before starting the next. Use `uplus_patrol` only when a full patrol
+  report is needed.
+- **Tests.** 384 pass locally (including the two real headless-Chromium DOM
+  cases; CI without a Playwright browser skips those two and runs the other
+  382). `tests/test_scan_order.py` adds 7 cases for the ordering and single-
+  course scan.
+
 ## What's new in 0.8.8
 
 The live answer page renders fill-in-the-blank questions with a plain stem and

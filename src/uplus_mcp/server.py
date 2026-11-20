@@ -148,10 +148,16 @@ async def uplus_list_courses() -> list[dict]:
 
 @mcp.tool()
 async def uplus_list_homeworks(course_id: str = "", refresh_page_state: bool = False) -> list[dict]:
-    """List homework status for one course, or all courses when omitted.
+    """List homework status in a stable course-major order.
 
-    ``refresh_page_state=True`` opens each answer page to read the real submit
-    button, because the REST status can lag behind the page.
+    Omit ``course_id`` to read every active course in a fixed order (configured
+    courses keep their config order; a live feed is sorted by course name + id),
+    and each course's tasks are sorted by due date and title. For a complete
+    per-course read (homeworks then experiments) use ``uplus_scan_course``
+    instead of mixing this tool with the experiment tools.
+
+    ``refresh_page_state=True`` opens each *unsubmitted* answer page once to read
+    the real submit button, because the REST status can lag behind the page.
     """
     return await _thread.run_async(
         _dispatch("list_homeworks", course_id, refresh_page_state=refresh_page_state)
@@ -159,9 +165,41 @@ async def uplus_list_homeworks(course_id: str = "", refresh_page_state: bool = F
 
 
 @mcp.tool()
-async def uplus_list_experiments(course_id: str) -> list[dict]:
-    """List experiments and their submission state for one course."""
-    return await _thread.run_async(_dispatch("list_experiments", course_id))
+async def uplus_list_experiments(course_id: str, verify: bool = True) -> list[dict]:
+    """List one course's experiments in 实验一/二/… order.
+
+    ``verify=True`` opens each experiment detail page to confirm 已提交/未提交
+    (the list badge has been wrong on the live platform). ``verify=False`` reads
+    the list page only — much faster, one page load for the whole course.
+    """
+    return await _thread.run_async(
+        _dispatch("list_experiments", course_id, verify=verify)
+    )
+
+
+@mcp.tool()
+async def uplus_scan_course(
+    course_id: str,
+    refresh_page_state: bool = True,
+    verify_experiments: bool = False,
+) -> dict:
+    """Read one course end-to-end: all homeworks first, then experiments.
+
+    This is the efficient course-by-course path. Call it for one course, finish
+    reading (and answering) that course, then call it for the next. The browser
+    stays on the current course and does not jump between courses; homeworks are
+    sorted by due date/title and experiments by 实验一/二/… order.
+
+    ``refresh_page_state`` (default True) opens each *unsubmitted* homework's
+    answer page once for the real submit-button state. ``verify_experiments``
+    (default False) keeps the fast list badge for experiments; set it True to
+    open every experiment detail page and confirm its submitted state.
+    """
+    return await _thread.run_async(
+        _dispatch("scan_course", course_id,
+                  refresh_page_state=refresh_page_state,
+                  verify_experiments=verify_experiments)
+    )
 
 
 @mcp.tool()
@@ -362,6 +400,11 @@ async def uplus_upload_attachment(task_id: str, course_id: str, file_path: str) 
 async def uplus_patrol(auto_answer: bool = False, submit: bool = False,
                        audit: bool = True) -> dict:
     """Patrol every configured course and write a Markdown report.
+
+    The traversal is deterministic and course-major: all of one course's
+    homeworks are read first (sorted by due date/title), then that course's
+    experiments (实验一/二/…), then the next course. Use ``uplus_scan_course``
+    when you want just one course at a time.
 
     Lists homework and experiments, separates submitted / pending / outstanding /
     takeover items, and collects answer briefs for outstanding objective

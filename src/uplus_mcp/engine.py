@@ -12,7 +12,7 @@ from . import report as report_mod
 from .browser import BrowserSession, AuthExpiredError, UplusError
 from .config import Config
 from .experiment import ExperimentOperator
-from .models import HomeworkStatus, HomeworkTask, QuestionType
+from .models import Course, Experiment, HomeworkStatus, HomeworkTask, QuestionType
 from .operator import HomeworkOperator, classify_experiment_flag
 from .platform import PlatformClient
 from . import journal, login_flow, solver, utils
@@ -40,16 +40,70 @@ class PatrolEngine:
     def _iter_courses(self) -> list:
         """Configured courses, or the live account list when none are configured.
 
-        By default expired courses are skipped during patrol; set
-        ``include_expired_courses=True`` to keep the archived view.
+        The order is deterministic: configured courses keep the order the user
+        wrote in ``courses.json``; the live feed is sorted by name + id because
+        the platform does not guarantee a stable order between calls. By default
+        expired courses are skipped; ``include_expired_courses=True`` keeps the
+        archived view.
         """
-        courses = self.config.courses or self.client.list_my_courses()
+        if self.config.courses:
+            courses = list(self.config.courses)
+        else:
+            courses = sorted(self.client.list_my_courses(), key=_course_sort_key)
         if self.config.include_expired_courses:
             return courses
         return [c for c in courses if not utils.is_expired(c.end_ms)]
 
+    def _course_by_id(self, course_id: str) -> Course | None:
+        """Find a configured course without an API call, then the live feed."""
+        for course in self.config.courses:
+            if course.id == course_id:
+                return course
+        return next(
+            (c for c in self.client.list_my_courses() if c.id == course_id),
+            None,
+        )
+
     def _register(self, task: HomeworkTask) -> None:
         self._task_index[task.task_id] = task
+
+    def _read_task_page_state(self, task: HomeworkTask) -> str:
+        """Read the real submit-button state for one task; return an error text.
+
+        Empty string means the page was read (or not needed). This is the one
+        page navigation per open homework, kept inside the current course.
+        """
+        try:
+            page = self.operator.open_homework(task)
+            status, progress = self.operator.read_page_state(page)
+            if status is not None:
+                task.page_status = status
+            if progress is not None:
+                task.page_progress = progress
+        except AuthExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep the listing alive
+            return str(exc)
+        return ""
+
+    @staticmethod
+    def _homework_row(course: Course, task: HomeworkTask) -> dict:
+        """One JSON-ready homework row, shared by list and course scan."""
+        return {
+            "course_id": course.id,
+            "course_name": course.name,
+            "task_id": task.task_id,
+            "homework_id": task.homework_id,
+            "name": task.name,
+            "status": task.status.value,
+            "status_label": report_mod.STATUS_LABEL[task.status],
+            "deadline_ms": task.end_ms,
+            "deadline": utils.deadline_label(task.end_ms),
+            "question_count": task.question_count,
+            "score": task.score,
+            "progress": task.page_progress,
+            "page_error": task.raw.get("page_error", ""),
+        }
 
     def resolve_task(self, task_id: str, course_id: str) -> HomeworkTask:
         cached = self._task_index.get(task_id)
@@ -157,7 +211,7 @@ class PatrolEngine:
                 "start": utils.format_ts(c.start_ms),
                 "end": utils.format_ts(c.end_ms),
             }
-            for c in self.client.list_my_courses()
+            for c in sorted(self.client.list_my_courses(), key=_course_sort_key)
         ]
 
     def list_homeworks(self, course_id: str = "", refresh_page_state: bool = False) -> list[dict]:
@@ -173,88 +227,145 @@ class PatrolEngine:
         # falls back to it only when no course is configured. Widening when
         # every configured course is expired used to silently list unrelated
         # live courses the user never selected for patrol.
+        #
+        # Course-major and sorted: finish one course's tasks before the next,
+        # and order tasks by due date + title so repeated runs read the same.
         rows: list[dict] = []
         for course in targets:
-            for task in self.client.list_homeworks(course.id):
+            tasks = sorted(
+                self.client.list_homeworks(course.id), key=_homework_sort_key)
+            for task in tasks:
                 self._register(task)
                 if refresh_page_state and task.status is HomeworkStatus.NOT_SUBMITTED:
-                    try:
-                        page = self.operator.open_homework(task)
-                        status, progress = self.operator.read_page_state(page)
-                        if status is not None:
-                            task.page_status = status
-                        if progress is not None:
-                            task.page_progress = progress
-                    except AuthExpiredError:
-                        raise
-                    except Exception as exc:  # keep listing alive
-                        task.raw["page_error"] = str(exc)
-                rows.append({
-                    "course_id": course.id,
-                    "course_name": course.name,
-                    "task_id": task.task_id,
-                    "homework_id": task.homework_id,
-                    "name": task.name,
-                    "status": task.status.value,
-                    "status_label": report_mod.STATUS_LABEL[task.status],
-                    "deadline_ms": task.end_ms,
-                    "deadline": utils.deadline_label(task.end_ms),
-                    "question_count": task.question_count,
-                    "score": task.score,
-                    "progress": task.page_progress,
-                })
+                    error = self._read_task_page_state(task)
+                    if error:
+                        task.raw["page_error"] = error
+                rows.append(self._homework_row(course, task))
         return rows
 
     def list_experiments(self, course_id: str, verify: bool = True) -> list[dict]:
-        """List the course's experiments with a trustworthy submitted flag.
+        """List the course's experiments in 实验一/二/… order.
 
         The list page's badge is not a reliable judge: the live test read
         ``submitted: false`` for every experiment, including one the platform
-        itself displayed as 已提交 on its detail page. So each row is
-        re-checked against the detail page (已提交 + 撤回) and the badge is only
-        kept as a fallback, marked with ``status_source``.
+        itself displayed as 已提交 on its detail page. With ``verify=True``
+        each row is re-checked against the detail page (已提交 + 撤回); the
+        badge is only kept as a fallback, marked in ``submitted_source``.
+        ``verify=False`` reads the list page only — one page load for the whole
+        course instead of one per experiment.
         """
-        course = next(
-            (c for c in self.client.list_my_courses() if c.id == course_id), None
-        )
+        course = self._course_by_id(course_id)
         if course is None:
             raise UplusError(f"未找到课程 {course_id}，请先确认课程 ID")
-        experiments = self.operator.read_experiments(course)
-        exp_op = self._experiment_operator()
-        rows: list[dict] = []
-        for e in experiments:
-            row = {
-                "name": e.name,
-                "submitted": e.submitted,
-                "submitted_source": "list_badge",
-                "deadline_ms": e.deadline_ms,
-                "deadline": utils.deadline_label(e.deadline_ms),
-                "material": e.material,
-                # Both ids are required by every follow-up experiment tool;
-                # without them the caller cannot build the detail route.
-                "exp_id": e.exp_id,
-                "stu_exp_id": e.stu_exp_id,
-            }
-            if verify and e.exp_id and e.stu_exp_id:
-                try:
-                    detail = exp_op.read_detail(course_id, e.exp_id,
-                                                e.stu_exp_id)
-                    row["status"] = detail.status
-                    verified = classify_experiment_flag(detail.status, "")
-                    if verified is None:
-                        # The detail page opened but its submission state could
-                        # not be read. Keep the list badge rather than
-                        # overwriting it with None; say why in the source.
-                        row["submitted_source"] = (
-                            "list_badge（详情页未给出可识别的提交状态）")
-                    else:
-                        row["submitted"] = verified
-                        row["submitted_source"] = "detail_page"
-                    row["submitted_files"] = list(detail.submitted_files)
-                except Exception as exc:  # noqa: BLE001 - keep the list usable
-                    row["submitted_source"] = f"list_badge（复核失败：{exc}）"
-            rows.append(row)
-        return rows
+        experiments = sorted(
+            self.operator.read_experiments(course), key=_experiment_sort_key)
+        exp_op = self._experiment_operator() if verify else None
+        return [
+            self._experiment_row(course_id, exp, exp_op, verify)
+            for exp in experiments
+        ]
+
+    @staticmethod
+    def _experiment_row(course_id: str, exp: Experiment,
+                        exp_op: ExperimentOperator | None, verify: bool) -> dict:
+        """One JSON-ready experiment row, shared by list and course scan."""
+        row: dict = {
+            "name": exp.name,
+            "submitted": exp.submitted,
+            "submitted_source": "list_badge",
+            "deadline_ms": exp.deadline_ms,
+            "deadline": utils.deadline_label(exp.deadline_ms),
+            "material": exp.material,
+            # Both ids are required by every follow-up experiment tool;
+            # without them the caller cannot build the detail route.
+            "exp_id": exp.exp_id,
+            "stu_exp_id": exp.stu_exp_id,
+        }
+        if verify and exp_op is not None and exp.exp_id and exp.stu_exp_id:
+            try:
+                detail = exp_op.read_detail(course_id, exp.exp_id,
+                                            exp.stu_exp_id)
+                row["status"] = detail.status
+                verified = classify_experiment_flag(detail.status, "")
+                if verified is None:
+                    # The detail page opened but its submission state could
+                    # not be read. Keep the list badge rather than
+                    # overwriting it with None; say why in the source.
+                    row["submitted_source"] = (
+                        "list_badge（详情页未给出可识别的提交状态）")
+                else:
+                    row["submitted"] = verified
+                    row["submitted_source"] = "detail_page"
+                row["submitted_files"] = list(detail.submitted_files)
+            except Exception as exc:  # noqa: BLE001 - keep the list usable
+                row["submitted_source"] = f"list_badge（复核失败：{exc}）"
+        return row
+
+    def scan_course(self, course_id: str, *, refresh_page_state: bool = True,
+                    verify_experiments: bool = False) -> dict:
+        """Read one course end-to-end: all homeworks first, then experiments.
+
+        This is the efficient course-by-course retrieval path. For the named
+        course it calls the homework feed once, opens each *unsubmitted*
+        homework's answer page once (only when ``refresh_page_state``), then
+        opens the experiment list page once. No other course is touched, so the
+        browser never jumps between courses; call it for the next course only
+        after this one has been read.
+
+        ``verify_experiments=True`` additionally opens every experiment detail
+        page to confirm its submitted state; the default ``False`` keeps the
+        list badge and costs one page load for the whole course.
+        """
+        course = self._course_by_id(course_id)
+        if course is None:
+            raise UplusError(f"未找到课程 {course_id}，请先确认课程 ID")
+        tasks = sorted(
+            self.client.list_homeworks(course.id), key=_homework_sort_key)
+        homeworks: list[dict] = []
+        for task in tasks:
+            self._register(task)
+            if refresh_page_state and task.status is HomeworkStatus.NOT_SUBMITTED:
+                error = self._read_task_page_state(task)
+                if error:
+                    task.raw["page_error"] = error
+            homeworks.append(self._homework_row(course, task))
+
+        experiments = sorted(
+            self.operator.read_experiments(course), key=_experiment_sort_key)
+        exp_op = self._experiment_operator() if verify_experiments else None
+        experiment_rows = [
+            self._experiment_row(course.id, exp, exp_op, verify_experiments)
+            for exp in experiments
+        ]
+        submitted_homeworks = sum(
+            1 for task in tasks
+            if task.status in (HomeworkStatus.SUBMITTED_PENDING,
+                               HomeworkStatus.SUBMITTED_GRADED)
+        )
+        return {
+            "course_id": course.id,
+            "course_name": course.name,
+            "teacher": course.teacher,
+            "order": ("homeworks first, then experiments; finish this course "
+                      "before reading the next one"),
+            "homeworks": homeworks,
+            "experiments": experiment_rows,
+            "summary": {
+                "homework_total": len(homeworks),
+                "homework_submitted": submitted_homeworks,
+                "homework_outstanding": len(homeworks) - submitted_homeworks,
+                "experiments_total": len(experiment_rows),
+                "experiments_submitted": sum(
+                    1 for row in experiment_rows
+                    if row.get("submitted") is True),
+                "experiments_outstanding": sum(
+                    1 for row in experiment_rows
+                    if row.get("submitted") is False),
+                "experiments_unknown": sum(
+                    1 for row in experiment_rows
+                    if row.get("submitted") is None),
+            },
+        }
 
     # ------------------------------------------------------------------ #
     # experiments: read-only retrieval
@@ -790,7 +901,12 @@ class PatrolEngine:
         incomplete: list[dict] = []
 
         for course in self._iter_courses():
-            for task in self.client.list_homeworks(course.id):
+            # Course-major, deterministic order: all of this course's tasks
+            # (sorted by due date + title), then its experiments, then the next
+            # course. This keeps the browser on one course at a time.
+            tasks = sorted(
+                self.client.list_homeworks(course.id), key=_homework_sort_key)
+            for task in tasks:
                 self._register(task)
                 # The page button is the authoritative status. Read it for
                 # open homeworks as before, and for audited submitted ones so
@@ -987,7 +1103,10 @@ class PatrolEngine:
                     })
 
             try:
-                experiments = self.operator.read_experiments(course)
+                experiments = sorted(
+                    self.operator.read_experiments(course),
+                    key=_experiment_sort_key,
+                )
                 for exp in experiments:
                     snapshot.experiments.append(report_mod.ExperimentRow(course.name, exp))
                     # The experiment pipeline is retrieval-only: the patrol
@@ -1043,8 +1162,55 @@ class PatrolEngine:
 
 
 # --------------------------------------------------------------------------- #
-# helpers
+# deterministic retrieval order
 # --------------------------------------------------------------------------- #
+_CN_DIGITS = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9,
+}
+
+
+def _cn_number(text: str) -> int | None:
+    """Parse the small Chinese/Arabic number used in an experiment title."""
+    token = (text or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    if "十" in token:
+        head, _, tail = token.partition("十")
+        if head and head not in _CN_DIGITS:
+            return None
+        if tail and tail not in _CN_DIGITS:
+            return None
+        tens = _CN_DIGITS.get(head, 1) if head else 1
+        ones = _CN_DIGITS.get(tail, 0) if tail else 0
+        return tens * 10 + ones
+    return _CN_DIGITS.get(token)
+
+
+def experiment_number(name: str) -> int | None:
+    """``实验一`` / ``实验3`` -> 1 / 3; None when the title has no number."""
+    m = re.search(r"实验\s*([一二三四五六七八九十0-9]+)", name or "")
+    return _cn_number(m.group(1)) if m else None
+
+
+def _course_sort_key(course: Course) -> tuple[str, str]:
+    """Stable order for the live course feed (the API order can vary)."""
+    return ((course.name or "").strip(), course.id)
+
+
+def _homework_sort_key(task: HomeworkTask) -> tuple:
+    """Due date first, then title/id; tasks without a deadline go last."""
+    return (task.end_ms is None, task.end_ms or 0, task.name or "", task.task_id)
+
+
+def _experiment_sort_key(exp: Experiment) -> tuple:
+    """实验一 → 实验二 → … → 实验十, then unnumbered titles by name."""
+    number = experiment_number(exp.name)
+    return (number is None, number or 0, exp.name or "", exp.exp_id)
+
+
 def _safe_stem(name: str, fallback: str = "experiment") -> str:
     """A safe local file name for a downloaded material."""
     cleaned = re.sub(r'[<>:"/\|?*\x00-\x1f]', "_", name or "").strip().strip(".")
