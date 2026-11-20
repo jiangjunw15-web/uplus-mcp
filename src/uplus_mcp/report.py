@@ -168,6 +168,22 @@ def audit_questions(questions: list[Question],
         if not reference and q.type is QuestionType.MULTIPLE and journal_answer:
             reference = journal_answer
             reference_source = "journal"
+        if q.type is QuestionType.FILL_BLANK:
+            # The stem says how many boxes the question has, so a half-filled
+            # blank is detectable without any standard answer. Reporting it as
+            # ``partial`` here keeps "complete" honest even while the homework
+            # is still awaiting grading.
+            blanks = count_blanks(q.stem)
+            got_values = solver.split_blanks(q.my_answer, blanks)
+            if blanks > 1 and len(got_values) < blanks:
+                gap = blanks - len(got_values)
+                partial.append(_entry(
+                    q, reference_answer=reference,
+                    reference_source=reference_source,
+                    missing_blanks=gap,
+                    reason=f"还有 {gap} 个空未填写",
+                ))
+                continue
         if reference:
             reference_known += 1
             if q.type is QuestionType.MULTIPLE:
@@ -214,14 +230,6 @@ def audit_questions(questions: list[Question],
                     unjudged.append(_entry(
                         q, reason="标准答案为空，未能核对",
                         reference_answer=reference, reference_source=reference_source,
-                    ))
-                elif blanks > 1 and len(got_values) < blanks:
-                    gap = blanks - len(got_values)
-                    partial.append(_entry(
-                        q, reference_answer=reference,
-                        reference_source=reference_source,
-                        missing_blanks=gap,
-                        reason=f"还有 {gap} 个空未填写",
                     ))
                 elif got_values == want_values:
                     correct += 1

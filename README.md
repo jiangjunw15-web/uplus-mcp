@@ -13,6 +13,36 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.6
+
+A real course pack mislabels a plain fill-in-the-blank sentence as a programming
+question: 「用于表示请求映射的通用注解是 ______」 and 「处理 GET 请求用____注解，
+处理 POST 请求用____注解」 arrive as `qsnType=6` (编程题), while the answer page
+renders them as 填空题 with 答案一 / 答案二 boxes. The old code trusted the type
+code, handed both items to the student, and the homework could never be
+submitted. This release reclassifies by the stem and wires those blanks back into
+the automatic path.
+
+- **Stem-based reclassification.** `models.is_blank_style` (1–10 blanks, no code
+  markers) plus `models.looks_like_code` feed `Question.from_detail`: a type-6
+  question with no options whose stem really is a blank sentence becomes
+  `FILL_BLANK(4)`. It then gets a `blank_count` in the answer brief, is filled
+  one box at a time, is audited blank by blank, stops counting as
+  `subjective_skipped`, and no longer blocks the submit gate.
+- **Real programming prompts are untouched.** Stems carrying `{` `}` `public `,
+  `class `, `#include`, `console.log` (and other code markers), more than ten
+  blanks, or any options stay `PROGRAM` and stay with the student; `SHORT_ANSWER`
+  is never reclassified.
+- **The platform's joined blank answer is parsed.** A submitted multi-blank
+  answer comes back as one string joined by a run of `@`
+  (`@GetMapping@@@@PostMapping` for two blanks). `solver.split_blanks` now falls
+  back to `@{2,}` as the separator when the usual ones come up short, so the
+  audit and the half-filled refill check no longer report a complete answer as
+  missing a box.
+- **Tests.** `tests/test_program_blank.py` adds 13 cases covering the
+  reclassification, the code/short-answer guards, per-box filling and the joined
+  answer parsing.
+
 ## What's new in 0.8.5
 
 Fill-blank questions (填空题) had no real answer path: the plugin saw one

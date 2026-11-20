@@ -120,9 +120,14 @@ def _choice_letters(question: Question, raw: str) -> str:
     return letters
 
 
+#: Run of ``@`` the platform uses to join several fill-blank boxes in one
+#: ``userAnswer`` string (``@GetMapping@@@@PostMapping`` for two annotation
+#: blanks). Only consulted when the ordinary separators come up short.
+_BLANK_JOIN_RE = re.compile(r"@{2,}")
+
+
 def split_blanks(raw: object, expected: int = 0) -> list[str]:
     """Split one fill-blank answer into its per-box values.
-
     Model answers arrive in several shapes:
 
     * ``"@GetMapping\\n@PostMapping"`` — one value per line (preferred);
@@ -134,31 +139,44 @@ def split_blanks(raw: object, expected: int = 0) -> list[str]:
     used, so a single answer that contains a semicolon is not torn apart.
     With a known count above one the Chinese separators are accepted too.
 
+    The platform's own ``userAnswer`` joins the boxes with a run of ``@``
+    (the live record for 「@GetMapping / @PostMapping」 comes back as
+    ``@GetMapping@@@@PostMapping``), so that join is accepted as a last resort
+    when nothing else yields the expected number of values.
+
     The normalized result drops empty entries but otherwise keeps each value
     verbatim (annotations like ``@RequestMapping`` contain ``@``).
     """
     if raw is None:
         return []
+    text = "" if isinstance(raw, (list, tuple)) else str(raw).strip()
     if isinstance(raw, (list, tuple)):
         parts = [str(item) for item in raw]
-    else:
-        text = str(raw).strip()
-        if not text:
-            return []
-        if text.startswith("[") and text.endswith("]"):
-            try:
-                decoded = json.loads(text)
-            except json.JSONDecodeError:
-                decoded = None
-            if isinstance(decoded, (list, tuple)):
-                parts = [str(item) for item in decoded]
-            else:
-                parts = [text]
-        elif expected > 1:
-            parts = re.split(r"\r?\n|；|;|｜|\|", text)
+    elif not text:
+        return []
+    elif text.startswith("[") and text.endswith("]"):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, (list, tuple)):
+            parts = [str(item) for item in decoded]
         else:
-            parts = re.split(r"\r?\n", text)
-    return [part.strip() for part in parts if part and part.strip()]
+            parts = [text]
+    elif expected > 1:
+        parts = re.split(r"\r?\n|；|;|｜|\|", text)
+    else:
+        parts = re.split(r"\r?\n", text)
+    values = [part.strip() for part in parts if part and part.strip()]
+    if expected > 1 and len(values) < expected and _BLANK_JOIN_RE.search(text):
+        # The platform joins several boxes into one string with a run of ``@``
+        # (the live record for 「@GetMapping / @PostMapping」 is
+        # ``@GetMapping@@@@PostMapping``). Treat that run as the separator so
+        # the answer is not misread as one filled box out of two.
+        joined = [part.strip() for part in _BLANK_JOIN_RE.split(text) if part.strip()]
+        if len(joined) == expected:
+            return joined
+    return values
 
 
 def normalize_answer(question: Question, raw: str) -> str:

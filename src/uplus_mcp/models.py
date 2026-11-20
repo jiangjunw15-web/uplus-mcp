@@ -31,6 +31,41 @@ def count_blanks(stem: str) -> int:
     return len(BLANK_MARKER_RE.findall(stem or ""))
 
 
+#: Stems that carry these tokens are real code/program work, not a fill-blank
+#: sentence: they stay in the human-takeover lane even when they happen to
+#: contain ``____`` markers (``@Override`` / ``public void ...`` style prompts).
+_CODE_MARKERS = (
+    "```", "{", "}", "public ", "private ", "protected ", "static ",
+    "class ", "import ", "return ", "def ", "function ", "console.log",
+    "system.out", "printf(", "#include", "select ", "//", "/*",
+)
+
+#: Upper bound for a stem that is still treated as a one-line fill-blank. A
+#: program task that asks the student to write code spans far more than this.
+MAX_INLINE_BLANKS = 10
+
+
+def looks_like_code(stem: str) -> bool:
+    """True when a stem reads as programming work rather than a blank sentence."""
+    low = (stem or "").lower()
+    return any(marker in low for marker in _CODE_MARKERS)
+
+
+def is_blank_style(stem: str) -> bool:
+    """True when a ``编程题`` stem is really a fill-in-the-blank sentence.
+
+    Course packs differ: the same question ("用于表示请求映射的通用注解是
+    ____") arrives as qsnType=6 (编程题) on some packs while the answer page
+    renders it as 填空题 with one input box per blank. Judging by the stem
+    instead of the code lets those blanks be answered and the homework
+    submitted, without touching genuine programming questions.
+    """
+    blanks = count_blanks(stem)
+    if not 0 < blanks <= MAX_INLINE_BLANKS:
+        return False
+    return not looks_like_code(stem)
+
+
 # --------------------------------------------------------------------------- #
 # Question type codes returned by /api/course/homeworkQuestions/.../student/detail
 # --------------------------------------------------------------------------- #
@@ -219,6 +254,14 @@ class Question:
                 if src not in images
             )
         detail.images = images
+        # Some course packs ship a one-line 填空 sentence under qsnType=6
+        # (编程题) while the page renders it as 填空题 with 答案一/答案二 boxes.
+        # Keeping the code type would hand the item to the student and leave
+        # the whole homework unsubmittable; reclassifying by the stem answers
+        # the blanks and still leaves real code prompts to the human.
+        if (detail.type is QuestionType.PROGRAM and not detail.options
+                and is_blank_style(detail.stem)):
+            detail.type = QuestionType.FILL_BLANK
         return detail
 
     @property
