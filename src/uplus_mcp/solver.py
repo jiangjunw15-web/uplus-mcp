@@ -13,7 +13,7 @@ import json
 import re
 from typing import Optional
 
-from .models import Question, QuestionType
+from .models import Question, QuestionType, count_blanks
 from . import utils
 
 
@@ -23,7 +23,8 @@ def build_answer_brief(homework_name: str, questions: list[Question]) -> dict:
         "homework": homework_name,
         "instructions": (
             "逐题作答。单选返回单个选项字母；多选返回去重排序字母组合；"
-            "判断题返回 true（正确）或 false（错误）；填空题返回文本。"
+            "判断题返回 true（正确）或 false（错误）；填空题返回文本，"
+            "题干有多个空时（参考每题的 blank_count）每空一行，依序返回所有答案。"
             "题目带 images / figure_note 时，文字不足以作答：先调用 "
             "uplus_capture_question_image(task_id, course_id, order=题号) "
             "查看题目截图，再给出答案。题干提到「图 / 模型 / 流程 / 下图」"
@@ -119,6 +120,47 @@ def _choice_letters(question: Question, raw: str) -> str:
     return letters
 
 
+def split_blanks(raw: object, expected: int = 0) -> list[str]:
+    """Split one fill-blank answer into its per-box values.
+
+    Model answers arrive in several shapes:
+
+    * ``"@GetMapping\\n@PostMapping"`` — one value per line (preferred);
+    * ``["@GetMapping", "@PostMapping"]`` — a JSON array string;
+    * ``"@GetMapping；@PostMapping"`` — a common Chinese separator.
+
+    ``expected`` is the number of blanks the stem has. It is 0 when the count
+    is unknown: then only the unambiguous separators (newline, JSON array) are
+    used, so a single answer that contains a semicolon is not torn apart.
+    With a known count above one the Chinese separators are accepted too.
+
+    The normalized result drops empty entries but otherwise keeps each value
+    verbatim (annotations like ``@RequestMapping`` contain ``@``).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        parts = [str(item) for item in raw]
+    else:
+        text = str(raw).strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, (list, tuple)):
+                parts = [str(item) for item in decoded]
+            else:
+                parts = [text]
+        elif expected > 1:
+            parts = re.split(r"\r?\n|；|;|｜|\|", text)
+        else:
+            parts = re.split(r"\r?\n", text)
+    return [part.strip() for part in parts if part and part.strip()]
+
+
 def normalize_answer(question: Question, raw: str) -> str:
     """Validate and normalize one answer against its question type."""
     if question.type is QuestionType.SINGLE:
@@ -136,6 +178,17 @@ def normalize_answer(question: Question, raw: str) -> str:
         if value is None:
             raise ValueError(f"判断题答案非法: {raw!r}")
         return "true" if value else "false"
+    if question.type is QuestionType.FILL_BLANK:
+        expected = count_blanks(question.stem)
+        values = split_blanks(raw, expected)
+        if expected > 1 and len(values) < expected:
+            raise ValueError(
+                f"填空题有 {expected} 个空，只收到 {len(values)} 个答案: {raw!r}"
+            )
+        # Preserve the canonical joined form (newline-separated) so a single
+        # blank still returns plain text and the multi-blank answer can be
+        # split deterministically by the fill layer and the audit.
+        return "\n".join(values)
     return raw.strip()
 
 

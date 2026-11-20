@@ -6,11 +6,29 @@ See ``docs/api-mapping.md`` for the raw API shape and page routes.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import IntEnum, Enum
 from typing import Optional, Any
 
 from . import utils
+
+
+#: Runs of underscores / full-width blanks used as fill-in markers in a stem.
+#: One run == one answer box on the page (e.g. ``____`` or ``＿＿``).
+BLANK_MARKER_RE = re.compile(r"_{2,}|＿{2,}|﹍{2,}|﹎{2,}")
+
+
+def count_blanks(stem: str) -> int:
+    """Number of fill-in slots visible in a stem.
+
+    A fill-blank question can carry several answer boxes (the screenshot shows
+    ``处理 GET 请求用____注解，处理 POST 请求用____注解。`` with two boxes).
+    Counting the underscore runs lets the answer brief ask for exactly one value
+    per box, and lets the audit check each box instead of comparing a whole
+    joined string. An empty/non-string stem reports zero blanks.
+    """
+    return len(BLANK_MARKER_RE.findall(stem or ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -228,14 +246,23 @@ class Question:
                 "uplus_capture_question_image(task_id, course_id, order="
                 f"{self.order}) 查看题目截图，再给出答案。"
             )
-        if self.type is QuestionType.JUDGE:
+        if self.type is QuestionType.FILL_BLANK:
+            blanks = count_blanks(self.stem)
+            payload["blank_count"] = blanks
+            if blanks > 1:
+                payload["answer_hint"] = (
+                    f"填空题：题干有 {blanks} 个空，每空一个答案；"
+                    f"返回由换行分隔的 {blanks} 行文本（第1空/第2空依序），"
+                    "也可以用 JSON 数组 [\"第1空\", \"第2空\", ...]。"
+                )
+            else:
+                payload["answer_hint"] = "填空题：返回该空的文本"
+        elif self.type is QuestionType.JUDGE:
             payload["answer_hint"] = "回答 true（正确）或 false（错误）"
         elif self.type is QuestionType.SINGLE:
             payload["answer_hint"] = "回答单个选项字母，如 C"
         elif self.type is QuestionType.MULTIPLE:
             payload["answer_hint"] = "回答选项字母组合，如 ACD"
-        elif self.type is QuestionType.FILL_BLANK:
-            payload["answer_hint"] = "回答填空文本"
         elif self.type is QuestionType.ATTACHMENT:
             payload["answer_hint"] = "附件提交题：不可自动作答，需本人上传文件，人工接管"
         else:

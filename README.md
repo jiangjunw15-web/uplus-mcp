@@ -13,6 +13,37 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.5
+
+Fill-blank questions (填空题) had no real answer path: the plugin saw one
+textarea per question, but the platform renders **one box per blank** — the
+question 「处理 GET 请求用____注解，处理 POST 请求用____注解。」 shows 答案一 and
+答案二, and the single answer that used to be written only ever reached the
+first box.
+
+- **Blanks are counted and the answer is split.** `models.count_blanks` counts
+  the underscore runs in the stem; `Question.llm_prompt` now carries
+  `blank_count` and an answer hint that asks for one value per blank. The brief
+  says the same. `solver.split_blanks` accepts a newline-separated list, a JSON
+  array, or a Chinese separator, and `normalize_answer` rejects a multi-blank
+  answer that is short one value instead of leaving a question half filled.
+- **Each blank gets its own box, and every box is read back.** `_answer_blank`
+  now enumerates the question's answer boxes (inputs, textareas *and*
+  contenteditable rich-text editors), writes one value into each in DOM order,
+  and verifies each one. A value that does not stick after a retry raises, so
+  the submit gate refuses a half-filled question instead of passing it. A
+  question with fewer boxes than answers is an error, not a silent drop. A
+  contenteditable editor that ignores `fill` is typed into instead.
+- **Half-filled fill-blanks are repaired, not passed off as done.** In the
+  answer flow, a fill-blank whose recorded answer carries fewer values than the
+  stem has blanks is re-filled when a model answer exists; without one it is
+  reported as unverifiable and blocks submission. `audit_questions` compares
+  fill-blank answers value by value, so a platform that joins its blanks with a
+  different separator is not called wrong, while a missing blank lands in
+  `partial` with `missing_blanks`.
+
+全量 **333 个测试通过**（新增 `tests/test_fill_blank.py` 24 例）。
+
 ## What's new in 0.8.4
 
 Two fixes requested after field use:

@@ -15,6 +15,7 @@ from .models import (
     HomeworkTask,
     Question,
     QuestionType,
+    count_blanks,
 )
 from . import solver, utils
 
@@ -199,6 +200,36 @@ def audit_questions(questions: list[Question],
                         extra_letters=extra,
                         missing_letters=absent,
                         reason=reason,
+                    ))
+            elif q.type is QuestionType.FILL_BLANK:
+                # A fill-blank can hold several values, and the platform joins
+                # them its own way. Compare value by value so a differently
+                # joined but identical answer is not reported as wrong, and a
+                # half-filled question is reported as missing a blank rather
+                # than as a wrong answer.
+                blanks = count_blanks(q.stem)
+                got_values = solver.split_blanks(q.my_answer, blanks)
+                want_values = solver.split_blanks(reference, blanks)
+                if not want_values:
+                    unjudged.append(_entry(
+                        q, reason="标准答案为空，未能核对",
+                        reference_answer=reference, reference_source=reference_source,
+                    ))
+                elif blanks > 1 and len(got_values) < blanks:
+                    gap = blanks - len(got_values)
+                    partial.append(_entry(
+                        q, reference_answer=reference,
+                        reference_source=reference_source,
+                        missing_blanks=gap,
+                        reason=f"还有 {gap} 个空未填写",
+                    ))
+                elif got_values == want_values:
+                    correct += 1
+                else:
+                    wrong.append(_entry(
+                        q, reference_answer=reference,
+                        reference_source=reference_source,
+                        reason="与标准答案不一致",
                     ))
             else:
                 got = _normalized(q, q.my_answer)

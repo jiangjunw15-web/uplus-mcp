@@ -225,8 +225,10 @@ async def uplus_answer_homework(
 
     ``answers`` maps ``question_id`` (or question order as a string) to a
     normalized answer: one letter, a sorted letter group, ``true``/``false``, or
-    blank text. Submission is refused while any question is unanswered or failed
-    unless ``force_submit=True``.
+    blank text. A fill-blank question with several blanks (``blank_count`` in the
+    inspect brief) takes one value per blank, newline-separated in stem order.
+    Submission is refused while any question is unanswered or failed unless
+    ``force_submit=True``.
     """
     return await _thread.run_async(
         _dispatch("answer_homework", task_id, course_id, answers,

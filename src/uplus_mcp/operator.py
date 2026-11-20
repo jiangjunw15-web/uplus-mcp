@@ -26,7 +26,7 @@ from .models import (
     QuestionType,
 )
 from .platform import PlatformClient
-from . import journal, solver, utils
+from . import journal, models, solver, utils
 
 
 def text_key(text: str) -> str:
@@ -421,28 +421,107 @@ class HomeworkOperator:
         btn.first.click(timeout=6000)
         time.sleep(0.25)
 
-    def _answer_blank(self, page: Page, text: str,
-                      stem_text: str = "", occurrence: int = 0) -> None:
-        scope = self._question_scope(page, stem_text, occurrence)
-        box = scope.locator("textarea").first
-        if box.count() == 0:
-            box = scope.locator(
-                "input[type=text], input[type=search], input[type=number]"
-            ).first
-        box.fill(text, timeout=6000)
-        # Read back what actually landed in the box; a rich-text editor that
-        # ignores ``fill`` would otherwise look like a silent success.
+    # Fill-blank answer boxes. A question may expose several boxes (one per
+    # blank in the stem), rendered as plain inputs, textareas or contenteditable
+    # rich-text editors. The order on the page is the order of the blanks.
+    _BLANK_INPUT_SELECTOR = (
+        "input[type=text], input[type=search], input[type=number], "
+        "input:not([type]), input[placeholder], textarea, "
+        "[contenteditable=true]:not([contenteditable=false])"
+    )
+
+    def _blank_boxes(self, scope) -> list:
+        """All answer boxes of one fill-blank question, in DOM order.
+
+        Hidden inputs (the platform ships several per question for its own
+        bookkeeping) are skipped: only a box the student can actually type in
+        counts as an answer slot.
+        """
         try:
-            landed = str(box.input_value() or "").strip()
-        except Exception:  # noqa: BLE001 - non-input element
+            count = scope.locator(self._BLANK_INPUT_SELECTOR).count()
+        except Exception:  # noqa: BLE001 - detached page
+            return []
+        boxes = []
+        for index in range(min(count, 30)):
+            box = scope.locator(self._BLANK_INPUT_SELECTOR).nth(index)
+            try:
+                # A hidden input is the platform's own bookkeeping, not an
+                # answer slot. An unknown state is kept: failing to answer
+                # because visibility could not be read would be worse.
+                if box.is_visible() is False:
+                    continue
+            except Exception:  # noqa: BLE001 - visibility not readable
+                pass
+            boxes.append(box)
+        return boxes
+
+    @staticmethod
+    def _read_box(box) -> str:
+        """Read a box's value, whether it is an input or contenteditable."""
+        try:
+            value = box.input_value()
+            if value is not None:
+                return str(value).strip()
+        except Exception:  # noqa: BLE001 - contenteditable has no input_value
+            pass
+        try:
+            return str(box.inner_text() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _write_box(box, value: str) -> None:
+        """Write one answer; contenteditable editors need keyboard input."""
+        try:
+            box.fill(value, timeout=6000)
             return
-        if landed and landed != text.strip():
-            box.fill(text, timeout=6000)
-            landed = str(box.input_value() or "").strip()
-            if landed != text.strip():
-                raise UplusError(
-                    f"填空题写入后页面内容不一致（期望 {text[:30]!r}，实际 {landed[:30]!r}）"
-                )
+        except Exception:  # noqa: BLE001 - contenteditable / non-input element
+            pass
+        box.click(timeout=6000)
+        # Clear whatever the editor holds, then type the real answer. This is
+        # the only reliable way with CKEditor/Quill-style widgets that refuse
+        # Playwright's ``fill``.
+        box.press("ControlOrMeta+A")
+        box.press("Delete")
+        box.type(value, timeout=6000)
+
+    def _answer_blank(self, page: Page, text: str,
+                      stem_text: str = "", occurrence: int = 0,
+                      expected: int = 0) -> None:
+        """Fill every blank of a fill-blank question and verify each one.
+
+        ``text`` is newline-separated when the question has several blanks;
+        one plain string when it has one. Each value goes into its own box
+        (in DOM order), and a value that does not stick raises instead of
+        letting a partially filled question pass the submit gate.
+        """
+        values = solver.split_blanks(text, expected)
+        if not values:
+            raise UplusError("填空题答案为空，无法写入")
+        scope = self._question_scope(page, stem_text, occurrence)
+        boxes = self._blank_boxes(scope)
+        if not boxes:
+            raise UplusError("填空题找不到答案输入框，无法写入")
+        if len(boxes) < len(values):
+            raise UplusError(
+                f"填空题有 {len(values)} 个答案，但页面只找到 {len(boxes)} 个输入框"
+            )
+        if expected > 1 and len(values) != expected:
+            raise UplusError(
+                f"填空题需要 {expected} 个答案，只收到 {len(values)} 个"
+            )
+        for index, value in enumerate(values):
+            box = boxes[index]
+            self._write_box(box, value)
+            landed = self._read_box(box)
+            if landed != value:
+                self._write_box(box, value)
+                landed = self._read_box(box)
+                if landed != value:
+                    raise UplusError(
+                        f"第 {index + 1} 空写入后页面内容不一致"
+                        f"（期望 {value[:30]!r}，实际 {landed[:30]!r}）"
+                    )
 
     def navigate_to_question(self, page: Page, position: int,
                              expected_stem: str = "") -> bool:
@@ -623,7 +702,8 @@ class HomeworkOperator:
             return normalized
         if qtype is QuestionType.FILL_BLANK:
             self._answer_blank(page, normalized, stem_text=stem,
-                               occurrence=occurrence)
+                               occurrence=occurrence,
+                               expected=models.count_blanks(question.stem))
             return normalized
         raise UplusError(f"题型 {qtype.label} 不支持自动作答")
 
@@ -860,13 +940,35 @@ class HomeworkOperator:
                         # be a partial multi-select (exactly the "漏选" failure),
                         # so it cannot be verified and must not pass silently.
                         unverifiable_partial = True
+                elif detail.type is QuestionType.FILL_BLANK:
+                    # A fill-blank with several blanks can be half filled: the
+                    # recorded answer then carries fewer values than the stem
+                    # has blanks (the reported "填空题答不上" symptom). Refill
+                    # it when the model has an answer, and otherwise refuse to
+                    # call it complete.
+                    blanks = models.count_blanks(detail.stem)
+                    if blanks > 1:
+                        filled = len(solver.split_blanks(detail.my_answer, blanks))
+                        if filled < blanks:
+                            raw_answer = (answers.get(detail.question_id)
+                                          or answers.get(str(detail.order)))
+                            if raw_answer is not None:
+                                need_refill = True
+                            else:
+                                unverifiable_partial = True
                 if not need_refill:
                     if unverifiable_partial:
-                        record_skip(
-                            detail,
-                            f"多选已答 {detail.my_answer}，但缺少模型答案，"
-                            "无法核对是否漏选",
-                        )
+                        if detail.type is QuestionType.FILL_BLANK:
+                            reason = (
+                                f"填空题已答 {detail.my_answer}，但缺少模型答案，"
+                                "无法补齐剩余空"
+                            )
+                        else:
+                            reason = (
+                                f"多选已答 {detail.my_answer}，但缺少模型答案，"
+                                "无法核对是否漏选"
+                            )
+                        record_skip(detail, reason)
                     else:
                         outcome["answered"] += 1
                         if detail.auto_answerable:

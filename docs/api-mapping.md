@@ -33,6 +33,17 @@
 > - `answer` 只在**出分后**返回；待批改时学生端 detail 没有该字段，作答页也只显示「我的答案」。此时本地答案簿 `reports/answer_journal.json`（工具成功提交时记录，已 gitignore）作为第二来源；两者都没有则题目进入 `unjudged`，不得当成已完成。
 > - `options[].optionContent` 可能是 `<p><code>&lt;property&gt;</code></p>` 这类代码块；`strip_html` 会得到完整文本 `<property>`，页面选项在 `label.el-radio` 内、input 的 `value` 为字母，按 value 定位即可点击。
 
+### 填空题（`qsnType=4`）按「空」逐格作答（0.8.5）
+
+填空题不是「一题一框」：题干里的每个空在作答页对应**一个**答案框，按 DOM 顺序与题干的空一一对应（如 `处理 GET 请求用____注解，处理 POST 请求用____注解。` 渲染为「答案一」「答案二」两个框）。旧实现只往第一个框写一个值，多空题永远只填第一格。
+
+- **数空**：`models.count_blanks(stem)` 统计题干里的下划线串（`____` / `＿＿` 等，单个 `_` 不算，避免把 `a_b` 当空）。
+- **审题包**：`Question.llm_prompt` 返回 `blank_count` 与对应 `answer_hint`（几个空就要求返回几行），`solver.build_answer_brief` 的 `instructions` 同样说明。
+- **答案归一化**：`solver.split_blanks` 接受换行分隔、JSON 数组字符串、中文分隔符（`；;｜|`）；**已知空数 > 1 时**才启用中文分隔符切分，避免单个含分号的答案被拆开。`normalize_answer` 对填空题返回换行拼接的规范形式，空数 > 1 而答案不足时报错。
+- **页面填写**：`operator._answer_blank` 枚举本题答案框（`input[type=text/search/number]`、`input:not([type])`、`input[placeholder]`、`textarea`、`[contenteditable=true]`，跳过隐藏框），按顺序逐格写入并逐格回读；回读不一致重试一次，仍不一致抛错，由提交闸门拦住半填的题。答案数多于输入框数同样报错。`contenteditable` 富文本编辑器不认 `fill` 时改为点击 + 全选删除 + 键入。
+- **半填写入流程**：已录答案的值数少于空数时，有模型答案整题重填，否则记入 `skipped_questions`（原因「无法补齐剩余空」）并阻止提交。
+- **审计**：`report.audit_questions` 对填空题逐值比对（平台拼接分隔符不同不算错），少填的空进 `partial` 并带 `missing_blanks`。
+
 ## 3. 页面路由
 
 | 页面 | 路由 |
@@ -71,7 +82,7 @@
 | 1 | 单选题 | 单个字母，如 `D` | `A/B/C/D` | ✅ |
 | 2 | 多选题 | 无分隔字母串，如 `ABCD`（平台侧已排序去重） | `A/B/C/D…` | ✅ |
 | 3 | 判断题 | `true` / `false` | 页面渲染「正确 / 错误」按钮，接口 `options` 为空 | ✅ |
-| 4 | 填空题 | 填空文本 | 文本输入框 | ✅（按题目文本作答） |
+| 4 | 填空题 | 填空文本（多空时按空取值） | 文本输入框 | ✅（按题目文本作答） |
 | 5 | 简答题 | 文本 / 附件 | 富文本或上传框 | ❌ 需本人 |
 | 6 | 编程题 | 代码 / 附件 | 代码编辑器或上传框 | ❌ 需本人 |
 | 7 | 附件题 | 附件 | 文件上传框 | ❌ 需本人上传文件 |
