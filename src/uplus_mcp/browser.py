@@ -213,7 +213,9 @@ class BrowserSession:
                     time.sleep(0.8)
                     continue
                 raise UplusError(
-                    f"页面请求失败（{type(exc).__name__}）：{exc}；当前页面 {page.url}"
+                    f"页面请求失败（{type(exc).__name__}）："
+                    f"{utils.redact_secrets(str(exc))}；"
+                    f"当前页面 {utils.redact_secrets(page.url)}"
                 ) from exc
             status = int(resp.get("status", 0))
             body = str(resp.get("body", ""))
@@ -230,22 +232,29 @@ class BrowserSession:
             if status == 401 or "login" in page.url.lower():
                 raise AuthExpiredError(
                     "U+ 登录态已过期，请在浏览器中重新登录后重试。"
-                    f"（HTTP {status}，页面 {page.url}，响应：{utils.redact_secrets(body[:200])}）"
+                    f"（HTTP {status}，页面 {utils.redact_secrets(page.url)}，"
+                    f"响应：{utils.redact_secrets(body[:200])}）"
                 )
             try:
                 payload = json.loads(body)
             except json.JSONDecodeError as exc:
-                last = {"status": status, "raw": body[:500]}
+                last = {"status": status,
+                        "raw": utils.redact_secrets(body[:500])}
                 if attempt < retries:
                     time.sleep(1.0)
                     continue
-                raise UplusError(f"接口返回非 JSON：{body[:200]}") from exc
+                raise UplusError(
+                    f"接口返回非 JSON：{utils.redact_secrets(body[:200])}"
+                ) from exc
             if status >= 400:
                 last = payload
                 if attempt < retries:
                     time.sleep(1.0)
                     continue
-                raise UplusError(f"接口 {url} 返回 {status}: {str(payload)[:200]}")
+                raise UplusError(
+                    f"接口 {utils.redact_secrets(url)} 返回 {status}: "
+                    f"{utils.redact_secrets(str(payload)[:200])}"
+                )
             return payload
         return last or {}
 
@@ -268,7 +277,17 @@ class BrowserSession:
 
         Both return the response body as bytes; a non-2xx status raises
         ``UplusError`` with the status and a short body excerpt.
+
+        The URL is validated with the same http/https allow-list as page
+        navigation before either fetch path runs: an attachment href of
+        ``file:///...`` (or another non-web scheme) is refused instead of
+        being handed to the browser's request context.
         """
+        try:
+            url = utils.safe_navigation_url(url, base_url=self.base_url)
+        except ValueError as exc:
+            raise UplusError(f"拒绝下载非 http/https 链接：{exc}") from exc
+        masked_url = utils.redact_secrets(url)
         page = self.page
         # Same-origin in-page fetch: carries the token and cookies.
         try:
@@ -306,14 +325,18 @@ class BrowserSession:
                 if resp.ok:
                     return resp.body()
                 raise UplusError(
-                    f"下载失败：HTTP {resp.status}（{url}），"
-                    f"响应：{resp.text()[:200]}"
+                    f"下载失败：HTTP {resp.status}（{masked_url}），"
+                    f"响应：{utils.redact_secrets(resp.text()[:200])}"
                 )
             except UplusError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise UplusError(f"下载请求失败：{exc}（{url}）") from exc
-        raise UplusError(f"无法下载 {url}：页内 fetch 失败且无可用请求上下文")
+                raise UplusError(
+                    f"下载请求失败：{utils.redact_secrets(str(exc))}"
+                    f"（{masked_url}）"
+                ) from exc
+        raise UplusError(
+            f"无法下载 {masked_url}：页内 fetch 失败且无可用请求上下文")
 
     def download_to(self, url: str, dest: Path) -> Path:
         """Download ``url`` to ``dest`` (confined to the IO roots) and return it.

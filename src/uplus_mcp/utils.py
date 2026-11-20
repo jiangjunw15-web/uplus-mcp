@@ -88,7 +88,8 @@ def extract_images(html: Optional[str]) -> list[str]:
 
 
 _TOKEN_KEY_RE = re.compile(
-    r'(?i)("?[a-z0-9_-]*(?:token|secret|password|api[_-]?key|authorization)"?\s*[=:]\s*)'
+    r'(?i)("?[a-z0-9_-]*(?:token|secret|password|api[_-]?key|authorization|'
+    r'signature|access[_-]?key(?:[_-]?id)?|credential|cookie)"?\s*[=:]\s*)'
     r'"?([^",\s}]{6,})"?'
 )
 
@@ -282,3 +283,30 @@ def resolve_io_path(raw: str | os.PathLike, allowed_roots: Iterable[Path],
     if must_exist and not resolved.is_file():
         raise FileNotFoundError(f"文件不存在: {resolved}")
     return resolved
+
+
+#: Windows device names. A file called ``CON.docx`` is not a normal file on
+#: Windows; a platform-supplied attachment name must never resolve to a device.
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def safe_filename(name: str, fallback: str = "file", max_len: int = 120) -> str:
+    """Turn a platform-supplied name into a safe local file name.
+
+    Removes path separators and control characters, strips leading/trailing
+    dots and spaces (Windows refuses or silently normalizes those), prefixes
+    Windows device names (``CON``, ``NUL``, ``COM1`` ...), and caps the length.
+    """
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "")
+    cleaned = cleaned.strip().strip(" .")
+    if not cleaned:
+        return fallback
+    stem = cleaned.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        cleaned = "_" + cleaned
+    cleaned = cleaned[:max_len].rstrip(" .")
+    return cleaned or fallback

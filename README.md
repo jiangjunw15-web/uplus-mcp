@@ -13,6 +13,39 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.10
+
+A full re-audit fixed the download path, error redaction and filename handling,
+and stopped opening pages for expired homework:
+
+- **Downloads use the navigation allow-list.** `BrowserSession.fetch_bytes` is
+  the single entry point for experiment attachments, handbook files, course
+  materials and templates; it used to hand any URL to the browser request
+  context. It now validates with `utils.safe_navigation_url` first, so
+  `file://`, `javascript:`, `blob:` and `data:` links are refused. Folder
+  traversal in `materials.walk` goes through the same check instead of calling
+  `page.goto` on a raw joined URL.
+- **Error redaction is wider.** `redact_secrets` now also masks `signature`,
+  `access_key(id)`, `credential` and `cookie`; API, 401, non-JSON, download
+  failure and request-error messages redact both the URL and the short response
+  body, so OSS signed query parameters and cookies never reach the model.
+- **One filename sanitizer.** `utils.safe_filename` removes path separators,
+  control characters and leading/trailing dots/spaces, prefixes Windows device
+  names (`CON`, `NUL`, `COM1` …) with `_`, and caps the length at 120. It is
+  used for attachments, handbook files, course materials and templates.
+- **Expired homework pages are skipped.** `uplus_list_homeworks(refresh_page_state=True)`,
+  `uplus_scan_course` and `uplus_patrol` open the answer page only for
+  unsubmitted, not-yet-expired homework; expired tasks still appear in the
+  report and takeover list from the API state.
+- **Launcher audit.** The CDP probe uses a fixed loopback URL with an `int()`
+  port; `subprocess.Popen` uses an argv list with `shell=False`. Bandit reports
+  no MEDIUM/HIGH findings.
+- **Tests.** 388 pass locally (including the two real headless-Chromium DOM
+  cases; CI without a Playwright browser skips those two and runs the other
+  386). `pip-audit` finds no known dependency vulnerabilities; `ruff F/B`
+  passes. New regressions cover `safe_filename`, signed-URL/cookie redaction,
+  `fetch_bytes` rejecting `file://`, and the expired-homework skip.
+
 ## What's new in 0.8.9
 
 The platform does not guarantee the order of its course, homework or experiment

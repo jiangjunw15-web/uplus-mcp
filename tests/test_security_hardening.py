@@ -281,3 +281,35 @@ def test_redact_secrets_masks_token_like_pairs():
 def test_redact_secrets_leaves_ordinary_text_untouched():
     assert utils.redact_secrets("登录态已过期") == "登录态已过期"
     assert utils.redact_secrets(None) == ""
+
+
+def test_redact_secrets_masks_signed_url_and_cookie_values():
+    """A cross-origin OSS link carries its credentials in the query string; an
+    error message must not echo them back to the model."""
+    url = ("https://oss.example/x?OSSAccessKeyId=LTAI5tFakeKey123"
+           "&Expires=123&Signature=sigvalue123")
+    out = utils.redact_secrets(url)
+    assert "LTAI5tFakeKey123" not in out
+    assert "sigvalue123" not in out
+    assert "OSSAccessKeyId" in out and "***" in out
+
+    cookie = "Cookie: cookievalue123 theme=dark"
+    assert "cookievalue123" not in utils.redact_secrets(cookie)
+
+
+def test_fetch_bytes_refuses_a_file_url_before_touching_the_page():
+    from uplus_mcp.browser import BrowserSession, UplusError
+
+    class _Page:
+        url = "https://www.eduplus.net/workbench/index/school"
+
+        def evaluate(self, *args, **kwargs):
+            raise AssertionError("page must not be touched for a rejected URL")
+
+    session = BrowserSession.__new__(BrowserSession)
+    session.base_url = "https://www.eduplus.net"
+    session._started = True
+    session._page = _Page()
+    session._context = None
+    with pytest.raises(UplusError, match="只允许 http/https"):
+        session.fetch_bytes("file:///C:/secrets.txt")

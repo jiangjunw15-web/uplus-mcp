@@ -97,9 +97,9 @@ def _scan_engine(tmp_path):
     cfg = Config(report_dir=str(tmp_path), courses=[course])
     client = Mock()
     client.list_homeworks.return_value = [
-        _task("late", "晚交作业", 2000),
-        _task("early", "早交作业", 1000),
-        _task("submitted", "已交作业", 900, submit_task="1"),
+        _task("late", "晚交作业", 4102444800002),
+        _task("early", "早交作业", 4102444800001),
+        _task("submitted", "已交作业", 4102444800000, submit_task="1"),
     ]
     client.list_questions.return_value = []
     operator = Mock()
@@ -154,6 +154,22 @@ class _ExpOp:
     def read_detail(self, *args):
         self.calls.append(args)
         return _Detail()
+
+
+def test_scan_course_skips_expired_homework_pages(tmp_path):
+    """An expired homework cannot be answered; opening its page only costs a
+    navigation. The API row is still returned for the report."""
+    engine, client, operator = _scan_engine(tmp_path)
+    client.list_homeworks.return_value = [
+        _task("expired", "已截止作业", 1000),
+        _task("open", "未截止作业", 4102444800000),
+    ]
+
+    result = engine.scan_course("c1", refresh_page_state=True)
+
+    assert [call.args[0].task_id for call in operator.open_homework.call_args_list] == [
+        "open"]
+    assert result["summary"]["homework_outstanding"] == 2
 
 
 def test_scan_course_can_verify_experiment_details_in_the_same_pass(tmp_path):

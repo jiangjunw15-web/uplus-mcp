@@ -517,8 +517,7 @@ def _template_priority(entry) -> int:
 
 def _safe_filename(name: str, fallback: str = "material") -> str:
     """Turn a platform-provided name into a safe local file name."""
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip().strip(".")
-    return cleaned[:120] or fallback
+    return utils.safe_filename(name, fallback)
 
 
 def _missing_sections(body: str, expected: list[str]) -> list[str]:

@@ -236,7 +236,9 @@ class PatrolEngine:
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
                 self._register(task)
-                if refresh_page_state and task.status is HomeworkStatus.NOT_SUBMITTED:
+                if (refresh_page_state
+                        and task.status is HomeworkStatus.NOT_SUBMITTED
+                        and not task.is_expired()):
                     error = self._read_task_page_state(task)
                     if error:
                         task.raw["page_error"] = error
@@ -324,7 +326,9 @@ class PatrolEngine:
         homeworks: list[dict] = []
         for task in tasks:
             self._register(task)
-            if refresh_page_state and task.status is HomeworkStatus.NOT_SUBMITTED:
+            if (refresh_page_state
+                    and task.status is HomeworkStatus.NOT_SUBMITTED
+                    and not task.is_expired()):
                 error = self._read_task_page_state(task)
                 if error:
                     task.raw["page_error"] = error
@@ -911,11 +915,13 @@ class PatrolEngine:
                 # The page button is the authoritative status. Read it for
                 # open homeworks as before, and for audited submitted ones so
                 # a graded homework is not misreported as withdrawable.
-                should_read_page = task.status is HomeworkStatus.NOT_SUBMITTED or (
-                    audit and task.status in (
+                should_read_page = (
+                    (task.status is HomeworkStatus.NOT_SUBMITTED
+                     and not task.is_expired())
+                    or (audit and task.status in (
                         HomeworkStatus.SUBMITTED_PENDING,
                         HomeworkStatus.SUBMITTED_GRADED,
-                    )
+                    ))
                 )
                 if should_read_page:
                     try:
@@ -1213,5 +1219,4 @@ def _experiment_sort_key(exp: Experiment) -> tuple:
 
 def _safe_stem(name: str, fallback: str = "experiment") -> str:
     """A safe local file name for a downloaded material."""
-    cleaned = re.sub(r'[<>:"/\|?*\x00-\x1f]', "_", name or "").strip().strip(".")
-    return cleaned[:120] or fallback
+    return utils.safe_filename(name, fallback)

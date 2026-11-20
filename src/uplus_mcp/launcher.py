@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404 - fixed argv list, no shell
 import sys
 import time
 import urllib.request
@@ -157,8 +157,8 @@ def default_ports(primary: int = DEFAULT_CDP_PORT) -> tuple[int, ...]:
 
 def cdp_alive(port: int, timeout: float = 1.5) -> bool:
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/json/version", timeout=timeout
+        with urllib.request.urlopen(  # nosec B310 - fixed loopback URL
+            f"http://127.0.0.1:{int(port)}/json/version", timeout=timeout
         ) as r:
             return r.status == 200
     except Exception:  # noqa: BLE001 - any failure means "not ready"
@@ -345,7 +345,8 @@ def launch_browser_with_cdp(
     creationflags = 0
     if sys.platform == "win32":
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen(args, creationflags=creationflags, close_fds=True)
+    subprocess.Popen(  # nosec B603 - argv list, no shell; exe from fixed candidates
+        args, creationflags=creationflags, close_fds=True, shell=False)
 
     deadline = time.time() + wait_seconds
     while time.time() < deadline:

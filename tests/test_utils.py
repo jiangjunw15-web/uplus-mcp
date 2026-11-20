@@ -42,6 +42,17 @@ def test_strip_html_cleans_whitespace_and_entities():
     assert utils.strip_html(None) == ""
 
 
+def test_safe_filename_removes_paths_and_windows_device_names():
+    assert utils.safe_filename("../../evil.docx") == "_.._evil.docx"
+    assert utils.safe_filename("CON.docx") == "_CON.docx"
+    assert utils.safe_filename("nul") == "_nul"
+    assert utils.safe_filename('a:b*c?.txt') == "a_b_c_.txt"
+    assert utils.safe_filename("报告.docx...") == "报告.docx"
+    assert utils.safe_filename("", "fallback") == "fallback"
+    assert utils.safe_filename(".", "fallback") == "fallback"
+    assert len(utils.safe_filename("x" * 200, "fallback")) == 120
+
+
 def test_deadline_labels():
     now = utils.now_ms()
     assert utils.deadline_label(now - 1000, now) == "已截止"

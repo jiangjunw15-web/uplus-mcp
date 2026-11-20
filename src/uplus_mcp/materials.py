@@ -268,10 +268,17 @@ def walk(
             if entry.kind != "folder":
                 continue
             try:
-                # Navigate into the folder and recurse.
+                # Navigate into the folder and recurse. A page-supplied href
+                # goes through the same http/https allow-list as normal
+                # navigation: a ``file://`` folder link must not read local
+                # files through the browser.
                 if entry.href:
-                    page.goto(urljoin(parent_url, entry.href),
-                              wait_until="domcontentloaded")
+                    try:
+                        target = utils.safe_navigation_url(
+                            entry.href, base_url=parent_url)
+                    except ValueError as exc:
+                        raise UplusError(f"资料文件夹链接被拒绝：{exc}") from exc
+                    page.goto(target, wait_until="domcontentloaded")
                 else:
                     # No href: the folder is a clickable row.
                     row = page.locator(f"text={re.escape(entry.name)}").first
@@ -302,9 +309,10 @@ def walk(
                     restored = page.url == parent_url
                 if not restored or not entry.href:
                     try:
-                        page.goto(parent_url, wait_until="domcontentloaded")
+                        page.goto(utils.safe_navigation_url(parent_url),
+                                  wait_until="domcontentloaded")
                         time.sleep(0.3)
-                    except (PWTimeout, UplusError):
+                    except (PWTimeout, UplusError, ValueError):
                         pass
 
     # Start from the course home page.
