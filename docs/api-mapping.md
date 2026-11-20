@@ -82,10 +82,15 @@
 | 账号 | `input[placeholder='请输入学号/工号']`（`input.el-input__inner`，`type=text`） |
 | 密码 | `input[type='password']`，placeholder「请输入密码」 |
 | 登录按钮 | `button.el-button--primary.el-button--large`，未填完时带 `is-disabled`；填写完成后再点击 |
-| 登录方式页签 | 「学号/工号登录」「短信登录」「密码登录」；默认密码登录 |
+| 登录方式页签 | 「学号/工号登录」「短信登录」「密码登录」；平台默认停在「学号/工号登录」，按所选方式切页签 |
 
-- `uplus_login(mode="manual")`：打开门户、点击登录入口进入表单，轮询等待 `localStorage.AccessToken` 出现且 URL 离开登录域；由用户在附加浏览器窗口自行选学校、填账号密码并提交。
-- `uplus_login(mode="auto", username, password, school)`：模型先询问账号、密码与学校，点击登录入口进入表单；先填学校远程搜索并下拉选中，再填账号 / 密码，等待主按钮解除 `is-disabled` 后点击；提交后等待会话 token 校验。凭据仅当次内存使用，不落盘、不进报告、不回显；找不到输入框、学校下拉匹配失败、出现验证码 / 短信 / 密码错误时回退手动模式并把窗口交还用户。
+- `uplus_login()`：无参调用返回第一窗口（`stage="owner"`，选项 `self` / `proxy`），只在附加窗口打开门户，不动表单。
+- `uplus_login(owner="self"|"proxy")`：返回第二窗口（`stage="method"`），三个选项 `student_id` / `sms` / `password`。
+- `uplus_login(owner, method="student_id", school, username, password)`：先按「学号/工号登录」页签切换，再在学校下拉里远程搜索并选中（学校为空或匹配不到直接报错，不盲提交），填账号 / 密码，等主按钮解除 `is-disabled` 后点击；字段不齐时返回第三窗口（`stage="credentials"`）并列出仍缺字段。
+- `uplus_login(owner, method="password", username, password)`：先切「密码登录」页签（页签找不到时按当前表单填并在结果里附注），填账号 / 密码后提交；不要求学校。
+- `uplus_login(owner, method="sms")`：只切到「短信登录」页签并把浏览器停在那里，返回 `stage="manual_sms"`、`manual=true`、当前 `url`；手机号与验证码由本人填写，工具不填不读不存。
+- 自动填写的两种方式提交后都轮询 `localStorage.AccessToken` 校验会话：成功返回 `stage="done"`，失败返回 `stage="login_failed"` 并附页面提示。凭据仅当次内存使用，返回前从结果里摘除，不落盘、不进报告、不回显。
+- 页签切换（`browser.switch_login_tab`）：先等三个页签渲染（默认 20 秒），只接受文字完全等于页签名、宽度 < 260px 的元素，点击异常时用 JS `click()` 兜底；点完读可见 `input` 的 `placeholder` 与按钮文字核对表单真的换了（学号页「请输入学号/工号」、密码页「请输入账号/手机号」、短信页「请输入手机号」或「获取验证码」），核对不过才返回 `False`。
 - 登录成功判定：`AccessToken` 非空且当前 URL 不含 `login`。
 
 ## 4. 题型编码（`qsnType`）

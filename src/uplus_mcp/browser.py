@@ -508,32 +508,118 @@ class BrowserSession:
         self._enter_login_form(page)
         return page
 
-    def auto_login(self, username: str, password: str, school: str = "",
-                   *, wait_ms: int = 20_000) -> dict[str, Any]:
-        """Fill the sign-in form and submit, then verify the session token.
+    #: Tab labels of the portal's three sign-in methods.
+    LOGIN_TAB_TEXTS = {
+        "student_id": ("学号/工号登录", "学号登录", "学号/工号"),
+        "sms": ("短信登录", "手机验证码登录", "验证码登录"),
+        "password": ("密码登录", "账号密码登录", "账号登录"),
+    }
 
-        Credentials live only for this call: they are not persisted to config,
-        reports or logs, and the returned status never echoes them back.
+    def switch_login_tab(self, page: Page, method: str, *, wait_ms: int = 20_000) -> bool:
+        """Click the sign-in tab that ``method`` needs and prove it took effect.
+
+        The portal opens on 学号/工号登录. ``password`` and ``sms`` live on their
+        own tabs, so the caller decides which tab to stand on instead of the
+        code defaulting to one method.
+
+        The login page renders its three tab labels late, so this waits for them
+        and only reports success once the form underneath actually changed to
+        that method's fields — a bare "click did not raise" is not enough.
         """
-        page = self.open(HOME_PATH)
-        if self._token_present(page) and "login" not in page.url.lower():
-            return {"logged_in": True, "mode": "auto", "note": "已是登录态，无需重复登录",
-                    "url": page.url, "token_len": len(
-                        str(page.evaluate("() => localStorage.getItem('AccessToken') || ''") or ""))}
+        labels = self.LOGIN_TAB_TEXTS.get(method, ())
+        deadline = time.time() + max(wait_ms, 1) / 1000
+        if self._tab_form_matches(page, method):
+            return True
+        while time.time() < deadline:
+            for label in labels:
+                try:
+                    count = min(page.locator(f"text={label}").count(), 8)
+                except Exception:  # noqa: BLE001 - page still rendering
+                    count = 0
+                for index in range(count):
+                    item = page.locator(f"text={label}").nth(index)
+                    try:
+                        if not item.is_visible():
+                            continue
+                        own = (item.evaluate("el => el.innerText.trim()") or "")
+                        box = item.bounding_box()
+                        # Only accept the label itself, not a container that
+                        # happens to contain all three labels.
+                        if own != label or not box or box["width"] > 260:
+                            continue
+                        try:
+                            item.click(timeout=4000)
+                        except Exception:  # noqa: BLE001 - overlay or fade
+                            item.evaluate("el => el.click()")
+                    except Exception:  # noqa: BLE001 - try the next candidate
+                        continue
+                    if self._wait_for_tab_form(page, method, timeout_ms=6000):
+                        return True
+            time.sleep(0.4)
+        return False
 
-        self._enter_login_form(page)
-        # The portal opens on 学号/工号登录, where the account box asks for a
-        # student/staff number and a school must be chosen. A phone-number
-        # account can only sign in from 密码登录, so switch first; when the tab
-        # is absent the old single-form behaviour still applies.
-        password_tab = self._switch_to_password_tab(page)
-        school_ok = True if password_tab else self._select_school(
-            page, school.strip())
+    #: Placeholders that prove the form really stands on the requested tab.
+    _LOGIN_TAB_MARKERS = {
+        "student_id": ("请输入学号/工号",),
+        "sms": ("请输入手机号", "获取验证码"),
+        "password": ("请输入账号/手机号",),
+    }
+
+    def _tab_form_matches(self, page: Page, method: str) -> bool:
+        """True when the visible form belongs to ``method``'s tab.
+
+        Placeholders are attributes, not body text, so this reads the live
+        inputs and buttons instead of ``inner_text``.
+        """
+        try:
+            state = page.evaluate(
+                """() => {
+                  const seen = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                  return {
+                    placeholders: [...document.querySelectorAll('input')]
+                      .filter(seen).map(el => el.getAttribute('placeholder') || ''),
+                    buttons: [...document.querySelectorAll('button')]
+                      .filter(seen).map(el => (el.innerText || '').trim()),
+                  };
+                }"""
+            )
+        except Exception:  # noqa: BLE001 - transient mid-navigation
+            return False
+        placeholders = " ".join(state.get("placeholders") or [])
+        buttons = " ".join(state.get("buttons") or [])
+        if method == "sms":
+            # The password tab also says 账号/手机号, so require the SMS-only cues.
+            return "请输入手机号" in placeholders or "获取验证码" in buttons
+        return all(m in placeholders for m in self._LOGIN_TAB_MARKERS.get(method, ()))
+
+    def _wait_for_tab_form(self, page: Page, method: str, *,
+                           timeout_ms: int = 6000) -> bool:
+        deadline = time.time() + max(timeout_ms, 1) / 1000
+        while time.time() < deadline:
+            if self._tab_form_matches(page, method):
+                return True
+            time.sleep(0.4)
+        return False
+
+    def _session_note(self, page: Page) -> Optional[dict[str, Any]]:
+        """A "already signed in" result when the attached browser carries a token."""
+        try:
+            if not (self._token_present(page) and "login" not in page.url.lower()):
+                return None
+            token = str(page.evaluate("() => localStorage.getItem('AccessToken') || ''") or "")
+            return {"logged_in": True, "note": "已是登录态，无需重复登录",
+                    "url": page.url, "token_len": len(token)}
+        except Exception:  # noqa: BLE001 - page mid-navigation
+            return None
+
+    def _submit_credentials(self, page: Page, username: str, password: str, *,
+                            method: str, wait_ms: int, notes: tuple[str, ...] = ()) -> dict[str, Any]:
+        """Fill the account/password boxes, submit, and verify the token."""
         user_box = self._first_visible(page, self._USER_SELECTORS)
         pass_box = self._first_visible(page, self._PASS_SELECTORS)
         if user_box is None or pass_box is None:
             return {
-                "logged_in": False, "mode": "auto",
+                "logged_in": False, "method": method,
                 "reason": "未识别到账号/密码输入框，请改用手动登录",
                 "url": page.url,
                 "body_hint": page.inner_text("body")[:300],
@@ -548,14 +634,91 @@ class BrowserSession:
         time.sleep(1.0)
         status = self.wait_for_session(timeout_ms=wait_ms)
         if status["logged_in"]:
-            return {"logged_in": True, "mode": "auto", "note": "自动登录成功",
+            return {"logged_in": True, "method": method, "note": "自动登录成功",
                     "url": status["url"], "token_len": status["token_len"]}
         reason = "提交后未检测到登录成功，可能是账号密码错误、学校未选对，或需要短信/图形验证码"
-        if not school_ok:
-            reason += "；学校下拉未能自动选中，请改用手动登录"
+        for note in notes:
+            reason += f"；{note}"
         return {
-            "logged_in": False, "mode": "auto",
+            "logged_in": False, "method": method,
             "reason": reason,
             "url": status["url"],
             "body_hint": page.inner_text("body")[:300],
         }
+
+    def login_by_student_id(self, username: str, password: str, school: str, *,
+                            wait_ms: int = 30_000) -> dict[str, Any]:
+        """Sign in with 学号/工号 + school + password.
+
+        This tab needs the school chosen first; a school that cannot be matched
+        is reported instead of submitting credentials against a wrong school.
+        """
+        page = self.open(HOME_PATH)
+        note = self._session_note(page)
+        if note:
+            return {"method": "student_id", **note}
+        self._enter_login_form(page)
+        self.switch_login_tab(page, "student_id")
+        school = (school or "").strip()
+        if not school:
+            return {"logged_in": False, "method": "student_id",
+                    "reason": "学号/工号登录需要学校名称", "url": page.url}
+        if not self._select_school(page, school):
+            return {"logged_in": False, "method": "student_id",
+                    "reason": f"学校「{school}」未能在下拉里选中，请确认学校全名",
+                    "url": page.url,
+                    "body_hint": page.inner_text("body")[:300]}
+        return self._submit_credentials(page, username, password,
+                                        method="student_id", wait_ms=wait_ms)
+
+    def login_by_password(self, username: str, password: str, *,
+                          wait_ms: int = 30_000) -> dict[str, Any]:
+        """Sign in with 手机号/账号 + password on the 密码登录 tab."""
+        page = self.open(HOME_PATH)
+        note = self._session_note(page)
+        if note:
+            return {"method": "password", **note}
+        self._enter_login_form(page)
+        tab_ok = self.switch_login_tab(page, "password")
+        return self._submit_credentials(
+            page, username, password, method="password", wait_ms=wait_ms,
+            notes=() if tab_ok else ("未能切到密码登录标签页，按当前表单填写",),
+        )
+
+    def open_sms_login(self) -> dict[str, Any]:
+        """Open the 短信登录 tab and hand over: nothing is filled here.
+
+        The phone number and the verification code are the human's to enter;
+        this call only parks the browser on the right tab and reports the URL so
+        the caller can finish by hand.
+        """
+        page = self.open(HOME_PATH)
+        note = self._session_note(page)
+        if note:
+            return {"method": "sms", **note}
+        self._enter_login_form(page)
+        tab_ok = self.switch_login_tab(page, "sms")
+        body = ""
+        try:
+            body = page.inner_text("body")[:300]
+        except Exception:  # noqa: BLE001 - mid-navigation
+            pass
+        return {
+            "logged_in": False, "method": "sms", "manual": True,
+            "tab_selected": tab_ok, "url": page.url,
+            "reason": "" if tab_ok else "未能切到短信登录标签页，请在页面上手动选择「短信登录」",
+            "body_hint": body,
+        }
+
+    def auto_login(self, username: str, password: str, school: str = "",
+                   *, wait_ms: int = 20_000, method: str = "password") -> dict[str, Any]:
+        """Backward-compatible entry point: route to the chosen method.
+
+        ``method="student_id"`` needs ``school``; ``method="password"`` ignores it.
+        Nothing here picks a method on its own: the caller (``engine.login``)
+        only reaches this after the user answered the method dialog.
+        """
+        if method == "student_id":
+            return self.login_by_student_id(username, password, school, wait_ms=wait_ms)
+        return self.login_by_password(username, password, wait_ms=wait_ms)
+

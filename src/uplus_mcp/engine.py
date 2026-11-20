@@ -15,7 +15,7 @@ from .experiment import ExperimentOperator
 from .models import HomeworkStatus, HomeworkTask, QuestionType
 from .operator import HomeworkOperator, classify_experiment_flag
 from .platform import PlatformClient
-from . import journal, solver, utils
+from . import journal, login_flow, solver, utils
 
 
 class PatrolEngine:
@@ -73,42 +73,80 @@ class PatrolEngine:
                 "message": "登录有效" if logged else
                 "登录态已过期：请在插件启动的浏览器窗口中打开 eduplus.net 重新登录，然后重试本工具。"}
 
-    def login(self, mode: str = "manual", username: str = "",
+    def login(self, owner: str = "", method: str = "", username: str = "",
               password: str = "", school: str = "",
               wait_timeout_ms: int = 120_000) -> dict:
-        """Sign in through one of two agreed flows.
+        """Sign in through the three dialogs the user answers, in order.
 
-        ``manual`` opens the portal and waits for the human to finish signing in
-        in the attached browser window. ``auto`` fills the school selector, account
-        and password after the model asked the user for them; credentials are
-        used only for this call and are never persisted or echoed back.
+        Nothing is defaulted: an empty ``owner`` returns dialog 1, an empty
+        ``method`` returns dialog 2, and an auto-filled method whose fields are
+        still empty returns dialog 3. Only when all three answers are in does
+        the tool touch the sign-in form.
+
+        ``method="sms"`` never fills anything: it parks the browser on the 短信
+        登录 tab and hands the phone number and verification code to the human.
+        ``method="student_id"`` requires ``school`` besides account and password;
+        ``method="password"`` needs only the phone/account and password.
         """
-        mode = (mode or "manual").strip().lower()
-        if mode == "auto":
-            if not username.strip() or not password.strip():
-                return {"logged_in": False, "mode": "auto",
-                        "reason": "自动登录前必须先向用户询问账号与密码；缺少凭据时改用手动登录。"}
-            # Auto fill never waits the full manual timeout: a failed submit
-            # should fall back to a human quickly, so the wait is capped.
-            result = self.session.auto_login(
-                username.strip(), password, school.strip(),
-                wait_ms=min(int(wait_timeout_ms), 30_000),
-            )
-            # Strip any accidental credential echo before returning to the model.
-            result.pop("username", None)
-            result.pop("password", None)
-            result.pop("school", None)
-            return result
+        owner_key = login_flow.normalize_owner(owner)
+        if not owner_key:
+            return login_flow.owner_prompt()
+        method_key = login_flow.normalize_method(method)
+        if not method_key:
+            return login_flow.method_prompt(owner_key)
 
-        self.session.open_login_page()
-        status = self.session.wait_for_session(timeout_ms=int(wait_timeout_ms))
-        if status["logged_in"]:
-            return {"logged_in": True, "mode": "manual",
-                    "note": "手动登录成功", "url": status["url"],
-                    "token_len": status["token_len"]}
-        return {"logged_in": False, "mode": "manual",
-                "reason": "等待超时：未检测到登录成功，请在浏览器窗口完成登录后重试。",
-                "url": status["url"]}
+        if method_key == "sms":
+            result = self.session.open_sms_login()
+            if result.get("logged_in"):
+                # Nothing to hand over: the browser already holds a session.
+                return {
+                    "logged_in": True,
+                    "stage": "done",
+                    "owner": owner_key,
+                    "method": "sms",
+                    "note": result.get("note", "已是登录态，无需重复登录"),
+                    "url": result.get("url", ""),
+                }
+            prompt = login_flow.sms_manual_prompt(result.get("url", ""), owner=owner_key)
+            for key in ("tab_selected", "reason", "body_hint"):
+                if key in result:
+                    prompt[key] = result[key]
+            return prompt
+
+        required = (("school", "username", "password") if method_key == "student_id"
+                    else ("username", "password"))
+        values = {
+            "school": (school or "").strip(),
+            "username": (username or "").strip(),
+            "password": password or "",
+        }
+        missing = [name for name in required if not values[name]]
+        if missing:
+            prompt = login_flow.credentials_prompt(method_key, missing)
+            prompt["owner"] = owner_key
+            return prompt
+
+        # Auto fill never waits the full manual timeout: a failed submit should
+        # fall back to a human quickly.
+        wait_ms = min(int(wait_timeout_ms), 30_000)
+        if method_key == "student_id":
+            result = self.session.login_by_student_id(
+                values["username"], values["password"], values["school"],
+                wait_ms=wait_ms,
+            )
+        else:
+            result = self.session.login_by_password(
+                values["username"], values["password"], wait_ms=wait_ms,
+            )
+        # Strip any accidental credential echo before returning to the model.
+        for key in ("username", "password", "school"):
+            result.pop(key, None)
+        result.update({
+            "owner": owner_key,
+            "method": method_key,
+            "stage": "done" if result.get("logged_in") else "login_failed",
+        })
+        return result
 
     def list_courses(self) -> list[dict]:
         return [

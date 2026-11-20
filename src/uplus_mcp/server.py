@@ -105,31 +105,38 @@ async def uplus_check_login() -> dict:
 
 @mcp.tool()
 async def uplus_login(
-    mode: str = "manual",
+    owner: str = "",
+    method: str = "",
     username: str = "",
     password: str = "",
     school: str = "",
     wait_timeout_ms: int = 120000,
 ) -> dict:
-    """Sign in to U+ through the attached browser session. Ask the user which
-    flow they prefer BEFORE calling:
+    """Sign in to U+ by asking the user three questions, in this order. Never
+    assume a login method and never pass credentials the user has not given.
 
-    - ``mode="manual"``: open the portal and wait for the user to sign in by
-      themselves in the visible browser window; no account or password is needed.
-    - ``mode="auto"``: the model first asks the user for their account,
-      password and school name, then fills the sign-in form, submits and
-      verifies the session. Credentials are used only for this call: never
-      persisted to config, reports or logs, and never echoed back. The wait is
-      capped at 30 s so a failed auto fill hands over to ``manual`` quickly.
-      If auto fill cannot find the fields, the school selector cannot be
-      matched, or a captcha / SMS / wrong-password prompt appears, fall back to
-      ``manual`` and hand the window to the user.
+    Call with no arguments first: the result carries ``stage: "owner"`` and two
+    options (自己登录 / 代登录). Show that question to the user, then call again
+    with ``owner``.
 
-    Returns ``logged_in``, the chosen mode, current URL and token length.
+    * ``stage: "method"`` — three options: 学号/工号登录 (``student_id``),
+      短信验证码登录 (``sms``), 手机号/账号密码登录 (``password``). Show the
+      options and let the user pick; nothing is defaulted.
+    * ``stage: "credentials"`` — the fields that method needs. ``student_id``
+      asks 学校 + 学号/工号 + 密码; ``password`` asks 手机号或账号 + 密码.
+      Show the fields as a form, then call again with those values.
+    * ``stage: "manual_sms"`` — the browser is parked on the 短信登录 tab and
+      nothing is filled: the user types the phone number and the verification
+      code in the browser themselves. Verify later with ``uplus_check_login``.
+
+    Only ``student_id`` and ``password`` are auto-filled and submitted.
+    Credentials are used for this call only: never persisted to config, reports
+    or logs, and never echoed back in the result.
     """
     return await _thread.run_async(
-        _dispatch("login", mode, username=username, password=password,
-                  school=school, wait_timeout_ms=wait_timeout_ms)
+        _dispatch("login", owner=owner, method=method, username=username,
+                  password=password, school=school,
+                  wait_timeout_ms=wait_timeout_ms)
     )
 
 

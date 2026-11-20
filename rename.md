@@ -155,7 +155,7 @@
 | 2 个人配置（可选） | 复制 `courses.example.json` 为 `courses.json` | 文件存在；留空也能用，自动拉在线课程 |
 | 3 注册 MCP 客户端 | 把 stdio 命令填进客户端配置并重启 | 客户端工具列表出现 `uplus_*` / `browse_*` |
 | 4 启动浏览器会话 | 调用 `browse_launch_edge` | 返回端口号，`uplus_check_login` 可连接 |
-| 5 选择登录方式 | **先问用户**手动 / 自动，再调 `uplus_login` | `logged_in: true`，能看到工作台 |
+| 5 登录 | **按三窗口逐项问**：自己/代登录 → 登录方式 → 登录信息，再带参数调 `uplus_login` | `stage="done"` 且 `logged_in: true`，能看到工作台 |
 | 6 巡检 | `uplus_list_courses` → `uplus_patrol` | 返回课程、作业、实验统计与报告路径 |
 | 6+ 完整性核查 | `uplus_patrol()`（默认核查）或 `uplus_audit_homework` | 已交作业里没有漏答/多选漏选；`unjudged` 单独看待 |
 | 6++ 撤回补交 | 按 `repair_briefs` 作答 → `uplus_repair_homework` | 返回 `withdrawn: true`、`submitted: true`、`audit_after.complete: true` |
@@ -355,34 +355,32 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 
 ---
 
-## 第 5 步：选择登录方式（AI 必须先问，禁止替用户默认）
+## 第 5 步：三窗口问清登录（AI 必须逐个问，禁止替用户默认）
 
 ### AI 动作（顺序不能乱）
 
-1. **先向用户提问二选一**，把两种方式讲清楚：
-   - **手动登录（`manual`，推荐）**：AI 打开门户，用户在眼前浏览器窗口里自己选学校、填账号密码并提交；AI 只等待会话 token 出现，全程不要账号密码。
-   - **自动登录（`auto`）**：AI 先分别询问**账号、密码、学校名称**，再依次填写学校远程搜索下拉、账号、密码，提交并校验会话。
-2. 用户选定后调用 `uplus_login`：
-   - 手动：`uplus_login(mode="manual", wait_timeout_ms=120000)`。
-   - 自动：`uplus_login(mode="auto", username=..., password=..., school=..., wait_timeout_ms=120000)`。
+1. **第一窗口：自己登录还是代登录** —— 调 `uplus_login()`，工具返回 `stage="owner"`，原话把两个选项讲给用户：自己登录（`self`）/ 代别人登录（`proxy`）。
+2. **第二窗口：用哪种方式登** —— 拿 owner 再调 `uplus_login(owner=...)`，返回 `stage="method"`，把三个选项讲清楚：
+   - **学号·工号登录（`student_id`）**：需要学校、账号、密码；学校必须选，选错登不上。
+   - **短信验证码登录（`sms`）**：工具只把浏览器停在短信页签，手机号和验证码由用户自己在窗口里填，AI 不填也不问。
+   - **手机号·账号密码登录（`password`）**：只要账号（手机号）和密码，不需要学校。
+3. **第三窗口：填登录信息** —— 调 `uplus_login(owner=..., method=...)`，返回 `stage="credentials"` 并列出 `fields` / `missing`；把缺的字段问齐后带上参数再调一次：学号·工号 `school` + `username` + `password`；手机号密码 `username` + `password`。
+4. 字段齐全时工具自己填表、点登录并校验会话，不需要用户再动手；短信方式则返回 `stage="manual_sms"` 和 `url`，提示用户在该窗口自行填写。
 
 ### 成功信号
 
-- 工具返回 `logged_in: true`、当前 URL 已离开登录域、`token_len > 0`；再调 `uplus_check_login` 复核一次返回登录有效。
+- 自动填写的两种方式返回 `stage="done"`、`logged_in: true`、当前 URL 已离开登录域、`token_len > 0`；再调 `uplus_check_login` 复核一次返回登录有效。
+- 短信方式返回 `stage="manual_sms"`、`manual: true`；用户填完后再调 `uplus_check_login` 确认。
 
 ### 隐私红线（AI 必须遵守）
 
-- 自动模式的账号、密码、学校名**仅用于当次调用**：不写进 `courses.json`、报告、日志、聊天记录，不在工具结果里回显，不保存到任何文件。
-- 不要主动索要、不要重复抄写、不要把密码放进命令行参数记录。
+- 账号、密码、学校名**仅用于当次调用**：不写进 `courses.json`、报告、日志、聊天记录，不在工具结果里回显，不保存到任何文件。
+- 短信方式的手机号与验证码完全不经手：不要索要、不要代填、不要读取输入框。
 
-### 失败回退（自动模式遇到以下任一情况，立即回退手动）
+### 失败回退
 
-- 找不到账号 / 密码输入框；
-- 学校下拉远程搜索后匹配不到选项；
-- 出现图形验证码、短信验证码、滑块；
-- 提示密码错误、账号锁定。
-
-回退时调用 `uplus_login(mode="manual")`，把窗口交还用户完成登录。
+- 工具返回 `stage="login_failed"`，先读 `reason` / `body_hint`：多为账号密码错误、学校未选对、需要图形验证码。
+- 学校下拉匹配不到时不要反复试，改让用户确认学校全称；仍不行就改用短信验证码方式，让用户自己在窗口里登。
 
 ---
 

@@ -13,6 +13,32 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.7
+
+Signing in no longer has a default. `uplus_login` used to offer manual/auto,
+with auto hard-wired to the password tab. It now asks the person in three
+dialogs and only acts once it has answers:
+
+- **Dialog 1 — who is signing in** (`stage="owner"`): yourself, or on someone
+  else's behalf. On-behalf is carried back as a marker.
+- **Dialog 2 — how** (`stage="method"`): student/employee ID, SMS code, or
+  phone/account + password.
+- **Dialog 3 — the details** (`stage="credentials"`): only the fields that
+  method needs, plus which ones are still missing. Student ID requires a school;
+  phone/password does not ask for one.
+- Only a complete set triggers a fill-and-submit; result is
+  `stage="done"` on success or `stage="login_failed"` on failure.
+- **SMS sign-in parks the browser on the SMS tab** (`stage="manual_sms"`):
+  the person types the phone number and code; the tool never fills, reads or
+  stores them.
+- **Tab switching is verified, not assumed**: it waits for the three labels to
+  render, only clicks the element whose text is exactly the label, then confirms
+  the form really changed by reading the visible inputs' placeholders. If it
+  cannot, the result carries `tab_selected: false` so you can pick the tab
+  yourself.
+- Credentials stay in memory for that call, are stripped before the result is
+  returned, and never reach config, reports or logs.
+
 ## What's new in 0.8.6
 
 A real course pack mislabels a plain fill-in-the-blank sentence as a programming
@@ -759,16 +785,20 @@ Leaving `courses` empty makes the server fetch the live course list after sign-i
 
 ### 3. Sign in
 
-Ask the MCP client to run `uplus_login`:
+Ask the MCP client to run `uplus_login`. The tool never assumes a login method;
+it asks three questions in order and only then touches the form:
 
-- `mode="manual"`: the portal opens in the attached browser window; finish
-  signing in yourself, and the tool waits until the session token appears.
-- `mode="auto"`: the model first asks for your account, password and school
-  name, fills the school selector, account and password fields, submits and
-  verifies the session. Credentials are used only for that call and are never
-  saved or echoed back. If the form cannot be found, the school selector cannot
-  be matched, or a captcha / SMS code / wrong-password prompt appears, fall back
-  to manual mode.
+1. **Who is signing in** — yourself, or someone else on their behalf.
+2. **How to sign in** — student/employee ID, SMS code, or phone/account + password.
+3. **The details** — student ID method needs school, account and password; the
+   phone/password method needs only account and password. Once all fields are
+   present the tool fills them, submits and verifies the session. Credentials
+   live in memory for that call only: never saved, never in reports, never
+   echoed back in the tool result.
+
+**SMS-code sign-in is handed to you**: the tool only parks the browser on the
+SMS tab, and you type the phone number and code yourself. The model never fills
+or sees them.
 
 If the debug port is not listening yet, call `browse_launch_edge` once; it copies
 the browser profile to a dedicated directory and starts Edge or Chrome with the
@@ -814,7 +844,7 @@ Code examples.
 
 | Tool | Description |
 | --- | --- |
-| `uplus_login` | Sign in by `manual` takeover or `auto` fill (account, password, school); ask the user which mode first |
+| `uplus_login` | Three-dialog sign-in: owner (self / on behalf) → method (student ID / SMS / phone+password) → credentials; student ID and password methods auto-fill and submit, SMS parks the page for the human |
 | `uplus_check_login` | Verify whether the attached browser session is signed in |
 | `uplus_list_courses` | List courses under the signed-in account |
 | `uplus_list_homeworks` | List homework status; open answer pages to verify button truth on demand |
@@ -963,9 +993,10 @@ tests/            unit tests
 - Keep `config/courses.json` and `reports/` local; they are listed in `.gitignore`.
 - Do not commit student IDs, names, phone numbers, email addresses, cookies or
   tokens.
-- The server never persists your password; `uplus_login` auto-mode uses
-  credentials only for the current call and never writes them to config, reports
-  or logs or echoes them back in tool results.
+- The server never persists your password; `uplus_login` uses credentials only
+  for the current call and never writes them to config, reports or logs, and
+  never echoes them back in tool results. The SMS-code method is handled entirely
+  by you in the browser, so the tool never receives a phone number or code.
 
 ## License
 
