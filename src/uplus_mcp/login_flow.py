@@ -171,7 +171,7 @@ def sms_manual_prompt(url: str = "", owner: str = "") -> dict:
         "manual": True,
         "url": url,
         "question": "页面已停在短信登录，请在浏览器里填手机号并点「获取验证码」完成登录",
-        "note": ("这条登录方式不代填：手机号与验证码由本人在浏览器里输入。登录完成后调用 "
-                 "uplus_check_login 复核即可。"),
+        "note": ("这条登录方式不代填：短信页还有滑块验证，需要你按住滑块拖到最右侧，"
+                 "再输入手机号和验证码。登录完成后调用 uplus_check_login 复核即可。"),
         "next": "登录完成后调用 uplus_check_login",
     }
