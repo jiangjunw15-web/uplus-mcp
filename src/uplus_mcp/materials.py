@@ -18,9 +18,8 @@ from urllib.parse import urljoin
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
-from .browser import BrowserSession, UplusError, AuthExpiredError
-from .config import Config
 from . import utils
+from .browser import BrowserSession, UplusError
 
 
 # --------------------------------------------------------------------------- #
@@ -173,6 +172,12 @@ def list_folder(page: Page) -> list[MaterialEntry]:
                 if not name:
                     continue
                 href = name_el.get_attribute("href") or ""
+                # A relative href is resolved against the folder page it was
+                # found on. ``walk`` returns to the root listing afterwards, so
+                # a raw relative href would later download from the wrong
+                # folder (or fail outright).
+                if href:
+                    href = urljoin(page.url, href)
                 # Size column: look for a sibling or child with a size-like text.
                 size = ""
                 for cell in row.locator("td, span, div").all():
@@ -359,5 +364,5 @@ def download(
         # ``Download.save_as`` returns None; the destination is what we chose.
         dl.save_as(str(safe_dest))
         return safe_dest
-    except PWTimeout:
-        raise UplusError(f"下载超时（{entry.name}），请检查该条目是否可下载")
+    except PWTimeout as exc:
+        raise UplusError(f"下载超时（{entry.name}），请检查该条目是否可下载") from exc

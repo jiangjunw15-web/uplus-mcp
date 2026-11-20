@@ -38,3 +38,28 @@ def test_include_expired_courses_reads_from_config_file(tmp_path):
     cfg = load_config(str(cfg_file))
     assert cfg.include_expired_courses is True
 
+
+def test_string_false_booleans_do_not_turn_true(tmp_path):
+    """``bool("false")`` is True; config flags written as strings must parse."""
+    cfg_file = tmp_path / "courses.json"
+    cfg_file.write_text(
+        '{"auto_launch_browser": "false", "include_expired_courses": "0", '
+        '"courses": []}',
+        encoding="utf-8",
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg.auto_launch_browser is False
+    assert cfg.include_expired_courses is False
+
+
+def test_string_true_booleans_are_enabled(tmp_path):
+    cfg_file = tmp_path / "courses.json"
+    cfg_file.write_text(
+        '{"auto_launch_browser": "true", "include_expired_courses": "1", '
+        '"courses": []}',
+        encoding="utf-8",
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg.auto_launch_browser is True
+    assert cfg.include_expired_courses is True
+

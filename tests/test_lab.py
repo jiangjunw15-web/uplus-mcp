@@ -25,7 +25,6 @@ from uplus_mcp.experiment import (
     _template_matcher,
     _template_priority,
     Attachment,
-    _NameOnly,
 )
 from uplus_mcp.models import Course, Experiment
 from uplus_mcp.operator import HomeworkOperator
@@ -220,6 +219,72 @@ def test_list_folder_returns_structured_entries():
     assert [e.name for e in entries] == ["实验一", "实验报告模板.docx"]
     assert entries[0].kind == "folder"
     assert entries[1].href == "http://x/t.docx"
+
+
+class _HrefName:
+    def __init__(self, href):
+        self.href = href
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1
+
+    def inner_text(self):
+        return "实验一 指导书.docx"
+
+    def get_attribute(self, name):
+        return self.href if name == "href" else None
+
+
+class _HrefRow:
+    def __init__(self, href):
+        self.name_el = _HrefName(href)
+
+    def locator(self, selector):
+        if selector == "a, [role='button'], .name, .title":
+            return self.name_el
+        return _EmptyCells()
+
+
+class _EmptyCells:
+    def all(self):
+        return []
+
+
+class _HrefRows:
+    def __init__(self, row):
+        self.row = row
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        return self.row
+
+
+class _HrefPage:
+    """Fake table-layout 资料 page (strategy 1) with a relative file href."""
+
+    url = "https://www.eduplus.net/course/course/c1/MaterialPage"
+
+    def __init__(self, href):
+        self.row = _HrefRow(href)
+
+    def locator(self, selector):
+        if selector == ".el-table__row":
+            return _HrefRows(self.row)
+        return _EmptyLocator()
+
+
+def test_list_folder_resolves_relative_hrefs_against_the_folder_page():
+    """A relative file href must not be fetched from the root listing later."""
+    page = _HrefPage("download/exp1.docx")
+    entries = materials.list_folder(page)
+    assert entries[0].href == (
+        "https://www.eduplus.net/course/course/c1/download/exp1.docx")
 
 
 class _TreeLocator:

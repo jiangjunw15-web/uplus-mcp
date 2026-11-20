@@ -169,8 +169,10 @@ class PatrolEngine:
                 f"未找到课程 {course_id}（不存在，或已过期被默认过滤）。"
                 "请确认课程 ID；如需包含已结课课程，请在配置中设置 include_expired_courses=true。"
             )
-        if not targets:
-            targets = self.client.list_my_courses()
+        # Do not widen to the live account list here: ``_iter_courses`` already
+        # falls back to it only when no course is configured. Widening when
+        # every configured course is expired used to silently list unrelated
+        # live courses the user never selected for patrol.
         rows: list[dict] = []
         for course in targets:
             for task in self.client.list_homeworks(course.id):
@@ -238,10 +240,17 @@ class PatrolEngine:
                     detail = exp_op.read_detail(course_id, e.exp_id,
                                                 e.stu_exp_id)
                     row["status"] = detail.status
-                    row["submitted"] = classify_experiment_flag(
-                        detail.status, "")
+                    verified = classify_experiment_flag(detail.status, "")
+                    if verified is None:
+                        # The detail page opened but its submission state could
+                        # not be read. Keep the list badge rather than
+                        # overwriting it with None; say why in the source.
+                        row["submitted_source"] = (
+                            "list_badge（详情页未给出可识别的提交状态）")
+                    else:
+                        row["submitted"] = verified
+                        row["submitted_source"] = "detail_page"
                     row["submitted_files"] = list(detail.submitted_files)
-                    row["submitted_source"] = "detail_page"
                 except Exception as exc:  # noqa: BLE001 - keep the list usable
                     row["submitted_source"] = f"list_badge（复核失败：{exc}）"
             rows.append(row)

@@ -7,8 +7,6 @@ then touches the sign-in form. The SMS method is handed to the human entirely.
 
 from unittest.mock import Mock
 
-import pytest
-
 from uplus_mcp import login_flow
 from uplus_mcp.browser import BrowserSession
 from uplus_mcp.config import Config

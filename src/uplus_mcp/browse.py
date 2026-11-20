@@ -135,8 +135,8 @@ class BrowseTools:
         """
         try:
             data = page.evaluate(script, max_nodes)
-        except PWTimeout:
-            raise UplusError("页面快照超时，页面可能仍在加载")
+        except PWTimeout as exc:
+            raise UplusError("页面快照超时，页面可能仍在加载") from exc
         data["bodyText"] = (data.get("bodyText") or "")[:MAX_TEXT]
         return data
 
@@ -144,8 +144,8 @@ class BrowseTools:
         page = self.session.page
         try:
             text = page.inner_text(selector)
-        except PWTimeout:
-            raise UplusError(f"未找到元素：{selector}")
+        except PWTimeout as exc:
+            raise UplusError(f"未找到元素：{selector}") from exc
         return {"selector": selector, "text": text[:MAX_TEXT], "truncated": len(text) > MAX_TEXT}
 
     def eval_js(self, expression: str) -> Any:

@@ -19,7 +19,6 @@ from uplus_mcp.models import HomeworkTask, Question, QuestionType, count_blanks
 from uplus_mcp.operator import HomeworkOperator
 from uplus_mcp.solver import build_answer_brief, normalize_answer, split_blanks
 from uplus_mcp.report import audit_questions
-from uplus_mcp import utils
 from unittest.mock import Mock
 
 
@@ -46,7 +45,7 @@ class _BlankLocator:
         return self
 
     def count(self):
-        if self._selector == "input[type=text], input[type=search], input[type=number], input:not([type]), input[placeholder], textarea, [contenteditable=true]:not([contenteditable=false])":
+        if "textarea" in self._selector:
             return len(self._page.boxes)
         return 0
 
@@ -305,6 +304,174 @@ def test_a_contenteditable_box_gets_the_answer_typed_into_it():
     assert out == "@GetMapping\n@PostMapping"
     assert rich.boxes[0].value == "@GetMapping"
     assert page.boxes[1].value == "@PostMapping"
+
+
+# --------------------------------------------------------------------------- #
+# live layout: 「答案一/答案二」 textarea boxes with a placeholder hint
+# --------------------------------------------------------------------------- #
+class _HintBox:
+    """A textarea/input handle with the live page's placeholder hint."""
+
+    def __init__(self, placeholder: str, value: str = ""):
+        self.placeholder = placeholder
+        self.value = value
+        self.fill_calls = 0
+
+    def get_attribute(self, name):
+        return self.placeholder if name == "placeholder" else None
+
+    def fill(self, value, timeout=None):
+        self.fill_calls += 1
+        self.value = value
+
+    def input_value(self):
+        return self.value
+
+    def inner_text(self):
+        return self.value
+
+    def is_visible(self):
+        return True
+
+
+class _HintLocator:
+    def __init__(self, page):
+        self._page = page
+
+    def count(self):
+        return len(self._page.boxes)
+
+    def nth(self, index):
+        return self._page.boxes[index]
+
+
+class _HintPage:
+    """Single-question page: a header search field plus the answer textarea."""
+
+    def __init__(self):
+        self.boxes = [
+            _HintBox("搜索课程"),
+            _HintBox("请输入填空项答案"),
+        ]
+
+    def locator(self, selector):
+        return _HintLocator(self)
+
+
+def test_header_search_is_not_taken_for_the_blank_slot():
+    """The live page labels the answer box 「请输入填空项答案」. A header search
+    input in the same scope must not receive the answer instead."""
+    page = _HintPage()
+    out = _operator().fill_question(
+        page, _blank_question("通用注解是________。"), "@RequestMapping",
+        single_view=True)
+    assert out == "@RequestMapping"
+    assert page.boxes[0].value == "" and page.boxes[0].fill_calls == 0
+    assert page.boxes[1].value == "@RequestMapping"
+
+
+def test_blank_boxes_keep_unlabelled_boxes_when_none_have_hints():
+    page = _BlankPage(boxes=2)
+    assert len(_operator()._blank_boxes(page)) == 2
+
+
+class _UnlabelledBox(_HintBox):
+    def get_attribute(self, name):
+        return None
+
+
+class _UnlabelledSearchPage(_HintPage):
+    """A header search box with no placeholder, before the answer textarea."""
+
+    def __init__(self):
+        self.boxes = [
+            _UnlabelledBox(""),
+            _HintBox("请输入填空项答案"),
+        ]
+
+
+def test_unlabelled_search_does_not_take_the_only_blank():
+    page = _UnlabelledSearchPage()
+    out = _operator().fill_question(
+        page, _blank_question("通用注解是________。"), "@RequestMapping",
+        single_view=True)
+    assert out == "@RequestMapping"
+    assert page.boxes[0].value == "" and page.boxes[0].fill_calls == 0
+    assert page.boxes[1].value == "@RequestMapping"
+
+
+class _ScopeLocator:
+    def __init__(self, marked):
+        self._marked = marked
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1 if self._marked else 0
+
+
+class _GenericStemPage:
+    """Page whose stem is not inside ``.ck-content``.
+
+    The first marker script reports "not found"; the generic walker reports it
+    marked the question card, so ``_narrowed_scope`` must fall through to it.
+    """
+
+    def __init__(self):
+        self.marked = False
+        self.scripts: list[str] = []
+
+    def evaluate(self, script, arg=None):
+        self.scripts.append(script)
+        if "const blocks" in script:
+            return False
+        if "createTreeWalker" in script:
+            self.marked = True
+            return True
+        return False
+
+    def locator(self, selector):
+        return _ScopeLocator(self.marked)
+
+
+def test_scope_falls_back_to_the_generic_stem_walker():
+    page = _GenericStemPage()
+    scope = _operator()._narrowed_scope(
+        page, "用于表示请求映射的通用注解是________。")
+    assert scope is not None
+    assert sum("createTreeWalker" in s for s in page.scripts) == 1
+    assert not any("const blocks" in s for s in page.scripts[1:])
+
+
+class _ScriptableStuckHandle(_StuckHandle):
+    """Typing is swallowed; the JS value fallback is the only write that lands."""
+
+    def get_attribute(self, name):
+        return "请输入填空项答案" if name == "placeholder" else None
+
+    def evaluate(self, script, arg=None):
+        self._box.value = arg
+
+
+def test_script_fallback_writes_a_box_that_swallows_typing():
+    page = _BlankPage(boxes=1)
+    real_nth = _BlankLocator.nth
+
+    def nth(self, index):
+        return _ScriptableStuckHandle(page.boxes[index])
+
+    _BlankLocator.nth = nth
+    try:
+        out = _operator().fill_question(
+            page, _blank_question("通用注解是________。"), "@RequestMapping",
+            single_view=True)
+    finally:
+        _BlankLocator.nth = real_nth
+    assert out == "@RequestMapping"
+    assert page.boxes[0].value == "@RequestMapping"
+    assert page.boxes[0].fill_calls == 2
 
 
 # --------------------------------------------------------------------------- #

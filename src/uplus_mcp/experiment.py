@@ -122,7 +122,13 @@ class ExperimentOperator:
         page = self._open_page(url)
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")
-        page.wait_for_load_state("networkidle", timeout=8000)
+        # The detail page can keep a long-polling connection open (ONLYOFFICE
+        # manual preview), so "networkidle" may never fire. The page is already
+        # navigated; parse what is rendered instead of failing the whole read.
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except PWTimeout:
+            pass
         time.sleep(0.5)
         return page
 
@@ -308,7 +314,10 @@ class ExperimentOperator:
         )
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")
-        page.wait_for_load_state("networkidle", timeout=8000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except PWTimeout:
+            pass
         time.sleep(1.0)
 
         rows = page.evaluate(r"""
@@ -317,7 +326,9 @@ class ExperimentOperator:
                 document.querySelectorAll('.exp-item').forEach(card => {
                     const link = card.querySelector('a[href*="expInfo"]');
                     const href = link ? link.getAttribute('href') : '';
-                    const m = href.match(/expInfo\/([a-f0-9]+)\/stu_experiments\/([a-f0-9]+)/);
+                    // Same id shape the list reader accepts: hex ids are
+                    // common, but uppercase / dashed ids also occur.
+                    const m = href.match(/expInfo\/([a-zA-Z0-9_-]+)\/stu_experiments\/([a-zA-Z0-9_-]+)/);
                     const name = card.querySelector('.exp-item-center-name');
                     const flag = card.querySelector('.flag');
                     const text = card.innerText || '';

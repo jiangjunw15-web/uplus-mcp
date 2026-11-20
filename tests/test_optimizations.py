@@ -119,6 +119,26 @@ def test_open_detail_still_works_with_a_session_stub(tmp_path):
     assert isinstance(op.open_detail("c1", "e1", "s1"), _Page)
 
 
+class _NeverIdlePage(_Page):
+    """A page with a long-polling connection: ``networkidle`` never fires."""
+
+    def wait_for_load_state(self, *args, **kwargs):
+        raise PWTimeout("Timeout 8000ms exceeded.")
+
+
+class _NeverIdleSession:
+    def open(self, url, timeout_ms=None):
+        return _NeverIdlePage()
+
+
+def test_open_detail_survives_a_page_that_never_reaches_network_idle(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("uplus_mcp.experiment.time.sleep", lambda *_: None)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)),
+                            _NeverIdleSession())
+    assert isinstance(op.open_detail("c1", "e1", "s1"), _NeverIdlePage)
+
+
 # --------------------------------------------------------------------------- #
 # 密码登录 tab
 # --------------------------------------------------------------------------- #
@@ -270,7 +290,7 @@ def test_every_section_body_lands_and_no_heading_is_left_empty(tmp_path):
 def test_empty_section_heading_is_pruned(tmp_path):
     skeleton = tmp_path / "skeleton.docx"
     rg.generate_report("实验三", "", "", [], [], skeleton, cover=COVER)
-    filled = rg.fill_template(
+    rg.fill_template(
         skeleton, {"实验目的": "目的正文"}, tmp_path / "r.docx", "", "")
     body = rg.extract_body_text(tmp_path / "r.docx")
     # Only 实验目的 got content; every other skeleton heading is gone.

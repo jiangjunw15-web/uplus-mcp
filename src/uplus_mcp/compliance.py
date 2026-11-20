@@ -1,9 +1,11 @@
 """Pre-submission compliance checks for experiment reports.
 
-The inspection gate in :meth:`uplus_mcp.experiment.ExperimentOperator.verify_report`
-只回答"文档里有没有内容"；它不回答"这份报告交上去老师会不会挑毛病"。这个模块
-补上后者：一套编号固定的核查项，覆盖实验报告最常见的失效方式，在提交前把问题
-拦下来。
+This is a library module. The experiment fill/upload/submit pipeline and its
+``verify_report`` gate were removed in 0.8.4, so nothing in the MCP tool set
+calls these checks today; they stay available for manual review and for
+callers that build a report outside the server.
+
+一套编号固定的核查项，覆盖实验报告最常见的失效方式，在提交前把问题拦下来。
 
 分三级：
 

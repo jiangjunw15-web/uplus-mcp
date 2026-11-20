@@ -67,7 +67,7 @@ def stem_position(positions: dict[str, int], stem: str,
         # Strip the ::N suffix for prefix comparison
         bare = candidate.split("::")[0] if "::" in candidate else candidate
         shared = 0
-        for a, b in zip(key, bare):
+        for a, b in zip(key, bare, strict=False):
             if a != b:
                 break
             shared += 1
@@ -105,8 +105,52 @@ _MARK_QUESTION_JS = r"""
     /[\s 　，。、？！：；“”‘’（）()《》〈〉\[\]【】\-—,.?!:;:"'`~]/g, '');
   const key = norm(stem);
   if (!key) return false;
+  // Some pages render each blank as an empty styled span, so the DOM text
+  // omits the underscores the API stem carries. Match a blank-stripped key as
+  // a secondary form; the primary (underscore-preserving) match still wins.
+  const blankless = (s) => (s || '').replace(
+    /_{2,}|＿{2,}|﹍{2,}|﹎{2,}/g, '');
+  const key2 = blankless(key);
+  const sharedPrefix = (a, b) => {
+    let n = 0;
+    const m = Math.min(a.length, b.length);
+    while (n < m && a[n] === b[n]) n++;
+    return n;
+  };
+  const visible = (el) => {
+    if (!el || !el.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    if (!r || (!r.width && !r.height)) return false;
+    const s = getComputedStyle(el);
+    return s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  // A candidate must be a box the student can actually use. Hidden inputs
+  // are the platform's own bookkeeping; a header search box is not an
+  // answer slot either. Radio/checkbox inputs stay relevant for choice
+  // questions even when the theme sizes the native input to zero; the
+  // nearest-any-box fallback below then keeps the old behaviour.
+  const isRelevantBox = (el) => {
+    if (!el || !visible(el)) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'textarea' || el.isContentEditable
+        || (el.getAttribute('role') || '') === 'textbox') return true;
+    if (tag !== 'input') return false;
+    const type = (el.type || 'text').toLowerCase();
+    if (['hidden', 'button', 'submit', 'reset', 'file', 'image'].includes(type))
+      return false;
+    if (type === 'radio' || type === 'checkbox') return true;
+    const hint = (el.getAttribute('placeholder')
+                  || el.getAttribute('aria-label') || '').trim();
+    return !/搜索|查找|关键字/.test(hint);
+  };
+  const boxesIn = (el) => [...el.querySelectorAll(
+    'input, textarea, [contenteditable="true"], [role="textbox"]')];
   const blocks = [...document.querySelectorAll('.ck-content')];
-  const exact = blocks.filter((el) => norm(el.innerText) === key);
+  const exact = blocks.filter((el) => {
+    const text = norm(el.innerText);
+    if (text === key) return true;
+    return key2 !== key && blankless(text) === key2;
+  });
   let target = null;
   if (exact.length) {
     target = exact[Math.min(Math.max(skip | 0, 0), exact.length - 1)];
@@ -115,22 +159,168 @@ _MARK_QUESTION_JS = r"""
     for (const el of blocks) {
       const text = norm(el.innerText);
       if (!text) continue;
-      let shared = 0;
-      const n = Math.min(key.length, text.length);
-      while (shared < n && key[shared] === text[shared]) shared++;
+      const shared = Math.max(
+        sharedPrefix(key, text),
+        key2 !== key ? sharedPrefix(key2, blankless(text)) : 0,
+      );
       if (shared >= 8 && shared > bestLen) { target = el; bestLen = shared; }
     }
   }
   if (!target) return false;
+  // Walk up to the nearest ancestor that really holds an answer/option box.
+  // Stopping at a hidden bookkeeping input used to mark a container that did
+  // not include the fill-blank textarea, so the question reported "找不到
+  // 答案输入框" even though the boxes were on screen.
   let scope = target;
+  let fallback = null;
   while (scope && scope !== document.body) {
-    if (scope.querySelector('input, textarea')) break;
+    const boxes = boxesIn(scope);
+    if (boxes.length && !fallback) fallback = scope;
+    if (boxes.some(isRelevantBox)) break;
     scope = scope.parentElement;
   }
-  if (!scope || scope === document.body) scope = target.parentElement || target;
+  if (!scope || scope === document.body) {
+    scope = fallback || target.parentElement || target;
+  }
   document.querySelectorAll('[data-uplus-q]').forEach(
     (el) => el.removeAttribute('data-uplus-q'));
   scope.setAttribute('data-uplus-q', '1');
+  return true;
+}
+"""
+
+
+#: Fallback marker for answer pages whose stem is not inside ``.ck-content``
+#: (some course packs render a plain ``div``). It finds the most specific
+#: element carrying the stem, then the nearest ancestor that holds a usable
+#: answer box. ``skip`` selects the n-th duplicate in document order.
+_MARK_QUESTION_GENERIC_JS = r"""
+([stem, skip]) => {
+  const norm = (s) => (s || '').replace(
+    /[\s 　，。、？！：；“”‘’（）()《》〈〉\[\]【】\-—,.?!:;:"'`~]/g, '');
+  const key = norm(stem);
+  if (!key) return false;
+  // Some pages render each blank as an empty styled span, so the DOM text
+  // omits the underscores the API stem carries. Match a blank-stripped key as
+  // a secondary form; the primary (underscore-preserving) match still wins.
+  const blankless = (s) => (s || '').replace(
+    /_{2,}|＿{2,}|﹍{2,}|﹎{2,}/g, '');
+  const key2 = blankless(key);
+  const sharedPrefix = (a, b) => {
+    let n = 0;
+    const m = Math.min(a.length, b.length);
+    while (n < m && a[n] === b[n]) n++;
+    return n;
+  };
+  const visible = (el) => {
+    if (!el || !el.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    if (!r || (!r.width && !r.height)) return false;
+    const s = getComputedStyle(el);
+    return s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const isRelevantBox = (el) => {
+    if (!el || !visible(el)) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'textarea' || el.isContentEditable
+        || (el.getAttribute('role') || '') === 'textbox') return true;
+    if (tag !== 'input') return false;
+    const type = (el.type || 'text').toLowerCase();
+    if (['hidden', 'button', 'submit', 'reset', 'file', 'image'].includes(type))
+      return false;
+    if (type === 'radio' || type === 'checkbox') return true;
+    const hint = (el.getAttribute('placeholder')
+                  || el.getAttribute('aria-label') || '').trim();
+    return !/搜索|查找|关键字/.test(hint);
+  };
+  const boxesIn = (el) => [...el.querySelectorAll(
+    'input, textarea, [contenteditable="true"], [role="textbox"]')];
+  const starts = [];
+  const push = (el) => {
+    if (el && el !== document.body && el !== document.documentElement) {
+      starts.push(el);
+    }
+  };
+  const matches = (raw) => {
+    const text = norm(raw);
+    if (!text) return false;
+    if (text === key || text.startsWith(key)) return true;
+    if (key.startsWith(text) && text.length >= 8) return true;
+    if (key2 !== key) {
+      const stripped = blankless(text);
+      if (stripped === key2) return true;
+      if (stripped.length >= 8
+          && (stripped.startsWith(key2) || key2.startsWith(stripped)))
+        return true;
+    }
+    return false;
+  };
+
+  // 1) Known rich-text / question-title containers.
+  document.querySelectorAll(
+    '.ck-content, .question-title, .q-title, .stem, .question-stem, ' +
+    '.q-content, .question-content, .subject-title, .title-text'
+  ).forEach((el) => {
+    if (matches(el.innerText)) push(el);
+  });
+
+  // 2) Plain text node carrying the whole stem.
+  if (!starts.length) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node;
+    let seen = 0;
+    while ((node = walker.nextNode()) && seen < 4000) {
+      seen++;
+      const parent = node.parentElement;
+      if (!parent || parent.closest('script,style,noscript')) continue;
+      const text = norm(node.textContent);
+      if (text.length < 8) continue;
+      if (matches(node.textContent)) {
+        push(parent);
+        if (starts.length >= 12) break;
+      }
+    }
+  }
+
+  // 3) Rich text split across inline tags: inspect element text, bounded.
+  if (!starts.length) {
+    let seen = 0;
+    for (const el of document.querySelectorAll('div,p,section,li,td')) {
+      if (++seen > 4000) break;
+      const raw = norm(el.textContent);
+      if (!raw || raw.length > key.length + 800) continue;
+      const stripped = blankless(raw);
+      if (raw === key || raw.startsWith(key)
+          || (key2 !== key && (stripped === key2 || stripped.startsWith(key2))))
+        push(el);
+    }
+  }
+  if (!starts.length) return false;
+
+  const unique = [...new Set(starts)];
+  const scopes = [];
+  for (const start of unique) {
+    let scope = start;
+    let fallback = null;
+    while (scope && scope !== document.body) {
+      const boxes = boxesIn(scope);
+      if (boxes.length && !fallback) fallback = scope;
+      if (boxes.some(isRelevantBox)) break;
+      scope = scope.parentElement;
+    }
+    const found = (scope && scope !== document.body)
+      ? scope : (fallback || start.parentElement);
+    if (found) scopes.push(found);
+  }
+  if (!scopes.length) return false;
+  const final = [...new Set(scopes)].sort((a, b) => (
+    a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+  ));
+  const target = final[Math.min(Math.max(skip | 0, 0), final.length - 1)];
+  if (!target) return false;
+  document.querySelectorAll('[data-uplus-q]').forEach(
+    (el) => el.removeAttribute('data-uplus-q'));
+  target.setAttribute('data-uplus-q', '1');
   return true;
 }
 """
@@ -294,7 +484,16 @@ class HomeworkOperator:
         try:
             marked = page.evaluate(_MARK_QUESTION_JS, [stem_text, occurrence])
         except Exception:  # noqa: BLE001 - unknown page shape / fake page
-            return None
+            marked = False
+        if not marked:
+            # Answer pages from some course packs do not wrap the stem in
+            # ``.ck-content``. The generic locator scans plain text nodes and
+            # marks the nearest question card that actually owns an answer box.
+            try:
+                marked = page.evaluate(
+                    _MARK_QUESTION_GENERIC_JS, [stem_text, occurrence])
+            except Exception:  # noqa: BLE001 - unknown page shape / fake page
+                return None
         if not marked:
             return None
         try:
@@ -426,22 +625,45 @@ class HomeworkOperator:
     # rich-text editors. The order on the page is the order of the blanks.
     _BLANK_INPUT_SELECTOR = (
         "input[type=text], input[type=search], input[type=number], "
-        "input:not([type]), input[placeholder], textarea, "
-        "[contenteditable=true]:not([contenteditable=false])"
+        "input[type=email], input:not([type]), input[placeholder], "
+        "textarea, [contenteditable=true]:not([contenteditable=false]), "
+        "[role=textbox]"
     )
 
-    def _blank_boxes(self, scope) -> list:
+    #: Placeholder/aria text that marks a real fill-blank answer slot. The
+    #: live page labels every box 「请输入填空项答案」 and shows 答案一/答案二.
+    _ANSWER_HINT_RE = re.compile(r"填空|答案")
+
+    @staticmethod
+    def _box_hint(box) -> str:
+        """Placeholder-like text that identifies what a box is for."""
+        for attr in ("placeholder", "data-placeholder", "aria-label",
+                     "aria-placeholder"):
+            try:
+                value = box.get_attribute(attr)
+            except Exception:  # noqa: BLE001 - contenteditable / detached
+                continue
+            if value and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    def _blank_boxes(self, scope, expected: int = 0) -> list:
         """All answer boxes of one fill-blank question, in DOM order.
 
         Hidden inputs (the platform ships several per question for its own
         bookkeeping) are skipped: only a box the student can actually type in
-        counts as an answer slot.
+        counts as an answer slot. When any box carries an answer-specific hint
+        (「请输入填空项答案」/「答案一」/「答案二」), unrelated text inputs in
+        the same scope (a header search field, list filters) are dropped. If
+        the hinted boxes already cover every expected blank, only those are
+        returned; otherwise unlabelled boxes stay so a mixed editor layout
+        still lines up.
         """
         try:
             count = scope.locator(self._BLANK_INPUT_SELECTOR).count()
         except Exception:  # noqa: BLE001 - detached page
             return []
-        boxes = []
+        collected: list[tuple[object, str]] = []
         for index in range(min(count, 30)):
             box = scope.locator(self._BLANK_INPUT_SELECTOR).nth(index)
             try:
@@ -452,8 +674,23 @@ class HomeworkOperator:
                     continue
             except Exception:  # noqa: BLE001 - visibility not readable
                 pass
-            boxes.append(box)
-        return boxes
+            collected.append((box, self._box_hint(box)))
+        if not collected:
+            return []
+        hinted = [
+            box for box, hint in collected
+            if self._ANSWER_HINT_RE.search(hint)
+        ]
+        if hinted and (expected <= 0 or len(hinted) >= expected):
+            return hinted
+        if hinted:
+            # One editor may render without a placeholder; keep the unlabelled
+            # slots, but still drop inputs identified as search/filter fields.
+            return [
+                box for box, hint in collected
+                if not hint or self._ANSWER_HINT_RE.search(hint)
+            ]
+        return [box for box, _ in collected]
 
     @staticmethod
     def _read_box(box) -> str:
@@ -485,6 +722,34 @@ class HomeworkOperator:
         box.press("Delete")
         box.type(value, timeout=6000)
 
+    @staticmethod
+    def _force_box_value(box, value: str) -> None:
+        """Last-resort write for a box whose editor swallows fill/typing.
+
+        Sets the DOM value through the native setter and dispatches ``input``
+        and ``change`` so Vue/React-backed textareas pick the value up; a
+        contenteditable fallback writes ``innerText``. The caller still reads
+        the box back, so a write that cannot stick is reported as an error.
+        """
+        box.evaluate(
+            """(el, value) => {
+              const tag = (el.tagName || '').toLowerCase();
+              if (tag === 'input' || tag === 'textarea') {
+                const proto = tag === 'textarea'
+                  ? HTMLTextAreaElement.prototype
+                  : HTMLInputElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) desc.set.call(el, value);
+                else el.value = value;
+              } else {
+                el.innerText = value;
+              }
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+            value,
+        )
+
     def _answer_blank(self, page: Page, text: str,
                       stem_text: str = "", occurrence: int = 0,
                       expected: int = 0) -> None:
@@ -499,7 +764,7 @@ class HomeworkOperator:
         if not values:
             raise UplusError("填空题答案为空，无法写入")
         scope = self._question_scope(page, stem_text, occurrence)
-        boxes = self._blank_boxes(scope)
+        boxes = self._blank_boxes(scope, expected)
         if not boxes:
             raise UplusError("填空题找不到答案输入框，无法写入")
         if len(boxes) < len(values):
@@ -512,16 +777,26 @@ class HomeworkOperator:
             )
         for index, value in enumerate(values):
             box = boxes[index]
-            self._write_box(box, value)
-            landed = self._read_box(box)
-            if landed != value:
+            landed = ""
+            try:
                 self._write_box(box, value)
                 landed = self._read_box(box)
                 if landed != value:
-                    raise UplusError(
-                        f"第 {index + 1} 空写入后页面内容不一致"
-                        f"（期望 {value[:30]!r}，实际 {landed[:30]!r}）"
-                    )
+                    self._write_box(box, value)
+                    landed = self._read_box(box)
+            except Exception:  # noqa: BLE001 - try the DOM fallback below
+                landed = ""
+            if landed != value:
+                try:
+                    self._force_box_value(box, value)
+                    landed = self._read_box(box)
+                except Exception:  # noqa: BLE001 - report the mismatch below
+                    landed = ""
+            if landed != value:
+                raise UplusError(
+                    f"第 {index + 1} 空写入后页面内容不一致"
+                    f"（期望 {value[:30]!r}，实际 {landed[:30]!r}）"
+                )
 
     def navigate_to_question(self, page: Page, position: int,
                              expected_stem: str = "") -> bool:
@@ -567,13 +842,17 @@ class HomeworkOperator:
         """True when the page shows one question at a time with an answer card.
 
         Such pages carry a ``答题卡`` grid and navigate with ``上一题/下一题``;
-        list-style pages render every question at once.
+        list-style pages render every question at once. One navigation label is
+        enough: the first/last question can render only one of the two buttons,
+        and a page with a single visible question must not be treated as a
+        list page (that would fill every API question into the one visible
+        question card).
         """
         try:
             text = page.inner_text("body")
         except PWTimeout:
             return False
-        return "答题卡" in text or ("上一题" in text and "下一题" in text)
+        return "答题卡" in text or "上一题" in text or "下一题" in text
 
     def _page_stem(self, page: Page) -> str:
         """The stem of the question currently shown (first rich-text block)."""

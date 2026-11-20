@@ -143,6 +143,17 @@ def test_navigate_refuses_a_stem_mismatch():
     assert op.navigate_to_question(page, 2, "第一道题的题干内容") is False
 
 
+class _NavOnlyPage:
+    def inner_text(self, selector="body"):
+        return "提交作业 下一题"
+
+
+def test_single_question_view_detects_one_navigation_label():
+    """The first/last question may render only 下一题 (or only 上一题). Treating
+    that page as a list would fill every API question into the one visible card."""
+    assert _operator()._single_question_view(_NavOnlyPage()) is True
+
+
 def test_navigate_proceeds_when_the_page_stem_is_unreadable():
     class _UnreadablePage:
         def locator(self, selector):

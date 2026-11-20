@@ -389,9 +389,13 @@ async def uplus_close() -> dict:
     """Detach from the browser and release the worker session."""
     def work() -> dict:
         session = _state.get("session")
-        if session is not None:
-            session.close()
-        _state.clear()
+        try:
+            if session is not None:
+                session.close()
+        finally:
+            # Even a failed detach must release the cached engine/session;
+            # leaving ``ready`` set would hand the next tool a closed browser.
+            _state.clear()
         return {"closed": True}
 
     return await _thread.run_async(work)

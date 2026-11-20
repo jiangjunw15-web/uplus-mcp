@@ -218,8 +218,11 @@ class BrowserSession:
             status = int(resp.get("status", 0))
             body = str(resp.get("body", ""))
             # One recovery chance: a stale/login tab can 401 while cookies on
-            # another tab are still valid; bounce to the workbench once.
-            if status == 401 and attempt == 0:
+            # another tab are still valid; bounce to the workbench once. Only
+            # bounce when a retry attempt is actually left — with
+            # ``retries=0`` the old condition consumed the single attempt and
+            # the method fell through to ``return {}`` instead of raising.
+            if status == 401 and attempt < retries:
                 self.open("/workbench/index/school")
                 page = self.page
                 time.sleep(0.5)
@@ -231,12 +234,12 @@ class BrowserSession:
                 )
             try:
                 payload = json.loads(body)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 last = {"status": status, "raw": body[:500]}
                 if attempt < retries:
                     time.sleep(1.0)
                     continue
-                raise UplusError(f"接口返回非 JSON：{body[:200]}")
+                raise UplusError(f"接口返回非 JSON：{body[:200]}") from exc
             if status >= 400:
                 last = payload
                 if attempt < retries:

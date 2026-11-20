@@ -78,6 +78,18 @@ def test_homework_status_from_api_string_dto():
     assert task.question_count == 8
 
 
+def test_show_score_string_flag_is_parsed_not_truthy():
+    raw = {
+        "id": "t4",
+        "homeworkId": "h4",
+        "showScore": "0",
+        "homeworkDTO": {"name": "隐藏分数", "questionCount": 1},
+    }
+    assert HomeworkTask.from_api(raw, "c1").show_score is False
+    raw["showScore"] = "1"
+    assert HomeworkTask.from_api(raw, "c1").show_score is True
+
+
 def test_unsubmitted_task_status_and_page_override():
     raw = {
         "id": "t3",

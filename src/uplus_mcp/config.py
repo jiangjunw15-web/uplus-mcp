@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import utils
 from .models import Course
 
 
@@ -197,11 +198,12 @@ def load_config(path: Optional[str] = None) -> Config:
         action_timeout_ms=int(data.get("action_timeout_ms", 15_000)),
         deadline_warning_hours=int(data.get("deadline_warning_hours", 72)),
         report_dir=report_dir,
-        auto_launch_browser=bool(auto_launch),
+        auto_launch_browser=utils.coerce_bool(auto_launch, True),
         browser=_normalize_browser(browser_raw),
         cdp_port=int(cdp_port),
         profile_dir=str(data.get("profile_dir", "")),
-        include_expired_courses=bool(data.get("include_expired_courses", False)),
+        include_expired_courses=utils.coerce_bool(
+            data.get("include_expired_courses", False), False),
         allowed_io_paths=_allowed_io_paths(data, report_dir),
         # Personal identity for the report header. It is read from the
         # gitignored personal config only; the shipped example leaves it empty.

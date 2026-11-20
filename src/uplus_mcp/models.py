@@ -112,20 +112,7 @@ def question_type(code: Any) -> QuestionType:
 
 def _as_bool_flag(value: Any) -> Optional[bool]:
     """Read a 0/1 flag that may arrive as int, bool or string."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        return value
-    try:
-        return bool(int(value))
-    except (TypeError, ValueError):
-        pass
-    text = str(value).strip().lower()
-    if text in ("true", "yes", "y", "1", "正确", "对"):
-        return True
-    if text in ("false", "no", "n", "0", "错误", "错"):
-        return False
-    return None
+    return utils.parse_bool(value)
 
 
 def _as_float(value: Any) -> Optional[float]:
@@ -371,7 +358,7 @@ class HomeworkTask:
             sub_status=str(dto.get("subStatus")) if dto.get("subStatus") is not None else None,
             question_count=int(dto.get("questionCount") or 0),
             weight=raw.get("weight"),
-            show_score=bool(raw.get("showScore", 1)),
+            show_score=utils.coerce_bool(raw.get("showScore", 1), True),
             score=dto.get("userScore"),
             raw=raw,
         )

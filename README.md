@@ -13,6 +13,49 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.8
+
+The live answer page renders fill-in-the-blank questions with a plain stem and
+one textarea per blank — 答案一 / 答案二, placeholder 请输入填空项答案 — sometimes
+without `.ck-content` and with the blank drawn as an empty styled span rather
+than `____`. The old locator could miss the question card or pick the header
+search box, so those homework items could never be filled and the homework
+stayed blocked at the submit gate. This release fixes the whole path; a
+completed set of objective answers still submits automatically.
+
+- **Generic stem locator fallback.** When `.ck-content` has no matching stem,
+  the new marker scans known title containers, text nodes and element text,
+  finds the most specific stem element, then walks up to the question card
+  that really contains a usable answer box. A list page no longer falls back
+  to the whole page and writes into a neighbour.
+- **Answer-box filtering.** Only visible, editable, non-search inputs count:
+  `input`, `textarea`, `contenteditable` and `role=textbox`. Boxes whose
+  placeholder / `data-placeholder` / `aria-label` carries 填空 or 答案 are
+  preferred; once they cover the stem's blank count, header search and filter
+  fields are excluded.
+- **Blank spans without `____`.** Some pages draw each blank as an empty span,
+  so the DOM text has no underscores. Stem matching now retries with
+  underscore runs stripped, covering both the single-blank and the
+  答案一/答案二 layouts.
+- **DOM value fallback.** When both `fill` and keyboard typing are swallowed,
+  the native value setter writes the box and dispatches `input` / `change`;
+  every box is still read back, and a value that cannot stick still blocks
+  submission instead of passing a half-filled question.
+- **Single-question detection.** A page that renders only 上一题 or only 下一题
+  (common on the first/last question) is now treated as a single-question view.
+- **Runtime hardening.** String booleans in config (`"false"`, `"0"`,
+  `showScore: "0"`) are parsed instead of being truthy; a 401 with no retry
+  budget raises instead of returning `{}`; expired configured courses no longer
+  widen the homework query to unrelated live courses; an unreadable experiment
+  detail status keeps the list badge; `networkidle` timeouts no longer fail the
+  experiment read; relative material links resolve against the folder page;
+  uppercase/dashed experiment ids are accepted; a failed `uplus_close` detach
+  still clears the cached session.
+- **Tests.** 377 pass, including two real headless-Chromium cases that render
+  the screenshot layouts (no `.ck-content`, blank spans, single/double
+  textareas); they skip automatically where no Playwright browser is installed.
+  Tool signatures and existing flows are unchanged.
+
 ## What's new in 0.8.7
 
 Signing in no longer has a default. `uplus_login` used to offer manual/auto,

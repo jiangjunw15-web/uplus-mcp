@@ -7,7 +7,7 @@ import re
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -180,6 +180,36 @@ def is_expired(ms: Optional[int], reference_ms: Optional[int] = None) -> bool:
     if not ms:
         return False
     return ms <= (reference_ms or now_ms())
+
+
+def parse_bool(value: Any) -> Optional[bool]:
+    """Parse a flag that may arrive as bool, number or string.
+
+    ``bool("false")`` is ``True``, so config files and API payloads that carry
+    booleans as strings used to invert the setting silently. ``"false"``,
+    ``"0"`` and the Chinese 错误 forms are now read as ``False``; anything that
+    cannot be parsed returns ``None`` so the caller can apply its own default.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().lower()
+    if text in ("true", "yes", "y", "1", "正确", "对"):
+        return True
+    if text in ("false", "no", "n", "0", "错误", "错"):
+        return False
+    return None
+
+
+def coerce_bool(value: Any, default: bool = False) -> bool:
+    """Return a parsed boolean, falling back to ``default`` when unparseable."""
+    parsed = parse_bool(value)
+    return default if parsed is None else parsed
 
 
 def normalize_letters(raw: object) -> str:

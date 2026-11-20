@@ -161,6 +161,44 @@ def test_api_get_does_not_reopen_when_already_on_the_platform_origin():
     assert opened == []
 
 
+class _AuthFailPage:
+    url = "https://www.eduplus.net/workbench/index/school"
+
+    def is_closed(self):
+        return False
+
+    def evaluate(self, script, arg=None):
+        return {"status": 401, "body": '{"code":4010000,"success":false}'}
+
+
+def test_api_get_raises_on_401_when_no_retry_budget_is_left():
+    """With ``retries=0`` the old code used its one attempt for the workbench
+    bounce and then returned ``{}`` — an empty success for an expired login."""
+    from uplus_mcp.browser import AuthExpiredError
+
+    page = _AuthFailPage()
+    session = _session_with_page(page)
+    opened: list[str] = []
+    session.open = lambda path: opened.append(path)
+
+    with pytest.raises(AuthExpiredError):
+        session.api_get("/api/course/athena/courses/study", retries=0)
+    assert opened == []
+
+
+def test_api_get_bounces_once_then_raises_on_401_with_a_retry_left():
+    from uplus_mcp.browser import AuthExpiredError
+
+    page = _AuthFailPage()
+    session = _session_with_page(page)
+    opened: list[str] = []
+    session.open = lambda path: opened.append(path)
+
+    with pytest.raises(AuthExpiredError):
+        session.api_get("/api/course/athena/courses/study")  # retries=1
+    assert opened == ["/workbench/index/school"]
+
+
 # --------------------------------------------------------------------------- #
 # experiment heading: every 实验N is recognised, not only 实验一/实验二
 # --------------------------------------------------------------------------- #
@@ -288,6 +326,28 @@ def test_server_config_is_loaded_once_and_shared(monkeypatch):
 # --------------------------------------------------------------------------- #
 # the patrol CLI must report a startup failure, not a raw traceback
 # --------------------------------------------------------------------------- #
+def test_uplus_close_clears_state_even_when_detach_fails(monkeypatch):
+    """A failed browser detach must not leave a closed session cached as ready."""
+    import asyncio
+
+    import uplus_mcp.server as server
+
+    class _BadSession:
+        def close(self):
+            raise RuntimeError("detach failed")
+
+    server._state.clear()
+    server._state.update({"ready": True, "session": _BadSession()})
+
+    async def fake_run(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(server._thread, "run_async", fake_run)
+    with pytest.raises(RuntimeError, match="detach failed"):
+        asyncio.run(server.uplus_close())
+    assert server._state == {}
+
+
 def test_patrol_cli_reports_a_startup_failure(monkeypatch, capsys):
     from uplus_mcp import daily_patrol
 

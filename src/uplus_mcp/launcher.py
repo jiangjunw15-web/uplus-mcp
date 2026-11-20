@@ -114,9 +114,9 @@ def _which_candidates(kind: str) -> list[str]:
                    "chromium-browser"],
     }
     out: list[str] = []
-    for engine, names in names.items():
+    for engine, engine_names in names.items():
         if kind in ("auto", engine):
-            for name in names:
+            for name in engine_names:
                 found = shutil.which(name)
                 if found:
                     out.append(found)

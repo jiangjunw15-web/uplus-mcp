@@ -120,7 +120,6 @@ def test_browser_url_for_no_longer_folds_file_url_into_base_url():
 def test_act_batch_navigate_rejects_file_scheme_before_goto():
     """The batch runner must fail the step, never call page.goto with file://."""
     from uplus_mcp.browse import BrowseTools
-    from uplus_mcp.browser import UplusError
 
     page = _GotoSpy()
     tools = BrowseTools(_SessionWithConfig(page))

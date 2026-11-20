@@ -19,6 +19,7 @@ from uplus_mcp.browser import UplusError
 from uplus_mcp.launcher import _copy_profile
 from uplus_mcp.models import (
     Course,
+    Experiment,
     HomeworkStatus,
     HomeworkTask,
     Question,
@@ -404,3 +405,57 @@ def test_list_homeworks_without_course_id_still_lists_all_active():
     rows = engine.list_homeworks("")
     client.list_homeworks.assert_called_once_with("c1")
     assert rows == []
+
+
+def test_list_homeworks_does_not_widen_when_configured_courses_are_expired():
+    """Configured courses are the user's chosen scope. When every one of them
+    is expired the listing must be empty, not every unrelated live course."""
+    client = Mock()
+    client.list_my_courses.return_value = [
+        Course(id="live", name="不在配置里的课", end_ms=4102444800000)]
+    cfg = Config(courses=[Course(id="old", name="旧课", end_ms=1000)])
+    engine = PatrolEngine(cfg, Mock(), client, Mock())
+
+    assert engine.list_homeworks("") == []
+    client.list_homeworks.assert_not_called()
+
+
+class _UnreadableDetail:
+    status = ""
+    submitted_files: list = []
+
+
+class _RecognisedDetail:
+    status = "已提交"
+    submitted_files: list = []
+
+
+def _experiment_engine(tmp_path, detail):
+    client = Mock()
+    client.list_my_courses.return_value = [Course(id="c1", name="课")]
+    operator = Mock()
+    operator.read_experiments.return_value = [
+        Experiment(name="实验一", submitted=False, course_id="c1",
+                   exp_id="e1", stu_exp_id="s1")]
+    engine = PatrolEngine(Config(report_dir=str(tmp_path)), Mock(), client, operator)
+
+    class _ExpOp:
+        def read_detail(self, *args):
+            return detail
+
+    engine._experiment_operator = lambda: _ExpOp()
+    return engine
+
+
+def test_list_experiments_keeps_badge_when_detail_status_is_unreadable(tmp_path):
+    engine = _experiment_engine(tmp_path, _UnreadableDetail())
+    rows = engine.list_experiments("c1")
+    assert rows[0]["submitted"] is False
+    assert "list_badge" in rows[0]["submitted_source"]
+
+
+def test_list_experiments_uses_a_recognised_detail_status(tmp_path):
+    engine = _experiment_engine(tmp_path, _RecognisedDetail())
+    rows = engine.list_experiments("c1")
+    assert rows[0]["submitted"] is True
+    assert rows[0]["submitted_source"] == "detail_page"
