@@ -701,6 +701,11 @@ class HomeworkOperator:
     #: Placeholder/aria text that marks a real fill-blank answer slot. The
     #: live page labels every box 「请输入填空项答案」 and shows 答案一/答案二.
     _ANSWER_HINT_RE = re.compile(r"填空|答案")
+    #: Hints that identify a non-answer field (header search, list filter).
+    #: A whole-page fallback scope can contain these, so they are excluded even
+    #: when no answer-labelled box is present — otherwise the first blank would
+    #: be typed into the search box and the real box left empty.
+    _FIELD_HINT_RE = re.compile(r"搜索|查找|关键字|筛选|检索|search|filter", re.I)
 
     @staticmethod
     def _box_hint(box) -> str:
@@ -726,14 +731,20 @@ class HomeworkOperator:
         the hinted boxes already cover every expected blank, only those are
         returned; otherwise unlabelled boxes stay so a mixed editor layout
         still lines up.
+
+        Search / filter fields are excluded in every branch, including when no
+        answer-labelled box exists at all: the fallback scope is the whole page,
+        and typing an answer into the header search box would leave the real
+        blank empty while the read-back still "matched" the search value.
         """
+        selector = scope.locator(self._BLANK_INPUT_SELECTOR)
         try:
-            count = scope.locator(self._BLANK_INPUT_SELECTOR).count()
+            count = selector.count()
         except Exception:  # noqa: BLE001 - detached page
             return []
         collected: list[tuple[object, str]] = []
         for index in range(min(count, 30)):
-            box = scope.locator(self._BLANK_INPUT_SELECTOR).nth(index)
+            box = selector.nth(index)
             try:
                 # A hidden input is the platform's own bookkeeping, not an
                 # answer slot. An unknown state is kept: failing to answer
@@ -743,6 +754,14 @@ class HomeworkOperator:
             except Exception:  # noqa: BLE001 - visibility not readable
                 pass
             collected.append((box, self._box_hint(box)))
+        # Drop fields identified as search/filter before any other rule.
+        answerable = [
+            (box, hint) for box, hint in collected
+            if not self._FIELD_HINT_RE.search(hint)
+        ]
+        # If the filter removed everything, fall back to the unfiltered list so
+        # an unusual page still gets an attempt rather than zero boxes.
+        collected = answerable or collected
         if not collected:
             return []
         hinted = [

@@ -447,7 +447,6 @@ class PatrolEngine:
         from . import materials
         from .experiment import _template_matcher, _template_priority
 
-        template: dict | None = None
         unavailable_materials: list[str] = []
         matcher = _template_matcher(op._experiment_label(detail.name))
         try:
@@ -562,10 +561,7 @@ class PatrolEngine:
         if progress is not None:
             task.page_progress = progress
         final_status = status if status is not None else task.status
-        questions = [
-            self.client.question_detail(q.question_id)
-            for q in self.client.list_questions(task.homework_id)
-        ]
+        questions = self._homework_question_details(task)
         return {
             "course_id": course_id,
             "course_name": self.course_name(course_id),
@@ -612,10 +608,7 @@ class PatrolEngine:
             except Exception as exc:  # page read is best-effort
                 page_state_note = f"页面状态读取失败：{exc}，按接口状态判定"
 
-        questions = [
-            self.client.question_detail(q.question_id)
-            for q in self.client.list_questions(task.homework_id)
-        ]
+        questions = self._homework_question_details(task)
         expected = journal.answers_for(self.config, task.task_id, task.homework_id)
         final_status = task.status
         audit_result = report_mod.audit_questions(questions, expected_answers=expected)
@@ -661,7 +654,15 @@ class PatrolEngine:
             "page_state_note": page_state_note,
             "deadline": utils.deadline_label(task.end_ms),
             "progress": task.page_progress,
-            "withdrawable": final_status is HomeworkStatus.SUBMITTED_PENDING,
+            # ``withdrawable`` follows the page's real button state. When the
+            # page was not read (``refresh_page_state=False`` or the read
+            # failed), the answer is *unknown*, not ``False`` — the interface
+            # flag alone is unreliable (the API keeps ``submitTask=0`` for work
+            # already handed in), and reporting False would tell the caller
+            # "cannot withdraw" when the truth is "cannot tell".
+            "withdrawable": (None if page_read_failed else
+                             final_status is HomeworkStatus.SUBMITTED_PENDING),
+            "withdrawable_source": ("unknown" if page_read_failed else "page"),
             "journal_answers": len(expected),
             "api_says_submitted": api_says_submitted,
             "page_says_submitted": page_says_submitted,
@@ -725,10 +726,7 @@ class PatrolEngine:
                               "如仍未提交，请直接用 uplus_answer_homework 作答")
             return result
 
-        questions = [
-            self.client.question_detail(q.question_id)
-            for q in self.client.list_questions(task.homework_id)
-        ]
+        questions = self._homework_question_details(task)
         expected = journal.answers_for(self.config, task.task_id, task.homework_id)
         audit = report_mod.audit_questions(questions, expected_answers=expected)
         result["audit"] = audit
@@ -835,14 +833,28 @@ class PatrolEngine:
             return result
 
         try:
-            result["withdrawal"] = self.operator.withdraw_homework(page, task)
-            result["withdrawn"] = result["withdrawal"] == "withdrawn"
+            withdrawal = self.operator.withdraw_homework(page, task)
+            result["withdrawal"] = withdrawal
+            result["withdrawn"] = withdrawal == "withdrawn"
         except AuthExpiredError:
             raise
         except Exception as exc:  # noqa: BLE001 - report, never crash the tool
             result["errors"].append(f"撤回失败：{exc}")
             result["note"] = "撤回失败，作业保持原状态"
             return result
+
+        if not result["withdrawn"]:
+            # ``withdraw_homework`` returns "not_submitted" without raising when
+            # the page shows the homework is not handed in — which happens when
+            # the interface status and the page disagree (the interface can
+            # report a submission that never happened, or was withdrawn
+            # elsewhere). Continuing here used to fill and resubmit the answers
+            # and then report 「作业已撤回…」: a withdrawal that never occurred.
+            # Say what actually happened instead.
+            result["note"] = (
+                f"页面显示无需撤回（{withdrawal}）：接口状态与作答页不一致，"
+                "按未提交作业直接补答，未发生撤回。"
+            )
 
         try:
             outcome = self.operator.answer_homework(
@@ -860,10 +872,7 @@ class PatrolEngine:
             return result
 
         try:
-            after_questions = [
-                self.client.question_detail(q.question_id)
-                for q in self.client.list_questions(task.homework_id)
-            ]
+            after_questions = self._homework_question_details(task)
             after_expected = journal.answers_for(
                 self.config, task.task_id, task.homework_id)
             result["audit_after"] = report_mod.audit_questions(
@@ -875,8 +884,12 @@ class PatrolEngine:
 
         if result["submitted"]:
             after = result.get("audit_after") or {}
+            # ``withdrawn`` is False when the page showed the homework was never
+            # submitted (an interface/page disagreement); the wording must not
+            # claim a withdrawal that did not happen.
+            prefix = "已撤回、补齐并重新提交" if result["withdrawn"] else "已补齐并提交"
             if after.get("complete"):
-                result["note"] = "已撤回、补齐并重新提交；复核未发现漏答或漏选"
+                result["note"] = prefix + "；复核未发现漏答或漏选"
                 if after.get("unjudged_count"):
                     result["note"] += (
                         f"（另有 {after['unjudged_count']} 道多选因平台尚未公布"
@@ -885,9 +898,13 @@ class PatrolEngine:
             else:
                 result["note"] = "已重新提交，但复核仍有未完成项，请人工检查"
         elif submit:
-            result["note"] = "作业已撤回，但未完成重新提交；请检查 errors"
+            result["note"] = ("作业已撤回，但未完成重新提交；请检查 errors"
+                              if result["withdrawn"] else
+                              "未发生撤回（页面显示未提交），且未完成重新提交；请检查 errors")
         else:
-            result["note"] = "作业已撤回并填写答案，未提交（submit=False）"
+            result["note"] = ("作业已撤回并填写答案，未提交（submit=False）"
+                              if result["withdrawn"] else
+                              "未发生撤回（页面显示未提交），已填写答案但未提交（submit=False）")
         return result
 
     # ------------------------------------------------------------------ #
@@ -1043,10 +1060,7 @@ class PatrolEngine:
                     HomeworkStatus.SUBMITTED_GRADED,
                 ):
                     try:
-                        questions = [
-                            self.client.question_detail(q.question_id)
-                            for q in self.client.list_questions(task.homework_id)
-                        ]
+                        questions = self._homework_question_details(task)
                         expected = journal.answers_for(
                             self.config, task.task_id, task.homework_id)
                         audit_result = report_mod.audit_questions(
@@ -1164,10 +1178,7 @@ class PatrolEngine:
                             })
 
                 if task.status is HomeworkStatus.NOT_SUBMITTED and not task.is_expired():
-                    questions = [
-                        self.client.question_detail(q.question_id)
-                        for q in self.client.list_questions(task.homework_id)
-                    ]
+                    questions = self._homework_question_details(task)
                     objective = [q for q in questions if q.auto_answerable and not q.answered]
                     subjective = [q for q in questions if not q.auto_answerable]
                     if subjective:
@@ -1521,7 +1532,26 @@ class PatrolEngine:
                     })
                     continue
                 audit_block = result.get("audit", {})
-                is_incomplete = not audit_block.get("complete", True)
+                # Reconcile the two truth sources before declaring a gap. The
+                # page's answer card (答题卡 N/N) is the authority on "how many
+                # boxes are filled"; the API answer rows can lag behind it, so an
+                # all-answered page can still come back with ``missing``. When
+                # the page proves every box is filled and the only defect is
+                # those (stale) blank API rows — no known partial, no wrong — the
+                # homework is complete on the page, and reporting a 漏答 would be
+                # false. A real partial/wrong still counts: the page can be
+                # filled with a subset just as the API can.
+                progress_text = str(result.get("progress") or "")
+                num, _, den = progress_text.partition("/")
+                page_all_answered = (
+                    num.strip().isdigit() and den.strip().isdigit()
+                    and int(den) > 0 and int(num) >= int(den))
+                api_only_missing = bool(
+                    page_all_answered and audit_block.get("missing")
+                    and not audit_block.get("partial")
+                    and not audit_block.get("wrong"))
+                is_incomplete = (not audit_block.get("complete", True)
+                                 and not api_only_missing)
                 screenshot_path = ""
                 if is_incomplete and screenshot:
                     try:
@@ -1546,8 +1576,16 @@ class PatrolEngine:
                     "deadline": result.get("deadline"),
                     "progress": result.get("progress"),
                     "withdrawable": result.get("withdrawable", False),
-                    "complete": audit_block.get("complete", True),
-                    "missing": audit_block.get("missing", []),
+                    # The reconciled verdict: a page that shows N/N with only
+                    # stale blank API rows is complete, not incomplete.
+                    "complete": (True if api_only_missing
+                                 else audit_block.get("complete", True)),
+                    "missing": ([] if api_only_missing
+                                else audit_block.get("missing", [])),
+                    # Kept for transparency: the API rows that lagged the page.
+                    "api_only_missing": (audit_block.get("missing", [])
+                                         if api_only_missing else []),
+                    "filled_on_page": page_all_answered,
                     "partial": audit_block.get("partial", []),
                     "wrong": audit_block.get("wrong", []),
                     "unjudged": audit_block.get("unjudged", []),
@@ -1556,6 +1594,8 @@ class PatrolEngine:
                     "api_says_submitted": result.get("api_says_submitted"),
                     "page_says_submitted": result.get("page_says_submitted"),
                     "state_conflicts": result.get("state_conflicts", []),
+                    "note": ("页面答题卡显示已全部作答，接口答案行滞后；"
+                             "按页面判定为已完成" if api_only_missing else ""),
                     "screenshot": screenshot_path,
                 })
                 if is_incomplete:

@@ -164,7 +164,14 @@ def split_blanks(raw: object, expected: int = 0) -> list[str]:
         else:
             parts = [text]
     elif expected > 1:
-        parts = re.split(r"\r?\n|；|;|｜|\|", text)
+        # The brief asks for one value per line, but a model routinely returns
+        # them comma-separated instead (``"@GetMapping,@PostMapping"``). Not
+        # splitting on the comma left the whole payload as a single value, so
+        # ``normalize_answer`` rejected it ("有 2 个空，只收到 1 个答案") and the
+        # entire homework stalled on an answer that was actually correct.
+        # Over-splitting is the safe direction: ``_answer_blank`` reports a
+        # count mismatch rather than silently writing a wrong box.
+        parts = re.split(r"\r?\n|；|;|，|,|、|｜|\|", text)
     else:
         parts = re.split(r"\r?\n", text)
     values = [part.strip() for part in parts if part and part.strip()]

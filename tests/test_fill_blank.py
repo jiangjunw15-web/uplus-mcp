@@ -220,9 +220,96 @@ def test_split_blanks_drops_empty_entries():
     assert split_blanks("@GetMapping\n\n@PostMapping\n") == ["@GetMapping", "@PostMapping"]
 
 
+def test_split_blanks_accepts_comma_separated_values_when_count_is_known():
+    """The brief asks for one value per line, but a model routinely returns
+    them comma-separated. Not splitting left the payload as one value, so
+    ``normalize_answer`` rejected it and the whole homework stalled on a correct
+    answer."""
+    assert split_blanks("@GetMapping,@PostMapping", 2) == ["@GetMapping", "@PostMapping"]
+    assert split_blanks("获取,删除", 2) == ["获取", "删除"]
+    assert split_blanks("获取，删除", 2) == ["获取", "删除"]
+    assert split_blanks("获取、删除", 2) == ["获取", "删除"]
+
+
+def test_split_blanks_keeps_a_single_blank_answer_with_a_comma_intact():
+    """A one-blank answer is never split on a comma: the count is unknown, so a
+    value that merely contains a comma must survive whole."""
+    assert split_blanks("先获取,再删除", 1) == ["先获取,再删除"]
+    assert split_blanks("a,b") == ["a,b"]
+
+
 # --------------------------------------------------------------------------- #
 # page filling
 # --------------------------------------------------------------------------- #
+def test_header_search_box_is_not_used_as_an_answer_box():
+    """With no answer-labelled box, the whole-page fallback used to return every
+    visible input — including the header search field. The first blank then went
+    into the search box while the real box stayed empty. Search/filter fields are
+    now excluded in every branch."""
+    class _HintedBox:
+        def __init__(self, hint=""):
+            self.value = ""
+            self._hint = hint
+
+        def get_attribute(self, name):
+            return self._hint if name in ("placeholder", "aria-label") else None
+
+    class _Handle:
+        def __init__(self, box):
+            self._box = box
+
+        def fill(self, value, timeout=None):
+            self._box.value = value
+
+        def input_value(self):
+            return self._box.value
+
+        def inner_text(self):
+            return self._box.value
+
+        def get_attribute(self, name):
+            return self._box.get_attribute(name)
+
+        def is_visible(self):
+            return True
+
+    class _Loc:
+        def __init__(self, page, selector):
+            self._page = page
+
+        def count(self):
+            return len(self._page.boxes) if "textarea" in self._page._selector_kind else 0
+
+        def nth(self, index):
+            return _Handle(self._page.boxes[index])
+
+        @property
+        def first(self):
+            return self
+
+        def is_visible(self):
+            return True
+
+    class _Page:
+        def __init__(self, boxes):
+            self.boxes = boxes
+            self._selector_kind = "textarea"
+
+        def locator(self, selector):
+            return _Loc(self, selector)
+
+        def evaluate(self, script, arg=None):
+            return False  # whole-page fallback scope
+
+    page = _Page([_HintedBox("搜索课程"), _HintedBox("")])
+
+    boxes = _operator()._blank_boxes(page, expected=1)
+
+    # The search field was dropped; only the real box remains.
+    assert len(boxes) == 1
+    assert boxes[0]._box is page.boxes[1]
+
+
 def test_one_blank_goes_into_the_only_box():
     page = _BlankPage(boxes=1)
     out = _operator().fill_question(

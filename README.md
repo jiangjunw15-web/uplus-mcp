@@ -13,6 +13,61 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.13
+
+The U+ interface's answer rows lag behind the answer page: a question the student
+filled can still come back with an empty `userAnswer`, and a homework handed in
+on the page can read as `submitTask=0`. The 0.8.12 audit used the interface for
+"which boxes have text" and the page for "is it handed in" without reconciling
+them, which produced a self-contradictory verdict (「漏答 N 题，已出分无法撤回」)
+in real use. This release fixes that class of misjudgement plus the other real
+defects a further full-source review confirmed. No tool signature or existing
+behaviour changes.
+
+- **Both truth sources are reported.** Every audit returns
+  `api_says_submitted` / `page_says_submitted`; when they disagree it lists
+  `state_conflicts` and a `note` saying the page button is authoritative for
+  submission and the漏答/漏选 verdict comes from the interface and may be stale.
+- **An all-answered page is no longer reported as 漏答.** `finish_then_review`
+  phase 2 reads the page answer card (`progress`): when it shows `N/N` and the
+  audit's only finding is blank interface rows — no real partial, no wrong — the
+  homework is complete. The lagging rows are kept as `api_only_missing` for
+  transparency. A real multi-select partial (page filled with a subset) is still
+  reported.
+- **The written review report gains a 「页面状态与接口状态差异」 section**, and
+  `patrol`'s incomplete note explains a stale-interface case instead of asserting
+  a bare gap.
+- **`withdrawable` distinguishes "unknown".** When the page was not read
+  (`refresh_page_state=False` or the read failed) it is `None` with
+  `withdrawable_source="unknown"`, not `False`; the CLI and report say 「需开页
+  确认」 rather than 「已出分不可撤回」.
+- **The journal is no longer used as a standard answer.** It records what *this
+  tool* submitted, so treating it as the reference was circular:
+  `userAnswer == journal` always held, so a multi-select the model answered
+  incompletely (AB instead of ABCD) scored `correct` and was never reported — the
+  fuller the journal, the more 漏选 slipped through. It may now stand in for a
+  reference only when it proves a gap (the submission is a strict subset of the
+  recorded intent); otherwise the question is `unjudged`. The platform's own
+  answer still wins when it is available.
+- **`repair_homework` no longer claims a withdrawal that did not happen.**
+  `withdraw_homework` returns `"not_submitted"` without raising when the page
+  shows the homework was never handed in; the repair now says so and reports
+  `withdrawn=False` instead of 「已撤回」.
+- **Comma-separated fill-blank answers no longer stall the homework.**
+  `split_blanks` now splits multi-blank answers on `,` `，` `、` as well (a
+  single-blank answer is never split, so a value containing a comma survives).
+- **The fill-blank box picker excludes search/filter fields** even when no
+  answer-labelled box exists, so a whole-page fallback can no longer type the
+  first blank into the header search box.
+- **Speed (verdicts unchanged).** `page_stem_positions` waits for the visible stem
+  to change after a navigation instead of a fixed 1 s per question; `open`
+  gained a `settle` flag (`open_homework` defaults to no generic settle because
+  every caller waits for readiness itself — ~2.3 s saved per homework page,
+  screenshots keep settling); the duplicated "list questions then fetch each
+  detail" blocks share one helper; `audit_questions` and `_blank_boxes` stop
+  computing the same thing twice.
+- **Tests.** 464 pass with no regressions; `ruff --select F,B` clean.
+
 ## What's new in 0.8.12
 
 A new **two-phase** orchestration separates "answer the homework" from "check

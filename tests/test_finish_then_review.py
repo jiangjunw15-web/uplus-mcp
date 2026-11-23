@@ -315,6 +315,83 @@ def test_review_report_file_carries_real_data(tmp_path):
     assert "完整" in text
 
 
+def test_page_all_answered_overrides_stale_api_blanks(tmp_path):
+    """The page's answer card shows 20/20 but the interface still reports blank
+    answer rows. The page is authoritative: the homework is complete, the blanks
+    are kept only as ``api_only_missing`` for transparency, and no false 漏答
+    takeover entry is produced."""
+    tasks = [_task("t1", "作业一", 4102444800000)]
+    engine, _, _ = _finish_engine(tmp_path, tasks=tasks)
+    engine.audit_homework = Mock(return_value={
+        "status": "submitted_pending", "status_label": "待批改",
+        "deadline": "", "progress": "20/20", "withdrawable": True,
+        "api_says_submitted": False, "page_says_submitted": True,
+        "state_conflicts": ["接口显示未提交、页面已显示提交（页面按钮更权威）"],
+        "audit": {"complete": False,
+                  "missing": [{"order": 1}, {"order": 2}],
+                  "partial": [], "wrong": [], "unjudged": []},
+    })
+
+    result = engine.finish_then_review()
+
+    row = result["review"][0]
+    assert row["complete"] is True
+    assert row["filled_on_page"] is True
+    assert row["missing"] == []
+    assert [m["order"] for m in row["api_only_missing"]] == [1, 2]
+    assert "页面答题卡显示已全部作答" in row["note"]
+    # No false 漏答 takeover entry.
+    assert result["summary"]["review_incomplete"] == 0
+    assert not any(t.get("phase") == "review" for t in result["takeover"])
+
+
+def test_page_partial_progress_does_not_override_stale_blanks(tmp_path):
+    """A page that is only partially filled keeps the incomplete verdict even if
+    the API happens to agree — the override is only for a proven N/N page."""
+    tasks = [_task("t1", "作业一", 4102444800000)]
+    engine, _, _ = _finish_engine(tmp_path, tasks=tasks)
+    engine.audit_homework = Mock(return_value={
+        "status": "not_submitted", "status_label": "未提交",
+        "deadline": "", "progress": "12/20", "withdrawable": False,
+        "api_says_submitted": False, "page_says_submitted": False,
+        "state_conflicts": [],
+        "audit": {"complete": False,
+                  "missing": [{"order": 3}],
+                  "partial": [], "wrong": [], "unjudged": []},
+    })
+
+    result = engine.finish_then_review()
+
+    row = result["review"][0]
+    assert row["complete"] is False
+    assert row["filled_on_page"] is False
+    assert [m["order"] for m in row["missing"]] == [3]
+    assert result["summary"]["review_incomplete"] == 1
+
+
+def test_page_all_answered_does_not_hide_a_real_partial(tmp_path):
+    """An all-answered page still reports a multi-select submitted with only part
+    of the options: the page can be filled with a subset just like the API."""
+    tasks = [_task("t1", "作业一", 4102444800000)]
+    engine, _, _ = _finish_engine(tmp_path, tasks=tasks)
+    engine.audit_homework = Mock(return_value={
+        "status": "submitted_pending", "status_label": "待批改",
+        "deadline": "", "progress": "20/20", "withdrawable": True,
+        "api_says_submitted": True, "page_says_submitted": True,
+        "state_conflicts": [],
+        "audit": {"complete": False, "missing": [],
+                  "partial": [{"order": 5, "missing_letters": "C"}],
+                  "wrong": [], "unjudged": []},
+    })
+
+    result = engine.finish_then_review()
+
+    row = result["review"][0]
+    assert row["complete"] is False
+    assert row["partial"]
+    assert result["summary"]["review_incomplete"] == 1
+
+
 def test_review_surfaces_api_vs_page_state_conflict(tmp_path):
     """When the page shows the homework as submitted but the interface still
     reports blank answers, the review row must carry both truth sources and a

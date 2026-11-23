@@ -142,13 +142,17 @@ def audit_questions(questions: list[Question],
     answer (``answer``) when it is available. That field is only sent after
     grading; an answer that is a *proper subset* of the standard answer is a
     "漏选" (``partial``), while letters outside it are ``wrong``. When the
-    platform hides the answer (still awaiting grading), a locally recorded
-    answer from :mod:`uplus_mcp.journal` is used instead, so homework submitted
-    through this tool can be checked before it is graded. A multi-select with
-    neither source is listed under ``unjudged`` instead of being silently
-    reported as complete. ``complete`` therefore means "no blank question and
-    no partial multi-select"; ``clean`` additionally requires every checked
-    answer to be correct.
+    platform hides the answer (still awaiting grading), the locally recorded
+    answer from :mod:`uplus_mcp.journal` — what this tool itself submitted — may
+    stand in for a reference **only when it proves a gap**: the submitted
+    selection must be a strict subset of the recorded intent. Treating the
+    journal as a standard answer outright was circular (it always matched what
+    was submitted), so a multi-select answered incompletely scored ``correct``
+    and was never reported. A multi-select with no trustworthy reference is
+    listed under ``unjudged`` instead of being silently reported as complete.
+    ``complete`` therefore means "no blank question and no partial
+    multi-select"; ``clean`` additionally requires every checked answer to be
+    correct.
     """
     objective = [q for q in questions if q.auto_answerable]
     missing = [q for q in objective if not q.my_answer]
@@ -165,14 +169,33 @@ def audit_questions(questions: list[Question],
         journal_answer = (expected_answers.get(q.question_id) or "").strip()
         reference = (q.reference_answer or "").strip()
         reference_source = "platform" if reference else ""
-        if not reference and q.type is QuestionType.MULTIPLE and journal_answer:
-            reference = journal_answer
-            reference_source = "journal"
+        # The journal records what *this tool* submitted (operator writes the
+        # normalized answers it just filled). Using it as the standard answer
+        # was circular: ``selected == expected_letters`` then always held, so a
+        # multi-select the model answered incompletely (AB instead of ABCD) was
+        # scored ``correct`` and never reported — the fuller the journal, the
+        # more 漏选 slipped through, the opposite of its purpose.
+        #
+        # The journal is a valid *repair source* (what we meant to submit), not
+        # a correctness judge. It may only stand in for a reference when it
+        # proves a gap: the submitted selection is a strict subset of what we
+        # ourselves intended to select. Otherwise the question stays ``unjudged``
+        # (no trustworthy reference), which is the honest verdict.
+        if (not reference and q.type is QuestionType.MULTIPLE and journal_answer):
+            selected_letters = set(utils.normalize_letters(q.my_answer))
+            intended_letters = set(utils.normalize_letters(journal_answer))
+            if (selected_letters and intended_letters
+                    and selected_letters < intended_letters):
+                reference = journal_answer
+                reference_source = "journal"
         if q.type is QuestionType.FILL_BLANK:
             # The stem says how many boxes the question has, so a half-filled
             # blank is detectable without any standard answer. Reporting it as
             # ``partial`` here keeps "complete" honest even while the homework
-            # is still awaiting grading.
+            # is still awaiting grading. Computed once and reused by the
+            # reference comparison below (``count_blanks`` is a regex scan and
+            # ``split_blanks`` may attempt JSON parsing — 30 questions used to
+            # pay both twice).
             blanks = count_blanks(q.stem)
             got_values = solver.split_blanks(q.my_answer, blanks)
             if blanks > 1 and len(got_values) < blanks:
@@ -222,9 +245,8 @@ def audit_questions(questions: list[Question],
                 # them its own way. Compare value by value so a differently
                 # joined but identical answer is not reported as wrong, and a
                 # half-filled question is reported as missing a blank rather
-                # than as a wrong answer.
-                blanks = count_blanks(q.stem)
-                got_values = solver.split_blanks(q.my_answer, blanks)
+                # than as a wrong answer. ``blanks`` / ``got_values`` were
+                # already computed above for this question type.
                 want_values = solver.split_blanks(reference, blanks)
                 if not want_values:
                     unjudged.append(_entry(
@@ -391,7 +413,13 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
                     orders = "；".join(
                         part for part in (orders, "漏选 " + "、".join(partial_parts)) if part
                     )
-                withdrawable = "可撤回" if item.get("withdrawable") else "已出分不可撤回"
+                # None (page state never read) means "unknown", not "cannot".
+                if item.get("withdrawable"):
+                    withdrawable = "可撤回"
+                elif item.get("withdrawable") is None:
+                    withdrawable = "需开页确认"
+                else:
+                    withdrawable = "已出分不可撤回"
                 lines.append(
                     f"| {item.get('course', '')} | {item.get('name', '')} | "
                     f"{item.get('missing_count', 0)} | {item.get('partial_count', 0)} | "

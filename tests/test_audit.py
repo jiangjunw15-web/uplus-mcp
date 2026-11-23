@@ -131,6 +131,43 @@ def test_journal_answer_detects_partial_before_grading():
     assert result["partial"][0]["reference_source"] == "journal"
 
 
+def test_journal_answer_equal_to_submission_is_not_a_reference():
+    """The journal records what *this tool* submitted, so it can never judge
+    that answer correct. When it equals the submission it is not a reference:
+    the question stays ``unjudged`` rather than being scored correct.
+
+    This is the circular-reasoning bug: the fuller the journal, the more 漏选
+    slipped through, because ``selected == expected_letters`` always held.
+    """
+    q = Q(9, QuestionType.MULTIPLE, "AB", True)
+    result = audit_questions([q], expected_answers={"q9": "AB"})
+    assert result["correct"] == 0
+    assert result["partial_count"] == 0
+    assert result["unjudged_count"] == 1
+    assert result["complete"] is True     # no proven blank, no proven partial
+    assert result["verified"] is False    # but nothing was actually checked
+
+
+def test_journal_superset_of_submission_reports_the_missing_letters():
+    """The recorded intent is a strict superset of what was actually submitted —
+    a real 漏选, and the journal is the only source that can prove it."""
+    q = Q(10, QuestionType.MULTIPLE, "AB", True)
+    result = audit_questions([q], expected_answers={"q10": "ABCD"})
+    assert result["partial_count"] == 1
+    assert result["partial"][0]["missing_letters"] == "CD"
+    assert result["complete"] is False
+
+
+def test_platform_answer_still_wins_over_the_journal():
+    """A graded homework exposes the platform's own answer; it must be used, not
+    the journal (which may record an older, incomplete submission)."""
+    q = Q(11, QuestionType.MULTIPLE, "AB", True, reference="ABCD")
+    result = audit_questions([q], expected_answers={"q11": "AB"})
+    assert result["partial_count"] == 1
+    assert result["partial"][0]["missing_letters"] == "CD"
+    assert result["partial"][0]["reference_source"] == "platform"
+
+
 def test_multiselect_without_any_reference_is_unjudged_not_complete():
     q = Q(8, QuestionType.MULTIPLE, "AB", True)
     result = audit_questions([q])
@@ -359,6 +396,32 @@ def test_page_read_failure_reports_no_conflict():
     assert "note" not in result
 
 
+def test_withdrawable_is_unknown_when_the_page_was_not_read():
+    """``withdrawable`` must be None (unknown), not False, when the page state was
+    never read: the API flag alone keeps submitTask=0 for handed-in work, so
+    False would assert "cannot withdraw" when the truth is "cannot tell"."""
+    class Boom:
+        def open_homework(self, task):
+            raise RuntimeError("页面打不开")
+
+        def read_page_state(self, page):
+            return None, None
+
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": "A"}})
+    engine.operator = Boom()
+    result = engine.audit_homework("t1", "c1")
+    assert result["withdrawable"] is None
+    assert result["withdrawable_source"] == "unknown"
+
+
+def test_withdrawable_comes_from_the_page_when_it_was_read():
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": "A"}})
+    engine.operator = FakeOperator(HomeworkStatus.SUBMITTED_PENDING)
+    result = engine.audit_homework("t1", "c1")
+    assert result["withdrawable"] is True
+    assert result["withdrawable_source"] == "page"
+
+
 # --------------------------------------------------------------------------- #
 # engine.repair_homework
 # --------------------------------------------------------------------------- #
@@ -388,6 +451,37 @@ def test_repair_withdraws_fills_and_resubmits_missing_question():
     assert answers == {"q1": "A", "q2": "B"}
     assert kwargs["allow_subjective_skips"] is True
     assert result["audit_after"]["complete"] is True
+
+
+def test_repair_does_not_claim_a_withdrawal_that_did_not_happen():
+    """When the page shows the homework was never submitted, withdraw_homework
+    returns "not_submitted" without raising. The repair still fills the gaps, but
+    it must report that no withdrawal happened instead of 「作业已撤回」."""
+    class NoWithdrawOperator(RepairOperator):
+        def withdraw_homework(self, page, task):
+            self.withdraw_calls += 1
+            # The page disagrees with the API: it says the homework is open.
+            self.page_status = HomeworkStatus.NOT_SUBMITTED
+            return "not_submitted"
+
+    engine = _engine({
+        1: {"type": QuestionType.SINGLE, "answer": "A"},
+        2: {"type": QuestionType.SINGLE, "answer": None},
+    })
+    operator = NoWithdrawOperator(
+        engine.client, HomeworkStatus.SUBMITTED_PENDING)
+    engine.operator = operator
+
+    result = engine.repair_homework("t1", "c1", {"2": "B"}, submit=True)
+
+    assert result["withdrawal"] == "not_submitted"
+    assert result["withdrawn"] is False
+    # It still completed the answers...
+    assert result["submitted"] is True
+    # ...but the note must not claim a withdrawal that never happened. The
+    # success branch says 「已补齐并提交」, not 「已撤回」.
+    assert "已撤回" not in result["note"]
+    assert "已补齐并提交" in result["note"]
 
 
 def test_repair_uses_journal_answer_for_partial_multiselect(tmp_path):

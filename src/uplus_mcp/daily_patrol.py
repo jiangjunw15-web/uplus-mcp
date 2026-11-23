@@ -91,7 +91,14 @@ def main() -> int:
                     )
                     ptail = "…" if len(item["partial"]) > 10 else ""
                     parts.append(f"多选漏选 {len(item['partial'])} 题（题号 {porders}{ptail}）")
-                hint = "，可撤回后补齐" if item["withdrawable"] else "，已出分无法撤回"
+                # ``withdrawable`` is None (not False) when the page state was
+                # never read: "cannot tell" must not be printed as "已出分无法撤回".
+                if item.get("withdrawable"):
+                    hint = "，可撤回后补齐"
+                elif item.get("withdrawable") is None:
+                    hint = "，可否撤回需开页确认"
+                else:
+                    hint = "，已出分无法撤回"
                 print(f"- [{item['course_name']}] {item['name']}：{'；'.join(parts)}{hint}")
         audit_summary = result.get("audit_summary") or {}
         if audit_summary.get("checked") and audit_summary.get("unjudged_multiselect"):
