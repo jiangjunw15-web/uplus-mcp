@@ -385,7 +385,10 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     def open_homework(self, task: HomeworkTask) -> Page:
         url = self.session.url_for(
-            self.ANSWER_ROUTE.format(course_id=task.course_id, task_id=task.task_id)
+            self.ANSWER_ROUTE.format(
+                course_id=utils.safe_url_segment(task.course_id, "course_id"),
+                task_id=utils.safe_url_segment(task.task_id, "task_id"),
+            )
         )
         page = self.session.open(url)
         if "login" in page.url.lower():
@@ -1388,7 +1391,8 @@ class HomeworkOperator:
         time.sleep(0.3)
 
     def read_experiments(self, course: Course) -> list[Experiment]:
-        page = self.session.open(self.EXPERIMENT_ROUTE.format(course_id=course.id))
+        safe_cid = utils.safe_url_segment(course.id, "course_id")
+        page = self.session.open(self.EXPERIMENT_ROUTE.format(course_id=safe_cid))
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")
         self._await_experiment_cards(page)

@@ -171,6 +171,11 @@ class BrowserSession:
     # in-page REST reads
     # ------------------------------------------------------------------ #
     def api_get(self, path: str, *, retries: int = 1) -> dict[str, Any]:
+        url = self.url_for(path)
+        if not utils.is_same_origin(url, self.base_url):
+            raise UplusError(
+                f"拒绝向非平台域名发送携带凭据的 API 请求：{utils.redact_secrets(url)}"
+            )
         page = self.page
         # Ensure the fetch runs inside the platform origin so cookies and CORS
         # apply the same as a human browsing session.
@@ -191,7 +196,6 @@ class BrowserSession:
         if not self._token_present(page):
             self.open("/workbench/index/school")
             page = self.page
-        url = self.url_for(path)
         script = """
         async (url) => {
             const token = localStorage.getItem('AccessToken') || '';
@@ -288,35 +292,37 @@ class BrowserSession:
         except ValueError as exc:
             raise UplusError(f"拒绝下载非 http/https 链接：{exc}") from exc
         masked_url = utils.redact_secrets(url)
-        page = self.page
-        # Same-origin in-page fetch: carries the token and cookies.
-        try:
-            result = page.evaluate(r"""
-            async ([url, timeoutMs]) => {
-                try {
-                    const token = localStorage.getItem('AccessToken') || '';
-                    const headers = {};
-                    if (token) { headers['x-access-token'] = token; }
-                    const ctrl = new AbortController();
-                    const id = setTimeout(() => ctrl.abort(), timeoutMs);
-                    const r = await fetch(url, {credentials: 'include', headers, signal: ctrl.signal});
-                    clearTimeout(id);
-                    const buf = await r.arrayBuffer();
-                    const bytes = new Uint8Array(buf);
-                    let bin = ''; const step = 0x8000;
-                    for (let i = 0; i < bytes.length; i += step) {
-                        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+        # Only attach the platform's AccessToken and credentials when the target
+        # shares the platform origin; never leak x-access-token to third-party hosts.
+        if utils.is_same_origin(url, self.base_url):
+            page = self.page
+            try:
+                result = page.evaluate(r"""
+                async ([url, timeoutMs]) => {
+                    try {
+                        const token = localStorage.getItem('AccessToken') || '';
+                        const headers = {};
+                        if (token) { headers['x-access-token'] = token; }
+                        const ctrl = new AbortController();
+                        const id = setTimeout(() => ctrl.abort(), timeoutMs);
+                        const r = await fetch(url, {credentials: 'include', headers, signal: ctrl.signal});
+                        clearTimeout(id);
+                        const buf = await r.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let bin = ''; const step = 0x8000;
+                        for (let i = 0; i < bytes.length; i += step) {
+                            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+                        }
+                        return {ok: r.ok, status: r.status, b64: btoa(bin)};
+                    } catch (e) {
+                        return {ok: false, status: 0, error: String(e)};
                     }
-                    return {ok: r.ok, status: r.status, b64: btoa(bin)};
-                } catch (e) {
-                    return {ok: false, status: 0, error: String(e)};
                 }
-            }
-            """, [url, timeout_ms])
-            if result and result.get("ok") and result.get("b64"):
-                return base64.b64decode(result["b64"])
-        except Exception:  # noqa: BLE001 - page may be detached or cross-origin
-            pass
+                """, [url, timeout_ms])
+                if result and result.get("ok") and result.get("b64"):
+                    return base64.b64decode(result["b64"])
+            except Exception:  # noqa: BLE001 - page may be detached or cross-origin
+                pass
         # Fallback: the APIRequestContext is not bound by CORS and shares
         # the browser cookies, so it can reach a cross-origin OSS link.
         if self._context is not None:
@@ -647,8 +653,8 @@ class BrowserSession:
             return {
                 "logged_in": False, "method": method,
                 "reason": "未识别到账号/密码输入框，请改用手动登录",
-                "url": page.url,
-                "body_hint": page.inner_text("body")[:300],
+                "url": utils.redact_secrets(page.url),
+                "body_hint": utils.redact_secrets(page.inner_text("body")[:300]),
             }
         user_box.fill(username)
         pass_box.fill(password)
@@ -668,8 +674,8 @@ class BrowserSession:
         return {
             "logged_in": False, "method": method,
             "reason": reason,
-            "url": status["url"],
-            "body_hint": page.inner_text("body")[:300],
+            "url": utils.redact_secrets(status["url"]),
+            "body_hint": utils.redact_secrets(page.inner_text("body")[:300]),
         }
 
     def login_by_student_id(self, username: str, password: str, school: str, *,
@@ -692,8 +698,8 @@ class BrowserSession:
         if not self._select_school(page, school):
             return {"logged_in": False, "method": "student_id",
                     "reason": f"学校「{school}」未能在下拉里选中，请确认学校全名",
-                    "url": page.url,
-                    "body_hint": page.inner_text("body")[:300]}
+                    "url": utils.redact_secrets(page.url),
+                    "body_hint": utils.redact_secrets(page.inner_text("body")[:300])}
         return self._submit_credentials(page, username, password,
                                         method="student_id", wait_ms=wait_ms)
 
@@ -731,9 +737,9 @@ class BrowserSession:
             pass
         return {
             "logged_in": False, "method": "sms", "manual": True,
-            "tab_selected": tab_ok, "url": page.url,
+            "tab_selected": tab_ok, "url": utils.redact_secrets(page.url),
             "reason": "" if tab_ok else "未能切到短信登录标签页，请在页面上手动选择「短信登录」",
-            "body_hint": body,
+            "body_hint": utils.redact_secrets(body),
         }
 
     def auto_login(self, username: str, password: str, school: str = "",

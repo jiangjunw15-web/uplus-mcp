@@ -118,22 +118,38 @@ jobs:
 
       - name: Configure the Maven credentials
         shell: bash
+        env:
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # GitHub Packages reads the token from a <server> block whose id
-        # matches distributionManagement. The file is written here instead of
-        # relying on setup-java's own template, so its content is exact.
+        # matches distributionManagement. Credentials are passed via env and
+        # XML-escaped to avoid workflow script injection, with 0600 permissions.
         run: |
+          set -euo pipefail
+          umask 077
           mkdir -p "$HOME/.m2"
-          cat > "$HOME/.m2/settings.xml" <<EOF
-          <settings>
-            <servers>
-              <server>
-                <id>github</id>
-                <username>${{ github.actor }}</username>
-                <password>${{ secrets.GITHUB_TOKEN }}</password>
-              </server>
-            </servers>
-          </settings>
-          EOF
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.sax.saxutils import escape
+
+          actor = escape(os.environ["ACTOR"])
+          token = escape(os.environ["GH_TOKEN"])
+          xml = (
+              "<settings>\n"
+              "  <servers>\n"
+              "    <server>\n"
+              "      <id>github</id>\n"
+              f"      <username>{actor}</username>\n"
+              f"      <password>{token}</password>\n"
+              "    </server>\n"
+              "  </servers>\n"
+              "</settings>\n"
+          )
+          target = Path.home() / ".m2" / "settings.xml"
+          target.write_text(xml, encoding="utf-8")
+          os.chmod(target, 0o600)
+          PY
 
       - id: probe
         name: Probe the GitHub Packages registry
@@ -158,7 +174,9 @@ jobs:
 
       - name: The version is already in GitHub Packages
         if: steps.probe.outputs.already_published == 'true'
-        run: echo "::notice::Version ${{ steps.probe.outputs.version }} is already published; the Maven deploy was skipped."
+        env:
+          MVN_VER: ${{ steps.probe.outputs.version }}
+        run: echo "::notice::Version ${MVN_VER} is already published; the Maven deploy was skipped."
 
       - id: publish
         name: Publish to GitHub Packages
@@ -172,7 +190,7 @@ jobs:
         run: |
           set -o pipefail
           mvn --batch-mode deploy -Dmaven.wagon.http.pool=false 2>&1 \
-            | tee "${{ runner.temp }}/mvn-deploy.log"
+            | tee "${RUNNER_TEMP}/mvn-deploy.log"
 
       - name: Upload the Maven publish log
         if: always() && steps.publish.outcome == 'failure'
@@ -189,13 +207,13 @@ jobs:
             echo "### Maven publish failed"
             echo
             echo '```'
-            tail -n 40 "${{ runner.temp }}/mvn-deploy.log" || true
+            tail -n 40 "${RUNNER_TEMP}/mvn-deploy.log" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           # Mirror the interesting lines as error annotations, so the reason
           # is readable from the run page and from the API.
           grep -E '\[ERROR\]|status code|BUILD FAILURE|Could not transfer|Caused by' \
-            "${{ runner.temp }}/mvn-deploy.log" 2>/dev/null | head -n 25 | tr -d '\r' \
+            "${RUNNER_TEMP}/mvn-deploy.log" 2>/dev/null | head -n 25 | tr -d '\r' \
             | while IFS= read -r line; do
                 echo "::error::${line//'%'/'%25'}"
               done || true

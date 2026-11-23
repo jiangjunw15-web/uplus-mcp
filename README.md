@@ -13,6 +13,49 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.11
+
+A full-source security audit fixed eight classes of vulnerability without
+changing any tool signature or behaviour:
+
+- **Cross-origin credential isolation.** `utils.is_same_origin` compares
+  scheme + host:port strictly. `BrowserSession.api_get` refuses to send the
+  `x-access-token` header or `credentials: 'include'` to a non-platform origin;
+  `fetch_bytes` only runs the token-bearing in-page `fetch` for same-origin
+  resources, sending a cross-origin OSS signed link through
+  `context.request.get` instead, so the platform session token never leaks to a
+  third-party host.
+- **Route/query parameter injection.** New `utils.safe_url_segment` validates
+  `course_id`, `task_id`, `homework_id`, `question_id`, `exp_id` and
+  `stu_exp_id`, refusing `..`, `/`, `\`, `?`, `#`, `@`, `%`, whitespace and
+  control characters while passing real IDs through unchanged. Applied in
+  `platform.py`, `operator.py`, `experiment.py` and `materials.py`.
+- **Launcher and config hardening.** `launch_browser_with_cdp` validates its
+  `url` through `safe_navigation_url` before launching (blocking `file://` and
+  Chromium `--flag` argument injection); ports are strictly `1..65535` and
+  booleans are rejected in `cdp_alive`, the launcher and `config.load_config`.
+  `_copy_profile` skips symlinks that point outside the source directory and
+  enables `ignore_dangling_symlinks=True`.
+- **Deeper secret redaction.** `redact_secrets` now also masks
+  `Authorization: Bearer/Basic` credentials, standalone JWTs, whole
+  `Cookie`/`Set-Cookie` lines and `session_id`/`JSESSIONID`/`PHPSESSID`, split on
+  `&` so multi-parameter values are not missed. Applied to `browse.act_batch`
+  failure receipts, `browser` login-failure echoes and `engine` error summaries.
+- **Path and navigation boundaries.** `resolve_io_path` refuses empty paths and
+  NUL bytes, and fails closed when `allowed_io_paths` is configured but none
+  resolve; `safe_navigation_url` refuses control characters.
+- **Same-origin materials crawl.** `materials.walk` checks same-origin at the
+  entry and on every sub-folder jump, so a page link cannot trigger a
+  cross-origin crawl.
+- **Selector and atomic-write hardening.** `browse.snapshot` `CSS.escape`s the
+  `data-testid` and `name` attributes; `journal.record` writes via
+  `tempfile.mkstemp` + `os.replace` instead of a fixed `.tmp` file.
+- **CI publish hardening.** `.github/workflows/publish-packages.yml` passes
+  `ACTOR`/`GH_TOKEN`/`MVN_VER` through `env:`, XML-escapes the Maven
+  `settings.xml` and writes it with `0600` permissions.
+- **Tests.** 13 new security regressions; the full suite passes with no
+  regressions in the existing 386 tests.
+
 ## What's new in 0.8.10
 
 A full re-audit fixed the download path, error redaction and filename handling,

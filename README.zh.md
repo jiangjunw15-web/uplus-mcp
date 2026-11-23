@@ -13,6 +13,20 @@
 
 > **新用户 / AI 助手先读 [rename.md](rename.md)**：那是一份分步引导剧本，写清了从环境检查、安装、注册客户端、三种登录方式（自己/代登录 → 登录方式 → 登录信息 三窗口问答）、巡检、客观题作答到人工接管的每一步该调用什么工具、向用户说什么、成功信号与失败回退。
 
+## 0.8.11 版本更新（跨源凭据隔离 + 路由参数/命令行注入防护 + 深度脱敏）
+
+本版在不改变任何工具签名与原有功能的前提下，修复全量代码审计中发现的 8 类安全漏洞：
+
+- **跨源凭据隔离**：新增 `utils.is_same_origin` 按协议 + 主机端口严格校验同源。`BrowserSession.api_get` 拒绝向非平台域名发送携带 `x-access-token` 与 `credentials:'include'` 的请求；`fetch_bytes` 仅对同源资源执行带令牌的页内 `fetch`，跨域 OSS 签名链接改走 `context.request.get`，平台会话令牌不再外泄给第三方域名。
+- **路由与查询参数防注入**：新增 `utils.safe_url_segment`，统一校验 `course_id`、`task_id`、`homework_id`、`question_id`、`exp_id`、`stu_exp_id`，拒绝 `..`、`/`、`\`、`?`、`#`、`@`、`%`、空白与控制字符，同时让合法 ID 原样通过；应用于 `platform.py`、`operator.py`、`experiment.py`、`materials.py`。
+- **启动器与配置加固**：`launch_browser_with_cdp` 启动浏览器前先用 `safe_navigation_url` 校验目标 `url`，阻止 `file://` 与以 `-` 开头的 Chromium 命令行标志注入；`cdp_alive`、启动器与 `config.load_config` 统一把端口限定在 `1..65535` 且排除布尔值。`_copy_profile` 复制 profile 时跳过指向源目录外部的符号链接，并启用 `ignore_dangling_symlinks=True`。
+- **敏感信息深度脱敏**：`redact_secrets` 新增覆盖 `Authorization: Bearer/Basic` 凭据、独立 JWT、整行 `Cookie`/`Set-Cookie` 与 `session_id`/`JSESSIONID`/`PHPSESSID`，并按 `&` 分界避免多参数遗漏；同步覆盖 `browse.act_batch` 错误回执、`browser` 登录失败回显与 `engine` 异常文本。
+- **路径边界与导航加固**：`resolve_io_path` 拒绝空路径与空字节 `\x00`，配置了 `allowed_io_paths` 但全部无法解析时改为 fail-closed 拒绝；`safe_navigation_url` 拒绝控制字符。
+- **资料爬取同源限制**：`materials.walk` 入口与子文件夹跳转校验同源，防止页面外链触发跨源爬取。
+- **选择器与原子写加固**：`browse.snapshot` 对 `data-testid` / `name` 做 `CSS.escape` 防止选择器注入；`journal.record` 改用 `tempfile.mkstemp` + `os.replace` 原子写入，替代固定 `.tmp` 文件名。
+- **CI 发布流水线加固**：`.github/workflows/publish-packages.yml` 通过 `env:` 传递 `ACTOR`/`GH_TOKEN`/`MVN_VER`，对 Maven `settings.xml` 做 XML 转义并以 `0600` 权限写出，消除工作流脚本注入风险。
+- **测试**：新增 13 组安全回归用例；全量测试通过，原有 386 项零回归。
+
 ## 0.8.10 版本更新（下载链接与文件名安全加固 + 过期作业跳过）
 
 再次完整审查后修复的几处安全与效率问题：

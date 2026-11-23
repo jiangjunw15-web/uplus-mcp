@@ -83,7 +83,7 @@ class PatrolEngine:
         except AuthExpiredError:
             raise
         except Exception as exc:  # noqa: BLE001 - keep the listing alive
-            return str(exc)
+            return utils.redact_secrets(str(exc))
         return ""
 
     @staticmethod
@@ -300,7 +300,7 @@ class PatrolEngine:
                     row["submitted_source"] = "detail_page"
                 row["submitted_files"] = list(detail.submitted_files)
             except Exception as exc:  # noqa: BLE001 - keep the list usable
-                row["submitted_source"] = f"list_badge（复核失败：{exc}）"
+                row["submitted_source"] = f"list_badge（复核失败：{utils.redact_secrets(str(exc))}）"
         return row
 
     def scan_course(self, course_id: str, *, refresh_page_state: bool = True,
@@ -407,7 +407,7 @@ class PatrolEngine:
             except AuthExpiredError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep downloading others
-                errors.append(f"实验附件 {attachment.name}：{exc}")
+                errors.append(f"实验附件 {attachment.name}：{utils.redact_secrets(str(exc))}")
                 continue
             downloaded.append({"name": attachment.name, "path": str(path),
                                "source": "实验附件"})
@@ -425,7 +425,7 @@ class PatrolEngine:
             except AuthExpiredError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep downloading others
-                errors.append(f"实验手册 {link.name}：{exc}")
+                errors.append(f"实验手册 {link.name}：{utils.redact_secrets(str(exc))}")
                 continue
             downloaded.append({"name": link.name, "path": str(path),
                                "source": "实验手册"})
@@ -459,7 +459,7 @@ class PatrolEngine:
             except AuthExpiredError:
                 raise
             except Exception as exc:  # noqa: BLE001 - keep downloading others
-                errors.append(f"资料 {entry.name}：{exc}")
+                errors.append(f"资料 {entry.name}：{utils.redact_secrets(str(exc))}")
                 continue
             downloaded.append({"name": entry.name, "path": str(path),
                                "source": "资料"})

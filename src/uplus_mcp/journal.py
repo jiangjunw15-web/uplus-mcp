@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from .config import Config
@@ -51,9 +52,20 @@ def record(config: Config, *, task_id: str, homework_id: str, name: str,
     }
     path = journal_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".answer_journal_", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 

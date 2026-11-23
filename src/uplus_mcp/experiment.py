@@ -117,7 +117,9 @@ class ExperimentOperator:
     def open_detail(self, course_id: str, exp_id: str,
                     stu_exp_id: str) -> Page:
         url = self.DETAIL_ROUTE.format(
-            course_id=course_id, exp_id=exp_id, stu_exp_id=stu_exp_id
+            course_id=utils.safe_url_segment(course_id, "course_id"),
+            exp_id=utils.safe_url_segment(exp_id, "exp_id"),
+            stu_exp_id=utils.safe_url_segment(stu_exp_id, "stu_exp_id"),
         )
         page = self._open_page(url)
         if "login" in page.url.lower():
@@ -309,8 +311,9 @@ class ExperimentOperator:
     # ------------------------------------------------------------------ #
     def list_experiment_ids(self, course: Course) -> list[dict]:
         """Return [{name, exp_id, stu_exp_id, status, material, deadline}]."""
+        safe_cid = utils.safe_url_segment(course.id, "course_id")
         page = self._open_page(
-            f"/course/course/{course.id}/ExperimentPage?userRole="
+            f"/course/course/{safe_cid}/ExperimentPage?userRole="
         )
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")

@@ -88,24 +88,28 @@ class PlatformClient:
     # homeworks
     # ------------------------------------------------------------------ #
     def list_homeworks(self, course_id: str) -> list[HomeworkTask]:
-        payload = self.session.api_get(self.HOMEWORKS_PATH.format(course_id=course_id))
+        safe_cid = utils.safe_url_segment(course_id, "course_id")
+        payload = self.session.api_get(self.HOMEWORKS_PATH.format(course_id=safe_cid))
         raw_list = _unpack_list(payload)
         return [HomeworkTask.from_api(raw, course_id) for raw in raw_list]
 
     def homework_detail(self, task_id: str) -> dict:
-        payload = self.session.api_get(self.HOMEWORK_DETAIL_PATH.format(task_id=task_id))
+        safe_tid = utils.safe_url_segment(task_id, "task_id")
+        payload = self.session.api_get(self.HOMEWORK_DETAIL_PATH.format(task_id=safe_tid))
         return _unpack_object(payload)
 
     # ------------------------------------------------------------------ #
     # questions
     # ------------------------------------------------------------------ #
     def list_questions(self, homework_id: str) -> list[Question]:
-        payload = self.session.api_get(self.QUESTIONS_PATH.format(homework_id=homework_id))
+        safe_hid = utils.safe_url_segment(homework_id, "homework_id")
+        payload = self.session.api_get(self.QUESTIONS_PATH.format(homework_id=safe_hid))
         raw_list = _unpack_list(payload)
         return [Question.from_meta(raw) for raw in raw_list]
 
     def question_detail(self, question_id: str) -> Question:
+        safe_qid = utils.safe_url_segment(question_id, "question_id")
         payload = self.session.api_get(
-            self.QUESTION_DETAIL_PATH.format(question_id=question_id)
+            self.QUESTION_DETAIL_PATH.format(question_id=safe_qid)
         )
         return Question.from_detail(_unpack_object(payload))

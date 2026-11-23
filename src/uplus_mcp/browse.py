@@ -90,10 +90,10 @@ class BrowseTools:
           const selectorFor = (el) => {
             if (el.id) return '#' + CSS.escape(el.id);
             const testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
-            if (testid) return `[data-testid="${testid}"]`;
+            if (testid) return `[data-testid="${CSS.escape(testid)}"]`;
             const name = el.getAttribute('name');
             if (name && ['input','select','textarea'].includes(el.tagName.toLowerCase()))
-              return `${el.tagName.toLowerCase()}[name="${name}"]`;
+              return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
             // build a short structural path
             const parts = [];
             let cur = el, depth = 0;
@@ -392,7 +392,7 @@ class BrowseTools:
                 failure = {"index": index, "op": op, "error": "操作超时，页面可能仍在加载"}
                 break
             except Exception as exc:  # noqa: BLE001 - receipt keeps the batch honest
-                failure = {"index": index, "op": op, "error": str(exc)[:200]}
+                failure = {"index": index, "op": op, "error": utils.redact_secrets(str(exc))[:200]}
                 break
 
         out: dict = {

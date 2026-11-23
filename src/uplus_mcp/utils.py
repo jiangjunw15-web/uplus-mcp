@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -28,7 +28,10 @@ def safe_navigation_url(raw: str, *, base_url: str = "") -> str:
     host. Raises ``ValueError`` for any other scheme (notably ``file://``) or a
     malformed URL, so the caller surfaces the refusal instead of navigating.
     """
-    candidate = (raw or "").strip()
+    raw_str = raw or ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw_str):
+        raise ValueError("导航 URL 不能包含控制字符")
+    candidate = raw_str.strip()
     if not candidate:
         raise ValueError("导航 URL 不能为空")
     parsed = urlparse(candidate)
@@ -46,6 +49,35 @@ def safe_navigation_url(raw: str, *, base_url: str = "") -> str:
     if not parsed.netloc:
         raise ValueError(f"URL 缺少主机名：{candidate!r}")
     return candidate if urlparse(candidate).scheme else parsed.geturl()
+
+
+def is_same_origin(url: str, base_url: str) -> bool:
+    """True when ``url`` and ``base_url`` share the same scheme and host:port."""
+    left = urlparse((url or "").strip())
+    right = urlparse((base_url or "").strip())
+    return bool(
+        left.scheme and left.netloc
+        and left.scheme.lower() == right.scheme.lower()
+        and left.netloc.lower() == right.netloc.lower()
+    )
+
+
+def safe_url_segment(value: object, label: str = "id") -> str:
+    r"""Validate and encode a single URL path/query identifier segment.
+
+    Prevents path traversal (``..``, ``/``, ``\``), query/fragment injection
+    (``?``, ``#``, ``&``) and authority confusion (``@``) when interpolating
+    MCP-supplied IDs into platform routes.
+    """
+    raw = str(value or "")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        raise ValueError(f"{label} 包含非法控制字符")
+    text = raw.strip()
+    if not text:
+        raise ValueError(f"{label} 不能为空")
+    if text in (".", "..") or ".." in text or any(ch in text for ch in "/\\?#@%& \t"):
+        raise ValueError(f"{label} 包含非法路径字符：{text!r}")
+    return quote(text, safe="-_.")
 
 
 def strip_html(html: Optional[str]) -> str:
@@ -87,19 +119,33 @@ def extract_images(html: Optional[str]) -> list[str]:
     return out
 
 
+_BEARER_AUTH_RE = re.compile(
+    r'(?i)(\b(?:bearer|basic)\s+)([A-Za-z0-9._~+/=-]{6,})'
+)
+_JWT_RE = re.compile(
+    r'\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'
+)
+_COOKIE_HEADER_RE = re.compile(
+    r'(?i)(\b(?:set-)?cookie\s*:\s*)([^\r\n]+)'
+)
 _TOKEN_KEY_RE = re.compile(
     r'(?i)("?[a-z0-9_-]*(?:token|secret|password|api[_-]?key|authorization|'
-    r'signature|access[_-]?key(?:[_-]?id)?|credential|cookie)"?\s*[=:]\s*)'
-    r'"?([^",\s}]{6,})"?'
+    r'signature|access[_-]?key(?:[_-]?id)?|credential|cookie|session[_-]?id|'
+    r'jsessionid|phpsessid)"?\s*[=:]\s*)'
+    r"""["']?([^",'\s}&]{6,})["']?"""
 )
 
 
 def redact_secrets(text: Optional[str]) -> str:
-    """Mask credential-looking key/value pairs before text reaches the model
-    context or an error message (platform API bodies may carry tokens)."""
+    """Mask credential-looking key/value pairs, auth schemes, cookies and JWTs
+    before text reaches the model context or an error message."""
     if not text:
         return ""
-    return _TOKEN_KEY_RE.sub(r"\1***", text)
+    out = _BEARER_AUTH_RE.sub(r"\1***", text)
+    out = _JWT_RE.sub("***", out)
+    out = _COOKIE_HEADER_RE.sub(r"\1***", out)
+    out = _TOKEN_KEY_RE.sub(r"\1***", out)
+    return out
 
 
 def now_ms() -> int:
@@ -261,17 +307,29 @@ def resolve_io_path(raw: str | os.PathLike, allowed_roots: Iterable[Path],
     when the path escapes every allowed root; ``FileNotFoundError`` when
     ``must_exist`` is set and the file is absent.
     """
-    candidate = Path(raw).expanduser()
+    raw_str = os.fspath(raw)
+    if isinstance(raw_str, bytes):
+        if b"\x00" in raw_str or not raw_str.strip():
+            raise PermissionError(f"路径无效：{raw!r}")
+    else:
+        if "\x00" in raw_str or not raw_str.strip():
+            raise PermissionError(f"路径无效：{raw!r}")
     try:
+        candidate = Path(raw).expanduser()
         resolved = candidate.resolve(strict=False)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise PermissionError(f"路径无法解析：{raw!r}") from exc
+    raw_roots = list(allowed_roots)
     roots: list[Path] = []
-    for root in allowed_roots:
+    for root in raw_roots:
         try:
             roots.append(Path(root).expanduser().resolve(strict=False))
-        except OSError:  # noqa: PERF203 - an unreadable root simply cannot match
+        except (OSError, ValueError):  # noqa: PERF203 - an unreadable root simply cannot match
             continue
+    if raw_roots and not roots:
+        raise PermissionError(
+            "配置的 allowed_io_paths / UPLUS_ALLOWED_PATHS 均无法解析，已拒绝访问。"
+        )
     if roots and not any(resolved == root or root in resolved.parents
                          for root in roots):
         shown = "、".join(str(root) for root in roots)

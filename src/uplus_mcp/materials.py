@@ -278,6 +278,10 @@ def walk(
                             entry.href, base_url=parent_url)
                     except ValueError as exc:
                         raise UplusError(f"资料文件夹链接被拒绝：{exc}") from exc
+                    if not utils.is_same_origin(target, parent_url):
+                        raise UplusError(
+                            f"拒绝跳转到非同源资料目录：{utils.redact_secrets(target)}"
+                        )
                     page.goto(target, wait_until="domcontentloaded")
                 else:
                     # No href: the folder is a clickable row.
@@ -316,11 +320,18 @@ def walk(
                         pass
 
     # Start from the course home page.
-    home = session.open(f"/course/course/{course_id}")
+    safe_cid = utils.safe_url_segment(course_id, "course_id")
+    home = session.open(f"/course/course/{safe_cid}")
     entry_href = _find_material_entry(home)
     if not entry_href:
         return results
-    folder_page = session.open(entry_href)
+    try:
+        safe_entry = utils.safe_navigation_url(entry_href, base_url=home.url)
+    except ValueError:
+        return results
+    if not utils.is_same_origin(safe_entry, getattr(session, "base_url", "") or home.url):
+        return results
+    folder_page = session.open(safe_entry)
     try:
         folder_page.wait_for_load_state("networkidle", timeout=8000)
     except PWTimeout:

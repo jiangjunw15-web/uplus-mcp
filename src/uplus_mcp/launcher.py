@@ -38,6 +38,8 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from . import utils
+
 DEFAULT_CDP_PORT = 9333
 FALLBACK_CDP_PORT = 9222
 
@@ -155,10 +157,20 @@ def default_ports(primary: int = DEFAULT_CDP_PORT) -> tuple[int, ...]:
     return tuple(ports)
 
 
+def _validate_port(port: int) -> int:
+    if isinstance(port, bool):
+        raise ValueError(f"非法端口号：{port!r}")
+    port_num = int(port)
+    if not 1 <= port_num <= 65535:
+        raise ValueError(f"端口号超出范围（1-65535）：{port_num}")
+    return port_num
+
+
 def cdp_alive(port: int, timeout: float = 1.5) -> bool:
     try:
+        port_num = _validate_port(port)
         with urllib.request.urlopen(  # nosec B310 - fixed loopback URL
-            f"http://127.0.0.1:{int(port)}/json/version", timeout=timeout
+            f"http://127.0.0.1:{port_num}/json/version", timeout=timeout
         ) as r:
             return r.status == 200
     except Exception:  # noqa: BLE001 - any failure means "not ready"
@@ -213,8 +225,24 @@ def _copy_profile(src: Path, dst: Path) -> None:
     is verifiably a browser profile copy (contains ``Local State``) or is
     empty, and never when it overlaps the source profile itself.
     """
+    src_resolved = src.resolve()
+
     def ignore(directory: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in CACHE_DIRS or n.endswith(".tmp")}
+        skipped = {n for n in names if n in CACHE_DIRS or n.endswith(".tmp")}
+        base = Path(directory)
+        for n in names:
+            if n in skipped:
+                continue
+            item = base / n
+            if item.is_symlink():
+                try:
+                    target = item.resolve(strict=False)
+                except OSError:
+                    skipped.add(n)
+                    continue
+                if target != src_resolved and src_resolved not in target.parents:
+                    skipped.add(n)
+        return skipped
 
     src_r = os.path.normcase(str(src.resolve()))
     dst_r = os.path.normcase(str(dst.resolve()))
@@ -235,7 +263,7 @@ def _copy_profile(src: Path, dst: Path) -> None:
             )
     if dst.exists():
         shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)
+    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True, ignore_dangling_symlinks=True)
 
 
 def ensure_profile_copy(force: bool = False, profile_root: Optional[Path] = None,
@@ -318,6 +346,8 @@ def launch_browser_with_cdp(
     Returns a small status dict. Raises ``RuntimeError`` when no supported
     browser is found or the port never opens.
     """
+    port = _validate_port(port)
+    safe_url = utils.safe_navigation_url(url)
     if cdp_alive(port):
         return {"launched": False, "port": port, "reason": "端口已在监听，直接复用"}
 
@@ -340,7 +370,7 @@ def launch_browser_with_cdp(
         "--remote-debugging-address=127.0.0.1",
         "--no-first-run",
         "--no-default-browser-check",
-        url,
+        safe_url,
     ]
     creationflags = 0
     if sys.platform == "win32":

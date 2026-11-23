@@ -145,6 +145,16 @@ def _normalize_browser(raw: str) -> str:
     return value if value in BROWSER_CHOICES else BROWSER_AUTO
 
 
+def _normalize_port(raw: object, default: int = DEFAULT_CDP_PORT) -> int:
+    if isinstance(raw, bool):
+        return default
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return port if 1 <= port <= 65535 else default
+
+
 def _allowed_io_paths(data: dict, report_dir: str) -> list[str]:
     """File-tool roots: config key / env override / safe default.
 
@@ -200,7 +210,7 @@ def load_config(path: Optional[str] = None) -> Config:
         report_dir=report_dir,
         auto_launch_browser=utils.coerce_bool(auto_launch, True),
         browser=_normalize_browser(browser_raw),
-        cdp_port=int(cdp_port),
+        cdp_port=_normalize_port(cdp_port),
         profile_dir=str(data.get("profile_dir", "")),
         include_expired_courses=utils.coerce_bool(
             data.get("include_expired_courses", False), False),
@@ -218,7 +228,7 @@ def load_config(path: Optional[str] = None) -> Config:
     # Environment overrides for per-machine settings.
     env_port = os.environ.get("UPLUS_CDP_PORT")
     if env_port and env_port.strip().isdigit():
-        cfg.cdp_port = int(env_port)
+        cfg.cdp_port = _normalize_port(env_port, cfg.cdp_port)
     env_browser = os.environ.get("UPLUS_BROWSER")
     if env_browser:
         cfg.browser = _normalize_browser(env_browser)
