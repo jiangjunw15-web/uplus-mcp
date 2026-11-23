@@ -37,6 +37,7 @@ class HomeworkRow:
     question_count: int
     score: Optional[float]
     note: str = ""
+    state_conflicts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -92,6 +93,18 @@ class PatrolReport:
 
 
 def add_homework(report: PatrolReport, course: Course, task: HomeworkTask, *, note: str = "") -> None:
+    # Reconcile interface vs page state for the report's conflict section.
+    api_status_value = task.raw.get("_api_status_value") or task.status.value
+    page_says_submitted = task.page_status in (
+        HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+    api_says_submitted = api_status_value in (
+        HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+    conflicts: list[str] = []
+    if task.page_status is not None and api_says_submitted != page_says_submitted:
+        if page_says_submitted:
+            conflicts.append("接口显示未提交、页面已显示提交（页面按钮更权威）")
+        else:
+            conflicts.append("接口显示已提交、页面仍可作答（页面按钮更权威）")
     report.rows.append(
         HomeworkRow(
             course_name=course.name,
@@ -101,6 +114,7 @@ def add_homework(report: PatrolReport, course: Course, task: HomeworkTask, *, no
             question_count=task.question_count,
             score=task.score,
             note=note,
+            state_conflicts=conflicts,
         )
     )
 
@@ -366,6 +380,22 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
             f"{deadline} | {qcount} | {score} |"
         )
     lines.append("")
+
+    # ---- page/interface state conflicts ----
+    conflicted_rows = [r for r in report.rows if getattr(r, "state_conflicts", None)]
+    if conflicted_rows:
+        lines.append("## 页面状态与接口状态差异")
+        lines.append("")
+        lines.append(
+            "以下作业的「作答页按钮」与「接口提交状态」不一致。页面按钮是提交状态的"
+            "权威来源；漏答 / 漏选判定取自接口答案，可能与作答页实际内容不一致——"
+            "处理前请先看作业页。"
+        )
+        lines.append("")
+        for r in conflicted_rows:
+            for conflict in r.state_conflicts:
+                lines.append(f"- **{r.course_name} / {r.task_name}**：{conflict}")
+        lines.append("")
 
     # ---- experiments ----
     if report.experiments:

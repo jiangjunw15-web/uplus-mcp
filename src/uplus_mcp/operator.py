@@ -440,7 +440,32 @@ class HomeworkOperator:
         m = re.search(r"答题卡\s*\((\d+\s*/\s*\d+)\)", text)
         if m:
             progress = m.group(1).replace(" ", "")
+            # A 0/0 progress means the answer card did not load the question
+            # count — the progress is not usable. Report None instead of a
+            # misleading "0/0" that the audit would treat as "nothing filled".
+            num, _, den = progress.partition("/")
+            if num == "0" and den == "0":
+                progress = None
         return classify_page_state(text), progress
+
+    def read_page_score(self, page: Page) -> Optional[float]:
+        """Read the total score from a graded answer page.
+
+        A graded page shows ``总分：XX`` (or ``总分: XX``). Returns ``None``
+        when the page is not graded or the score text is absent. Called only
+        after ``read_page_state`` so the page has already settled.
+        """
+        try:
+            text = page.inner_text("body")
+        except Exception:  # noqa: BLE001 - detached / fake page
+            return None
+        m = re.search(r"总分[：:]\s*([0-9]+(?:\.[0-9]+)?)", text)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+        return None
 
     def _probe_submit_button(self, page: Page) -> Optional[HomeworkStatus]:
         """Cheap status read: which submit/withdraw button is on the page.

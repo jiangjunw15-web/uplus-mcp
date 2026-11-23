@@ -347,6 +347,19 @@ class HomeworkTask:
                 dto = json.loads(dto)
             except json.JSONDecodeError:
                 dto = {}
+        # The score field is inconsistent across course packs: some nest it
+        # in homeworkDTO as userScore, others put it at the top level of the
+        # list item, and some use score / totalScore / myScore instead. Try
+        # each in order so a graded homework does not show "-" when the score
+        # is actually available under a different key.
+        score = (dto.get("userScore")
+                 or raw.get("userScore")
+                 or dto.get("score")
+                 or raw.get("score")
+                 or dto.get("totalScore")
+                 or raw.get("totalScore")
+                 or dto.get("myScore")
+                 or raw.get("myScore"))
         return cls(
             task_id=str(raw.get("id", "")),
             homework_id=str(raw.get("homeworkId", "")),
@@ -359,7 +372,7 @@ class HomeworkTask:
             question_count=int(dto.get("questionCount") or 0),
             weight=raw.get("weight"),
             show_score=utils.coerce_bool(raw.get("showScore", 1), True),
-            score=dto.get("userScore"),
+            score=score,
             raw=raw,
         )
 

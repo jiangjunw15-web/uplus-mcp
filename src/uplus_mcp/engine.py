@@ -78,6 +78,11 @@ class PatrolEngine:
         )
 
     def _register(self, task: HomeworkTask) -> None:
+        # Snapshot the REST-derived status before any page read overwrites
+        # ``task.page_status`` (and thus ``task.status``). The row builder and
+        # the audit use this to reconcile interface vs page truth.
+        if "_api_status_value" not in task.raw:
+            task.raw["_api_status_value"] = task.status.value
         self._task_index[task.task_id] = task
 
     def _read_task_page_state(self, task: HomeworkTask) -> str:
@@ -93,6 +98,12 @@ class PatrolEngine:
                 task.page_status = status
             if progress is not None:
                 task.page_progress = progress
+            # Pick up the score from a graded page when the API omitted it.
+            if (status is HomeworkStatus.SUBMITTED_GRADED
+                    and task.score is None):
+                page_score = self.operator.read_page_score(page)
+                if page_score is not None:
+                    task.score = page_score
         except AuthExpiredError:
             raise
         except Exception as exc:  # noqa: BLE001 - keep the listing alive
@@ -102,7 +113,26 @@ class PatrolEngine:
     @staticmethod
     def _homework_row(course: Course, task: HomeworkTask) -> dict:
         """One JSON-ready homework row, shared by list and course scan."""
-        return {
+        # Reconcile the API status with the page status so a caller reading
+        # list_homeworks sees the same interface-vs-page signal that
+        # audit_homework / inspect_homework expose, without a second call.
+        # ``_api_status_value`` is stashed in raw by the caller before the
+        # page read overwrites ``task.status``; fall back to the current
+        # status when no page read has happened yet.
+        api_status_value = task.raw.get("_api_status_value") or task.status.value
+        page_says_submitted = task.page_status in (
+            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        api_says_submitted = api_status_value in (
+            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        state_conflicts: list[str] = []
+        if task.page_status is not None and api_says_submitted != page_says_submitted:
+            if page_says_submitted:
+                state_conflicts.append(
+                    "接口显示未提交、页面已显示提交（页面按钮更权威）")
+            else:
+                state_conflicts.append(
+                    "接口显示已提交、页面仍可作答（页面按钮更权威）")
+        row = {
             "course_id": course.id,
             "course_name": course.name,
             "task_id": task.task_id,
@@ -116,7 +146,11 @@ class PatrolEngine:
             "score": task.score,
             "progress": task.page_progress,
             "page_error": task.raw.get("page_error", ""),
+            "api_says_submitted": api_says_submitted,
+            "page_says_submitted": page_says_submitted,
+            "state_conflicts": state_conflicts,
         }
+        return row
 
     def resolve_task(self, task_id: str, course_id: str) -> HomeworkTask:
         cached = self._task_index.get(task_id)
@@ -554,6 +588,7 @@ class PatrolEngine:
 
     def inspect_homework(self, task_id: str, course_id: str) -> dict:
         task = self.resolve_task(task_id, course_id)
+        api_status = task.status
         page = self.operator.open_homework(task)
         status, progress = self.operator.read_page_state(page)
         if status is not None:
@@ -561,8 +596,31 @@ class PatrolEngine:
         if progress is not None:
             task.page_progress = progress
         final_status = status if status is not None else task.status
+        # Read the score from the graded page when the API did not carry it.
+        if (status is HomeworkStatus.SUBMITTED_GRADED
+                and task.score is None):
+            page_score = self.operator.read_page_score(page)
+            if page_score is not None:
+                task.score = page_score
         questions = self._homework_question_details(task)
-        return {
+
+        # Reconcile interface vs page state, the same way audit_homework does,
+        # so inspect_homework's caller sees the same conflict signals without
+        # having to run a separate audit. The patrol / CLI also surfaces these
+        # so a page/interface disagreement is visible at every layer.
+        api_says_submitted = api_status in (
+            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        page_says_submitted = final_status in (
+            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        conflicts: list[str] = []
+        if api_says_submitted != page_says_submitted:
+            if page_says_submitted:
+                conflicts.append(
+                    "接口显示未提交、页面已显示提交（页面按钮更权威）")
+            else:
+                conflicts.append(
+                    "接口显示已提交、页面仍可作答（页面按钮更权威）")
+        result = {
             "course_id": course_id,
             "course_name": self.course_name(course_id),
             "task_id": task.task_id,
@@ -570,11 +628,20 @@ class PatrolEngine:
             "name": task.name,
             "status": final_status.value,
             "status_label": report_mod.STATUS_LABEL[final_status],
+            "api_status": api_status.value,
             "progress": progress,
+            "score": task.score,
             "deadline": utils.deadline_label(task.end_ms),
             "question_count": len(questions),
+            "api_says_submitted": api_says_submitted,
+            "page_says_submitted": page_says_submitted,
+            "state_conflicts": conflicts,
             "brief": solver.build_answer_brief(task.name, questions),
         }
+        if conflicts:
+            result["note"] = ("页面真实状态与接口状态存在差异：" + "；".join(conflicts)
+                              + "。页面按钮是提交状态的权威来源。")
+        return result
 
     def audit_homework(self, task_id: str, course_id: str,
                        refresh_page_state: bool = True) -> dict:
@@ -603,6 +670,14 @@ class PatrolEngine:
                     task.page_status = status
                 if progress is not None:
                     task.page_progress = progress
+                # A graded page shows 总分：XX. When the API did not carry the
+                # score (some course packs omit userScore), read it from the
+                # page so the report does not show "-" for a graded homework.
+                if (status is HomeworkStatus.SUBMITTED_GRADED
+                        and task.score is None):
+                    page_score = self.operator.read_page_score(page)
+                    if page_score is not None:
+                        task.score = page_score
             except AuthExpiredError:
                 raise
             except Exception as exc:  # page read is best-effort
@@ -654,6 +729,7 @@ class PatrolEngine:
             "page_state_note": page_state_note,
             "deadline": utils.deadline_label(task.end_ms),
             "progress": task.page_progress,
+            "score": task.score,
             # ``withdrawable`` follows the page's real button state. When the
             # page was not read (``refresh_page_state=False`` or the read
             # failed), the answer is *unknown*, not ``False`` — the interface
@@ -980,8 +1056,18 @@ class PatrolEngine:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _repair_items(questions: list, audit_result: dict,
-                      expected: dict[str, str]) -> list[dict]:
-        """Questions a repair call must answer, with their current context."""
+                      expected: dict[str, str], *,
+                      graded: bool = False) -> list[dict]:
+        """Questions a repair call must answer, with their current context.
+
+        ``graded`` is True for an already-graded homework. The per-item
+        ``reason`` inherited from ``audit_questions`` says "待批改" for
+        unjudged multi-selects, which contradicts a brief-level note of
+        "作业已出分，平台不允许撤回". For a graded homework the unjudged
+        entry should not exist in practice (the platform exposes its answer
+        after grading), but if it does the reason is rewritten so the same
+        brief never carries two mutually exclusive statements.
+        """
         by_order = {q.order: q for q in questions}
         items: list[dict] = []
         for kind in ("missing", "partial", "unjudged"):
@@ -1008,6 +1094,14 @@ class PatrolEngine:
                     # Not a proven defect: the platform simply has not shown
                     # its answer yet. Re-answering it is optional.
                     item["optional"] = True
+                    if graded:
+                        # The brief-level note says the homework is already
+                        # graded, so "待批改" here would contradict it. The
+                        # platform exposed no reference answer even after
+                        # grading — say so instead.
+                        item["reason"] = (
+                            "平台已出分但未公布该题参考答案，无法核对是否漏选"
+                        )
                 items.append(item)
         return items
 
@@ -1046,6 +1140,13 @@ class PatrolEngine:
                             task.page_status = status
                         if progress is not None:
                             task.page_progress = progress
+                        # Read the score from the graded page when the API
+                        # omitted it, so the report shows the real score.
+                        if (status is HomeworkStatus.SUBMITTED_GRADED
+                                and task.score is None):
+                            page_score = self.operator.read_page_score(page)
+                            if page_score is not None:
+                                task.score = page_score
                     except AuthExpiredError:
                         raise
                     except Exception as exc:
@@ -1116,12 +1217,14 @@ class PatrolEngine:
                                     conflict_note = (
                                         f"；但页面答题卡显示 {task.page_progress} 已全部作答，"
                                         "接口答案行可能滞后，请以作答页为准")
-                            snapshot.takeover.append({
-                                "course": course.name, "title": task.name,
-                                "detail": ("已提交但" + "；".join(detail_parts)
-                                           + hint + conflict_note),
-                                "deadline": utils.deadline_label(task.end_ms),
-                            })
+                            # Do NOT also append to snapshot.takeover: the
+                            # incomplete section already lists this homework,
+                            # and duplicating it in "需要人工接管" was the
+                            # reported redundancy. The takeover list is for
+                            # items that need the human to *act* (subjective
+                            # questions, expired, experiments); a submitted
+                            # homework with gaps is reported in the incomplete
+                            # section with its full audit detail instead.
                             incomplete.append({
                                 "course_id": course.id,
                                 "course_name": course.name,
@@ -1149,7 +1252,8 @@ class PatrolEngine:
                                 "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
                             })
                         repair_items = self._repair_items(
-                            questions, audit_result, expected)
+                            questions, audit_result, expected,
+                            graded=task.status is HomeworkStatus.SUBMITTED_GRADED)
                         if repair_items:
                             withdrawable = (
                                 task.status is HomeworkStatus.SUBMITTED_PENDING
@@ -1173,6 +1277,9 @@ class PatrolEngine:
                                 "name": task.name,
                                 "status": task.status.value,
                                 "withdrawable": withdrawable,
+                                "withdrawable_source": (
+                                    "page" if task.page_status is not None
+                                    else "unknown"),
                                 "items": repair_items,
                                 "note": note,
                             })

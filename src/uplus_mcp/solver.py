@@ -19,6 +19,10 @@ from . import utils
 
 def build_answer_brief(homework_name: str, questions: list[Question]) -> dict:
     """Structured payload an MCP client model should use to answer."""
+    # Sort by question order so the brief always lists questions 1,2,3…
+    # regardless of the API's return order (which can be 3,2,1 on some
+    # course packs, the reported "随堂测试 items 顺序是 3,2,1 / 7,8,6").
+    sorted_questions = sorted(questions, key=lambda q: q.order)
     return {
         "homework": homework_name,
         "instructions": (
@@ -31,7 +35,7 @@ def build_answer_brief(homework_name: str, questions: list[Question]) -> dict:
             "但正文没有对应内容时，同样先截图确认。"
             "输出 JSON：{\"answers\": {\"<question_id>\": \"<answer>\"}}，不要解释。"
         ),
-        "questions": [q.llm_prompt() for q in questions],
+        "questions": [q.llm_prompt() for q in sorted_questions],
     }
 
 

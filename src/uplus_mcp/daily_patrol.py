@@ -117,10 +117,21 @@ def main() -> int:
                 json.dumps(result["repair_briefs"], ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            # Only a withdrawable (待批改) homework can be repaired. A graded
+            # homework (withdrawable=false) cannot be withdrawn, so its
+            # needs_model_answer items are informational only — telling the
+            # user to "撤回并补齐" for them was the reported conflict.
             needs = sum(
                 1 for hw in result["repair_briefs"]
                 for item in hw["items"]
                 if item.get("needs_model_answer") and not item.get("optional")
+                and hw.get("withdrawable")
+            )
+            graded_needs = sum(
+                1 for hw in result["repair_briefs"]
+                for item in hw["items"]
+                if item.get("needs_model_answer") and not item.get("optional")
+                and not hw.get("withdrawable")
             )
             optional = sum(
                 1 for hw in result["repair_briefs"]
@@ -130,6 +141,9 @@ def main() -> int:
             if needs:
                 print(f"其中 {needs} 题需要模型作答；交给 uplus_repair_homework "
                       "撤回并补齐后重新提交。")
+            if graded_needs:
+                print(f"另有 {graded_needs} 题属于已出分作业，平台不允许撤回，"
+                      "仅作结果告知，无法补交。")
             if optional:
                 print(f"另有 {optional} 道待批改多选无法核对是否漏选（optional）；"
                       "批改后复核，或由模型重答后用 verify_unjudged=True 彻底复核。")
