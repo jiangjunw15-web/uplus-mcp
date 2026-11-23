@@ -13,6 +13,33 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.14
+
+Five issues from a full-source review of the 0.8.13 patrol output:
+
+- **CLI repair hint no longer conflicts with graded homework.** `daily_patrol`
+  counted `needs_model_answer` without checking `withdrawable`, so a graded
+  (non-withdrawable) homework was told to 「撤回并补齐」 — impossible for 已出分
+  作业. The count now splits into actionable (withdrawable) and informational
+  (graded) with separate messages.
+- **Per-item reason no longer contradicts the brief note.** `_repair_items`
+  inherited 「待批改」 from `audit_questions` for unjudged items, while the brief
+  note said 「作业已出分，平台不允许撤回」. A `graded` flag rewrites the unjudged
+  reason for graded homeworks to 「平台已出分但未公布该题参考答案」.
+- **Page/interface reconciliation reaches every layer.** `inspect_homework`
+  and `list_homeworks` rows now carry `api_says_submitted` /
+  `page_says_submitted` / `state_conflicts`; the patrol Markdown report gains a
+  「页面状态与接口状态差异」 section. `_register` snapshots the API status before
+  the page read overwrites `task.status`.
+- **Graded homework score no longer shows `-`.** `from_api` checks
+  `userScore` / `score` / `totalScore` / `myScore` at both the DTO and top
+  level; `read_page_score` reads 总分：XX from the graded page as a fallback.
+- **Minor fixes.** `repair_briefs` carry `withdrawable_source`; incomplete
+  submitted homeworks are no longer duplicated in the takeover list;
+  `build_answer_brief` sorts questions by order (was 3,2,1); `read_page_state`
+  drops `0/0` progress as unusable.
+- **Tests.** 478 pass with no regressions.
+
 ## What's new in 0.8.13
 
 The U+ interface's answer rows lag behind the answer page: a question the student

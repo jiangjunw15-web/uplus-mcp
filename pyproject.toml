@@ -44,7 +44,7 @@ dependencies = [
 Homepage = "https://github.com/jiangjunw15-web/uplus-mcp"
 Repository = "https://github.com/jiangjunw15-web/uplus-mcp"
 Issues = "https://github.com/jiangjunw15-web/uplus-mcp/issues"
-Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-0813"
+Changelog = "https://github.com/jiangjunw15-web/uplus-mcp#whats-new-in-0814"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
