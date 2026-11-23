@@ -111,6 +111,75 @@ def test_probe_submit_button_swallows_page_errors():
 
 
 # --------------------------------------------------------------------------- #
+# stem-walk waits: return as soon as the question has repainted
+# --------------------------------------------------------------------------- #
+class _StemPage:
+    """Fake single-question page whose readable stem changes over time."""
+
+    def __init__(self, stems):
+        # ``stems`` is the sequence of values ``.ck-content`` returns; an empty
+        # string models the SPA still painting the transition.
+        self._stems = list(stems)
+        self.reads = 0
+
+    def _ck_content(self):
+        # The first locator lookup is the stem container.
+        class _Loc:
+            def __init__(self, page):
+                self._page = page
+
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self):
+                value = self._page._stems[min(
+                    self._page.reads, len(self._page._stems) - 1)]
+                self._page.reads += 1
+                return value
+
+        return _Loc(self)
+
+    def locator(self, selector):
+        if selector == ".ck-content":
+            return self._ck_content()
+        raise AssertionError(f"unexpected selector {selector}")
+
+
+def test_await_stem_ready_returns_as_soon_as_the_stem_changes():
+    """After a navigation the page still shows the previous stem until the SPA
+    repaints. The wait must return on the first different stem rather than
+    always paying a fixed sleep per question."""
+    # First read still shows the old stem, second read shows the new one.
+    page = _StemPage(["旧题干", "新题干", "新题干"])
+    op = _operator()
+
+    op._await_stem_ready(page, "旧题干", timeout_ms=4000)
+
+    # It returned on the first changed read, not after exhausting the budget.
+    assert page.reads == 2
+
+
+def test_await_stem_ready_tolerates_a_blank_transition_frame():
+    page = _StemPage(["", "新题干", "新题干"])
+    op = _operator()
+
+    op._await_stem_ready(page, "旧题干", timeout_ms=4000)
+
+    assert page.reads == 2
+
+
+def test_read_stem_after_transition_retries_a_blank_read():
+    """A blank first read (transition animation still running) is retried; the
+    result is the first non-empty stem."""
+    page = _StemPage(["", "", "题干A", "题干B"])
+    op = _operator()
+
+    assert op._read_stem_after_transition(page) == "题干A"
+    assert page.reads == 3
+
+
+# --------------------------------------------------------------------------- #
 # experiment badge
 # --------------------------------------------------------------------------- #
 def test_experiment_flag_text_wins_over_class():

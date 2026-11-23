@@ -313,3 +313,43 @@ def test_review_report_file_carries_real_data(tmp_path):
     assert "作业一" in text
     assert "阶段二 · 统一复核" in text
     assert "完整" in text
+
+
+def test_review_surfaces_api_vs_page_state_conflict(tmp_path):
+    """When the page shows the homework as submitted but the interface still
+    reports blank answers, the review row must carry both truth sources and a
+    named conflict — a bare 「漏答 N 题」 verdict is not actionable on its own."""
+    tasks = [_task("t1", "作业一", 4102444800000)]
+    engine, _, _ = _finish_engine(
+        tmp_path, tasks=tasks, audit_complete=False)
+    # Page truth: submitted and awaiting grading. Interface truth: blank.
+    engine.audit_homework = Mock(side_effect=lambda task_id, course_id,
+                                  refresh_page_state=True: {
+        "status": "submitted_pending", "status_label": "待批改",
+        "deadline": "", "withdrawable": True,
+        "api_says_submitted": False,
+        "page_says_submitted": True,
+        "state_conflicts": [
+            "接口显示未提交、页面已显示提交（页面按钮更权威）",
+            "接口记录 2 道客观题为空，但页面已提交；平台答案行可能滞后，"
+            "请以作答页实际内容为准",
+        ],
+        "audit": {"complete": False,
+                  "missing": [{"order": 1}, {"order": 2}],
+                  "partial": [], "wrong": [], "unjudged": []},
+    })
+
+    result = engine.finish_then_review()
+
+    row = result["review"][0]
+    assert row["complete"] is False
+    assert row["api_says_submitted"] is False
+    assert row["page_says_submitted"] is True
+    assert row["state_conflicts"]
+    # The takeover line names the discrepancy next to the gap, and the written
+    # report has a dedicated section for it.
+    review_takeover = [t for t in result["takeover"]
+                       if t.get("phase") == "review"]
+    assert any("状态差异" in t["detail"] for t in review_takeover)
+    text = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert "页面状态与接口状态差异" in text

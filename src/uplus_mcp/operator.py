@@ -933,20 +933,12 @@ class HomeworkOperator:
         stem_counts: dict[str, int] = {}  # track how many times each stem appears
         try:
             page.locator("xpath=//*[normalize-space(text())='1']").first.click(timeout=4000)
-            time.sleep(0.8)
+            self._await_stem_ready(page, "", timeout_ms=4000)
         except Exception:
             return positions
 
         for index in range(1, max(total, 1) + 1):
-            stem = ""
-            for _ in range(3):
-                try:
-                    stem = self._page_stem(page)
-                except Exception:
-                    stem = ""
-                if stem:
-                    break
-                time.sleep(0.5)
+            stem = self._read_stem_after_transition(page)
             if stem:
                 count = stem_counts.get(stem, 0) + 1
                 stem_counts[stem] = count
@@ -961,8 +953,52 @@ class HomeworkOperator:
                 nxt.first.click(timeout=5000)
             except Exception:
                 break
-            time.sleep(1.0)
+            self._await_stem_ready(page, stem, timeout_ms=4000)
         return positions
+
+    def _read_stem_after_transition(self, page: Page) -> str:
+        """Read the current question stem, retrying while the SPA repaints.
+
+        The page briefly renders an empty stem while the question transition
+        animation runs, so a single read can come back blank. This polls with a
+        short interval and gives up after a bounded number of tries, matching
+        the previous behaviour (three attempts, blank tolerated) without a
+        fixed sleep on every single question.
+        """
+        for attempt in range(3):
+            try:
+                stem = self._page_stem(page)
+            except Exception:
+                stem = ""
+            if stem:
+                return stem
+            if attempt < 2:
+                time.sleep(0.15)
+        return ""
+
+    def _await_stem_ready(self, page: Page, previous: str, *,
+                          timeout_ms: int = 4000) -> None:
+        """Wait until the visible stem has settled after a navigation.
+
+        After clicking the answer-card number or 下一题, the page keeps showing
+        the *previous* stem until the SPA repaints. Waiting for the stem to
+        change (or simply to become readable when ``previous`` is empty) returns
+        as soon as the question is actually on screen, instead of always paying a
+        fixed ``time.sleep(1.0)`` per question — a 30-question homework used to
+        burn ~30 s of pure waiting here. The budget is bounded so a page that
+        never repaints still falls through with the old tolerance.
+        """
+        deadline = time.time() + max(timeout_ms, 1) / 1000
+        last = ""
+        while time.time() < deadline:
+            try:
+                last = self._page_stem(page)
+            except Exception:
+                last = ""
+            if last and last != previous:
+                return
+            time.sleep(0.12)
+        # Fall through: the caller still tolerates a blank/unreadable stem.
 
     def _page_position(self, positions: dict[str, int], stem: str,
                        fallback: int, used: set[int] | None = None) -> Optional[int]:

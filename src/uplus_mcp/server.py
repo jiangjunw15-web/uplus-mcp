@@ -385,6 +385,15 @@ async def uplus_audit_homework(task_id: str, course_id: str,
     The API status understates (a handed-in homework may read as not submitted),
     so ``withdrawable`` comes from the page's real button state; set
     ``refresh_page_state=False`` to skip that page read and trust the API.
+
+    The page button and the interface can disagree — the platform's answer rows
+    sometimes lag behind what the student filled on the page. The result reports
+    both sides (``api_says_submitted`` / ``page_says_submitted``) and, when they
+    disagree, lists the reason in ``state_conflicts`` (plus a ``note``). Treat
+    the page as authoritative for "is it handed in", and read the answer page
+    itself before acting on a ``missing`` verdict: it may be stale. When
+    ``state_conflicts`` is non-empty, do not report the gap to the user as fact
+    without saying it comes from the interface.
     """
     return await _thread.run_async(
         _dispatch("audit_homework", task_id, course_id,
@@ -469,6 +478,15 @@ async def uplus_finish_then_review(
     tagged by ``phase`` ("finish" / "review"), and a ``report_path``. Use
     ``uplus_repair_homework`` to withdraw and complete any homework that the
     review still reports as incomplete.
+
+    The page button and the interface can disagree (the platform's answer rows
+    sometimes lag behind the page). Each ``review`` row therefore carries
+    ``api_says_submitted`` / ``page_says_submitted`` and, when they disagree,
+    ``state_conflicts`` naming why; the same conflicts are repeated in the
+    matching ``takeover`` entry and in the written report under
+    「页面状态与接口状态差异」. When ``state_conflicts`` is non-empty, do not
+    report the gap to the user as fact — read the answer page (``screenshot``)
+    first.
     """
     return await _thread.run_async(
         _dispatch("finish_then_review", answers, submit=submit, audit=audit,

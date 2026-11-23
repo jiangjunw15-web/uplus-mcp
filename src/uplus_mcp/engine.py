@@ -618,7 +618,38 @@ class PatrolEngine:
         ]
         expected = journal.answers_for(self.config, task.task_id, task.homework_id)
         final_status = task.status
-        return {
+        audit_result = report_mod.audit_questions(questions, expected_answers=expected)
+
+        # Reconcile the two truth sources. The page button is authoritative for
+        # "is this handed in"; the student-side API is authoritative for "which
+        # boxes carry text". They disagree on the live platform in a way that
+        # used to produce a self-contradictory verdict: the API reports blank
+        # ``userAnswer`` for questions the student has already filled on the page
+        # (its answer rows lag), so a homework the page shows as 已提交 came back
+        # as 「漏答 N 题，已出分无法撤回」 — both halves unactionable.
+        #
+        # ``api_says_submitted`` / ``page_says_submitted`` are therefore reported
+        # alongside the audit, and a disagreement is named explicitly instead of
+        # being folded silently into ``missing``.
+        api_says_submitted = api_status in (
+            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        page_read_failed = page_state_note.startswith("页面状态读取失败")
+        page_says_submitted = final_status in (
+            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        conflicts: list[str] = []
+        if not page_read_failed and api_says_submitted != page_says_submitted:
+            if page_says_submitted:
+                conflicts.append(
+                    "接口显示未提交、页面已显示提交（页面按钮更权威）")
+            else:
+                conflicts.append(
+                    "接口显示已提交、页面仍可作答（页面按钮更权威）")
+        if audit_result["missing"] and page_says_submitted and not page_read_failed:
+            conflicts.append(
+                f"接口记录 {audit_result['missing_count']} 道客观题为空，但页面已提交；"
+                "平台答案行可能滞后，请以作答页实际内容为准")
+
+        result: dict = {
             "course_id": course_id,
             "course_name": self.course_name(course_id),
             "task_id": task.task_id,
@@ -629,10 +660,19 @@ class PatrolEngine:
             "api_status": api_status.value,
             "page_state_note": page_state_note,
             "deadline": utils.deadline_label(task.end_ms),
+            "progress": task.page_progress,
             "withdrawable": final_status is HomeworkStatus.SUBMITTED_PENDING,
             "journal_answers": len(expected),
-            "audit": report_mod.audit_questions(questions, expected_answers=expected),
+            "api_says_submitted": api_says_submitted,
+            "page_says_submitted": page_says_submitted,
+            "state_conflicts": conflicts,
+            "audit": audit_result,
         }
+        if conflicts:
+            result["note"] = ("页面真实状态与接口状态存在差异：" + "；".join(conflicts)
+                              + "。页面按钮是提交状态的权威来源；漏答/漏选判定取自接口答案，"
+                              "可能与作答页实际内容不一致，处理前请先看作答页。")
+        return result
 
     def repair_homework(self, task_id: str, course_id: str,
                         answers: dict[str, str] | str | None = None,
@@ -1044,9 +1084,28 @@ class PatrolEngine:
                             hint = ("，可撤回后补齐再提交"
                                     if task.status is HomeworkStatus.SUBMITTED_PENDING
                                     else "，已出分无法撤回")
+                            # The page button and the API answer rows can
+                            # disagree: the API reports a blank ``userAnswer``
+                            # for questions already filled on the page. When
+                            # that happens the gap may not be actionable, so the
+                            # discrepancy is stated instead of a bare "漏答".
+                            conflict_note = ""
+                            if (task.page_status is not None
+                                    and task.page_status is task.status
+                                    and task.status is not HomeworkStatus.NOT_SUBMITTED
+                                    and task.page_progress):
+                                answered_now, _, total = task.page_progress.partition("/")
+                                if (answered_now.isdigit() and total.isdigit()
+                                        and int(total) > 0
+                                        and int(answered_now) == int(total)
+                                        and audit_result["missing"]):
+                                    conflict_note = (
+                                        f"；但页面答题卡显示 {task.page_progress} 已全部作答，"
+                                        "接口答案行可能滞后，请以作答页为准")
                             snapshot.takeover.append({
                                 "course": course.name, "title": task.name,
-                                "detail": "已提交但" + "；".join(detail_parts) + hint,
+                                "detail": ("已提交但" + "；".join(detail_parts)
+                                           + hint + conflict_note),
                                 "deadline": utils.deadline_label(task.end_ms),
                             })
                             incomplete.append({
@@ -1056,7 +1115,9 @@ class PatrolEngine:
                                 "homework_id": task.homework_id,
                                 "name": task.name,
                                 "status": task.status.value,
+                                "progress": task.page_progress,
                                 "withdrawable": task.status is HomeworkStatus.SUBMITTED_PENDING,
+                                "state_conflict": bool(conflict_note),
                                 "missing": audit_result["missing"],
                                 "partial": audit_result["partial"],
                                 "wrong": audit_result["wrong"],
@@ -1373,15 +1434,18 @@ class PatrolEngine:
                     "objective_answered": 0,
                     "submitted": False,
                     "needs_answers": needs,
-                    "note": (f"未提供答案，跳过作答：{len(objective_blank)} 道客观题待答。"
-                             "先用 uplus_inspect_homework 取审题包，作答后把 "
+                    "note": (f"未提供答案，跳过作答：接口记录 {len(objective_blank)} 道客观题为空。"
+                             "接口答案行可能滞后于作答页（平台已知行为），"
+                             "阶段二会开页复核出权威结论；如页面其实已填好，"
+                             "无需补答。先用 uplus_inspect_homework 取审题包，作答后把 "
                              "{task_id: {question_id: answer}} 传入再重跑。"),
                 })
                 takeover.append({
                     "course": course.name, "title": task.name,
                     "phase": "finish",
-                    "detail": (f"{len(objective_blank)} 道客观题未提供答案，未作答"
-                               "（先用 inspect 取审题包，作答后重跑 finish_then_review）"),
+                    "detail": (f"接口记录 {len(objective_blank)} 道客观题为空且未提供答案，未作答"
+                               "（接口答案可能滞后于作答页，阶段二将开页复核；"
+                               "确认未填则补答案后重跑）"),
                     "deadline": utils.deadline_label(task.end_ms),
                     "needs_answers": needs,
                 })
@@ -1480,12 +1544,18 @@ class PatrolEngine:
                     "status": result.get("status"),
                     "status_label": result.get("status_label"),
                     "deadline": result.get("deadline"),
+                    "progress": result.get("progress"),
                     "withdrawable": result.get("withdrawable", False),
                     "complete": audit_block.get("complete", True),
                     "missing": audit_block.get("missing", []),
                     "partial": audit_block.get("partial", []),
                     "wrong": audit_block.get("wrong", []),
                     "unjudged": audit_block.get("unjudged", []),
+                    # The two truth sources and any disagreement between them,
+                    # so a "漏答" verdict is never presented without its caveat.
+                    "api_says_submitted": result.get("api_says_submitted"),
+                    "page_says_submitted": result.get("page_says_submitted"),
+                    "state_conflicts": result.get("state_conflicts", []),
                     "screenshot": screenshot_path,
                 })
                 if is_incomplete:
@@ -1503,12 +1573,19 @@ class PatrolEngine:
                         ptail = "…" if len(audit_block["partial"]) > 10 else ""
                         parts.append(f"多选漏选 {len(audit_block['partial'])} 题"
                                      f"（题号 {porders}{ptail}）")
+                    conflicts = result.get("state_conflicts") or []
+                    if conflicts:
+                        # The interface verdict and the page disagree; say so in
+                        # the same breath as the gap, so the user is never told
+                        # "漏答 N 题" without the reason it may not be actionable.
+                        parts.append("状态差异：" + "；".join(conflicts))
                     takeover.append({
                         "course": course.name, "title": task.name,
                         "phase": "review",
                         "detail": "；".join(parts) if parts else "复核仍有未完成项",
                         "deadline": utils.deadline_label(task.end_ms),
                         "withdrawable": result.get("withdrawable", False),
+                        "state_conflicts": conflicts,
                     })
 
         # Persist a compact Markdown review so the user has a file to open.

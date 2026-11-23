@@ -298,6 +298,67 @@ def test_page_state_read_failure_falls_back_to_api_status():
     assert "页面状态读取失败" in result["page_state_note"]
 
 
+def test_api_page_submission_disagreement_is_named_as_a_conflict():
+    """The page button and the API submit flag can disagree. The audit reports
+    both and names the disagreement instead of silently trusting one side."""
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": None}},
+                     submit_task="0")
+    engine.operator = FakeOperator(HomeworkStatus.SUBMITTED_PENDING)
+    result = engine.audit_homework("t1", "c1")
+
+    assert result["api_says_submitted"] is False
+    assert result["page_says_submitted"] is True
+    assert result["state_conflicts"]
+    assert any("接口显示未提交" in c for c in result["state_conflicts"])
+    assert "note" in result and "差异" in result["note"]
+
+
+def test_blank_api_answers_on_a_submitted_page_are_flagged():
+    """The reported symptom: the interface says a question is blank while the
+    page shows the homework as handed in. The gap is still reported, but with
+    the caveat that the platform's answer row may simply be behind."""
+    engine = _engine({
+        1: {"type": QuestionType.SINGLE, "answer": "A"},
+        7: {"type": QuestionType.MULTIPLE,
+            "answer": None, "stem": "软件安全管理的目标是"},
+    }, submit_task="1", sub_status="2")
+    engine.operator = FakeOperator(HomeworkStatus.SUBMITTED_PENDING)
+    result = engine.audit_homework("t1", "c1")
+
+    assert result["audit"]["missing_count"] == 1
+    assert any("接口答案行可能滞后" in c or "平台答案行可能滞后" in c
+               for c in result["state_conflicts"])
+
+
+def test_no_conflict_when_page_and_api_agree_on_not_submitted():
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": None}},
+                     submit_task="0")
+    engine.operator = FakeOperator(HomeworkStatus.NOT_SUBMITTED)
+    result = engine.audit_homework("t1", "c1")
+
+    assert result["api_says_submitted"] is False
+    assert result["page_says_submitted"] is False
+    assert result["state_conflicts"] == []
+    assert "note" not in result
+
+
+def test_page_read_failure_reports_no_conflict():
+    """A page that cannot be read must not manufacture a disagreement: the
+    audit simply falls back to the API status with no conflict claimed."""
+    class Boom:
+        def open_homework(self, task):
+            raise RuntimeError("页面打不开")
+
+        def read_page_state(self, page):
+            return None, None
+
+    engine = _engine({1: {"type": QuestionType.SINGLE, "answer": None}})
+    engine.operator = Boom()
+    result = engine.audit_homework("t1", "c1")
+    assert result["state_conflicts"] == []
+    assert "note" not in result
+
+
 # --------------------------------------------------------------------------- #
 # engine.repair_homework
 # --------------------------------------------------------------------------- #

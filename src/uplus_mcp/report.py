@@ -533,6 +533,21 @@ def render_finish_review_markdown(*, generated_at_ms: int, finish: list[dict],
             )
     lines.append("")
 
+    conflicted = [r for r in review if r.get("state_conflicts")]
+    if conflicted:
+        lines.append("## 页面状态与接口状态差异")
+        lines.append("")
+        lines.append(
+            "以下作业的「作答页按钮」与「接口提交状态」不一致。页面按钮是提交状态的"
+            "权威来源；漏答 / 漏选判定取自接口答案，可能与作答页实际内容不一致——"
+            "处理前请先看作业页（`screenshot` 有值时可看截图）。"
+        )
+        lines.append("")
+        for r in conflicted:
+            for item in r.get("state_conflicts", []):
+                lines.append(f"- **{r.get('course_name', '')} / {r.get('name', '')}**：{item}")
+        lines.append("")
+
     if takeover:
         lines.append("## 需要人工接管")
         lines.append("")
