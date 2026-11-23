@@ -400,16 +400,26 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     def _await_page_state(self, page: Page) -> str:
         """Wait until the SPA paints a recognizable status keyword or the
-        deadline elapses; return the body text either way."""
+        deadline elapses; return the body text either way.
+
+        Polling is short and bounded: the answer SPA usually paints the submit
+        button within a few hundred milliseconds of ``domcontentloaded``, so a
+        fast first probe (120 ms) plus a tight retry loop catches the ready
+        state earlier than the old fixed 300 ms cadence. The total budget is
+        capped so a stuck page never blocks the patrol indefinitely.
+        """
         try:
-            page.wait_for_load_state("networkidle", timeout=4000)
+            page.wait_for_load_state("domcontentloaded", timeout=4000)
         except PWTimeout:
             pass
-        for _ in range(10):
+        # The submit/withdraw button is the signal we actually need; once it is
+        # there the body text is readable, even if ``networkidle`` never fires
+        # (analytics/long-poll keep the network busy on some course packs).
+        for _ in range(20):
             text = page.inner_text("body")
             if classify_page_state(text) is not None:
                 return text
-            time.sleep(0.3)
+            time.sleep(0.15)
         return page.inner_text("body")
 
     def read_page_state(self, page: Page) -> tuple[Optional[HomeworkStatus], Optional[str]]:
@@ -419,6 +429,40 @@ class HomeworkOperator:
         if m:
             progress = m.group(1).replace(" ", "")
         return classify_page_state(text), progress
+
+    def _probe_submit_button(self, page: Page) -> Optional[HomeworkStatus]:
+        """Cheap status read: which submit/withdraw button is on the page.
+
+        The submit and withdraw confirmation loops used to call
+        ``read_page_state`` on every round, which serialises the whole body
+        text — an expensive operation on a 30-question page, and one that only
+        needed to answer "has the button flipped yet?". This reads the two
+        button labels through one small DOM query instead, so a round costs a
+        fraction of a full body read.
+
+        It returns the state implied by the buttons, or ``None`` when neither is
+        present (page still transitioning). Callers that need the progress text
+        or a definitive verdict follow up with ``read_page_state`` once.
+        """
+        script = r"""
+        () => {
+            const labels = [...document.querySelectorAll('button')]
+                .map(b => (b.innerText || '').trim());
+            const has = (name) => labels.some(t => t === name || t.includes(name));
+            if (has('撤回作业')) return 'withdrawn';
+            if (has('提交作业')) return 'submit';
+            return null;
+        }
+        """
+        try:
+            probe = page.evaluate(script)
+        except Exception:  # noqa: BLE001 - mid-navigation / detached frame
+            return None
+        if probe == "withdrawn":
+            return HomeworkStatus.SUBMITTED_PENDING
+        if probe == "submit":
+            return HomeworkStatus.NOT_SUBMITTED
+        return None
 
     def withdraw_homework(self, page: Page, task: HomeworkTask) -> str:
         """Withdraw a submitted-but-ungraded homework so it can be corrected.
@@ -462,9 +506,18 @@ class HomeworkOperator:
 
         for _ in range(12):
             time.sleep(0.6)
-            state, progress = self.read_page_state(page)
-            if state is HomeworkStatus.NOT_SUBMITTED:
-                task.page_status = state
+            # Fast path first, full read only when the probe is inconclusive
+            # (``None``), so the verdict is identical to reading every round.
+            probe = self._probe_submit_button(page)
+            if probe is None:
+                state, progress = self.read_page_state(page)
+                if state is HomeworkStatus.NOT_SUBMITTED:
+                    task.page_status = state
+                    task.page_progress = progress
+                    return "withdrawn"
+            elif probe is HomeworkStatus.NOT_SUBMITTED:
+                state, progress = self.read_page_state(page)
+                task.page_status = state or probe
                 task.page_progress = progress
                 return "withdrawn"
         state, _ = self.read_page_state(page)
@@ -1342,6 +1395,21 @@ class HomeworkOperator:
         # Verify the button switched to 撤回作业.
         for _ in range(10):
             time.sleep(0.6)
+            # Fast path: the cheap button probe answers "has it flipped?" with a
+            # fraction of a full body read. ``None`` means inconclusive (page
+            # still transitioning, or the probe is unavailable), so the full
+            # read still runs — the loop's verdict is unchanged either way.
+            probe = self._probe_submit_button(page)
+            if probe is not None:
+                if probe in (HomeworkStatus.SUBMITTED_PENDING,
+                             HomeworkStatus.SUBMITTED_GRADED):
+                    state, progress = self.read_page_state(page)
+                    task.page_status = state or probe
+                    task.page_progress = progress
+                    outcome["submitted"] = True
+                    outcome["note"] = "提交成功，待老师批改"
+                    return
+                continue
             state, progress = self.read_page_state(page)
             if state in (HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED):
                 task.page_status = state
@@ -1429,12 +1497,20 @@ class HomeworkOperator:
         }
         """
         raw_list = page.evaluate(js) or []
-        # Poll once more: bottom cards finish their state paint after the first
-        # read; a later, longer snapshot replaces the earlier one.
-        time.sleep(0.8)
-        later = page.evaluate(js) or []
-        if len(later) >= len(raw_list):
-            raw_list = later
+        # Poll once more only when the first read looks unfinished: bottom cards
+        # finish painting their state badge after the first snapshot, so an
+        # empty read or a card whose title is still blank is re-read. A first
+        # read that already names every card is complete, and sleeping 0.8s to
+        # re-read identical data only added a fixed cost to every course.
+        def _incomplete(rows) -> bool:
+            return (not rows
+                    or any(not (r.get("name") or "").strip() for r in rows))
+
+        if _incomplete(raw_list):
+            time.sleep(0.8)
+            later = page.evaluate(js) or []
+            if len(later) >= len(raw_list):
+                raw_list = later
         # Fallback: legacy text-based scan when the card layout changes. The
         # badge is only matched inside its own card subtree (no ancestor walk),
         # so a global status label cannot leak across cards.

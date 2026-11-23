@@ -223,6 +223,10 @@ async def uplus_read_experiment_detail(course_id: str, exp_id: str, stu_exp_id: 
             "submitted_files": detail.submitted_files,
             "attachments": detail.attachments,
             "manual_text": detail.manual_text[:2000],
+            # Tabs that could not be read. An empty attachments list is
+            # otherwise ambiguous: none on the page, or unreachable. When this
+            # map is non-empty, use the browse_* tools to look at the page.
+            "tab_errors": dict(detail.tab_errors),
         }
     return await _thread.run_async(work)
 
@@ -424,6 +428,51 @@ async def uplus_patrol(auto_answer: bool = False, submit: bool = False,
     """
     return await _thread.run_async(
         _dispatch("patrol", auto_answer=auto_answer, submit=submit, audit=audit)
+    )
+
+
+@mcp.tool()
+async def uplus_finish_then_review(
+    answers: dict[str, dict[str, str]] | None = None,
+    submit: bool = False,
+    audit: bool = True,
+    screenshot: bool = False,
+) -> dict:
+    """Two-phase homework workflow: finish every outstanding homework first,
+    then review the whole account once to judge whether anything is still
+    incomplete.
+
+    This is the "先做作业，全部写完后再总体检索" flow. Unlike ``uplus_patrol``
+    (which interleaves per-task read/audit/answer), it deliberately separates
+    the two concerns:
+
+    Phase 1 — *finish*. Walk every active course in the fixed patrol order and
+    answer each not-submitted, non-expired homework in turn. ``answers`` maps
+    ``task_id`` → ``{question_id: answer}``; supply the answers you prepared
+    (from ``uplus_inspect_homework``). Any objective question left without an
+    answer is collected, never silently skipped. ``submit=True`` submits each
+    homework whose objective questions are all answered; keep ``submit=False``
+    to fill without submitting, then review before submitting.
+
+    Phase 2 — *review*. Only after the last homework has been attempted does
+    this re-read every homework's real page state and run the same completeness
+    audit ``uplus_patrol`` uses. The verdict ("还有没有未完成的作业") therefore
+    reflects the post-fill state of the whole account, not a per-task snapshot
+    taken mid-fill. ``screenshot=True`` additionally captures the answer page of
+    each still-incomplete homework so you can see the unfilled boxes before
+    deciding what to do; a path is returned per incomplete item under
+    ``review[].screenshot``.
+
+    Returns ``summary`` (finish_attempted / finish_submitted / review_total /
+    review_incomplete / takeover_count), the per-homework ``finish`` log, the
+    per-homework ``review`` rows (with ``complete`` flags), a ``takeover`` list
+    tagged by ``phase`` ("finish" / "review"), and a ``report_path``. Use
+    ``uplus_repair_homework`` to withdraw and complete any homework that the
+    review still reports as incomplete.
+    """
+    return await _thread.run_async(
+        _dispatch("finish_then_review", answers, submit=submit, audit=audit,
+                  screenshot=screenshot)
     )
 
 

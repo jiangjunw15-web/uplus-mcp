@@ -719,6 +719,47 @@ def test_read_detail_captures_manual_links(tmp_path):
     assert detail.manual_links
     assert detail.manual_links[0].name == "实验报告模板.docx"
     assert detail.manual_links[0].href == "http://x/tpl.docx"
+    # A fully readable page records no tab failures.
+    assert detail.tab_errors == {}
+
+
+def test_read_detail_records_unreadable_tabs(tmp_path):
+    """A tab that cannot be clicked or read is recorded in ``tab_errors``
+    instead of being swallowed, so an empty manual_links is no longer
+    ambiguous between "no manual" and "manual unreachable"."""
+    class _FailingTabPage:
+        def __init__(self):
+            self.url = "https://www.eduplus.net/course/course/c1/ExperimentPage/x/y/labsubmit"
+
+        def wait_for_load_state(self, *a, **k):
+            return None
+
+        def inner_text(self, selector="body"):
+            return "实验一 进程同步\n提交物：实验报告\n2026-12-31 23:59"
+
+        def evaluate(self, script, arg=None):
+            if "exp-info-tab-btn" in script:
+                # The 实验手册 tab is missing on this page; 实验附件 is there.
+                return "实验手册" not in str(arg)
+            if "a.href" in script:
+                raise RuntimeError("frame detached")
+            return []
+
+    class _Session:
+        def open(self, url):
+            return _FailingTabPage()
+
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), _Session())
+    detail = op.read_detail("c1", "e1", "s1")
+
+    # Both tab reads failed; the detail is still returned, but the failures are
+    # visible so the caller knows the manual/attachments are missing data.
+    assert set(detail.tab_errors) >= {"实验手册", "实验附件"}
+    # 实验手册 is absent from the page; 实验附件 exists but its read raised.
+    assert "找不到标签页" in detail.tab_errors["实验手册"]
+    assert "frame detached" in detail.tab_errors["实验附件"]
+    # Secrets never leak through the recorded reason.
+    assert "AccessToken" not in str(detail.tab_errors)
 
 
 def test_download_experiment_materials_covers_all_sources(tmp_path):

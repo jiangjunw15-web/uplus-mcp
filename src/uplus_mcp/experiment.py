@@ -97,6 +97,13 @@ class ExperimentDetail:
     #: the report template or the requirements we need.
     manual_links: list[Attachment] = field(default_factory=list)
     page_url: str = ""
+    #: Tabs whose read failed, as ``{tab: reason}``. A tab that cannot be
+    #: clicked or read used to be swallowed silently, so ``read_detail``
+    #: returned a "successful" detail whose manual text / attachments were
+    #: simply missing and the caller could not tell a page with no manual from
+    #: a page whose manual could not be reached. Recording it here keeps the
+    #: returned structure unchanged while making the gap visible downstream.
+    tab_errors: dict[str, str] = field(default_factory=dict)
 
 
 class ExperimentOperator:
@@ -229,16 +236,18 @@ class ExperimentOperator:
                 }
             """) or []
             detail.submitted_download_buttons = [str(b) for b in buttons]
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - keep reading the other tabs
+            detail.tab_errors["实验提交物"] = utils.redact_secrets(str(exc))
 
         # read 实验手册 tab — the manual may be inline text *and* carry
         # downloadable files (a .docx handbook, a template, reference code).
         # Both are captured: the text for requirement extraction, the links
         # for template / material download.
         try:
+            # ``_click_tab`` already waits for the tab content to load, so an
+            # extra fixed sleep here only doubled the per-tab cost (~2s each)
+            # without making the read more reliable.
             self._click_tab(page, "实验手册")
-            time.sleep(1.0)
             detail.manual_text = page.inner_text("body")
             manual_atts = page.evaluate(r"""
                 () => {
@@ -256,13 +265,13 @@ class ExperimentOperator:
                 detail.manual_links.append(
                     Attachment(name=str(a.get("name", "")), href=str(a.get("href", "")))
                 )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - record which tab was unreadable
+            detail.tab_errors["实验手册"] = utils.redact_secrets(str(exc))
 
         # read 实验附件 tab
         try:
+            # Same reasoning as 实验手册: ``_click_tab`` waits for the content.
             self._click_tab(page, "实验附件")
-            time.sleep(0.8)
             atts = page.evaluate(r"""
                 () => {
                     const out = [];
@@ -279,8 +288,8 @@ class ExperimentOperator:
                 detail.attachments.append(
                     Attachment(name=str(a.get("name", "")), href=str(a.get("href", "")))
                 )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - record which tab was unreadable
+            detail.tab_errors["实验附件"] = utils.redact_secrets(str(exc))
 
         return detail
 

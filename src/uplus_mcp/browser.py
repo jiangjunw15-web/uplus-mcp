@@ -60,6 +60,10 @@ class BrowserSession:
         self._page: Optional[Page] = None
         self._keep_open = keep_open
         self._started = False
+        # Whether ``localStorage.AccessToken`` has already been confirmed on
+        # this session's platform-origin tab (see ``api_get``). Re-armed when the
+        # tab is moved off the origin, so a fresh tab is always probed once.
+        self._token_probed = False
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -158,14 +162,54 @@ class BrowserSession:
 
     def open(self, path: str, *, timeout_ms: int = 30_000) -> Page:
         page = self.page
-        page.goto(self.url_for(path), wait_until="domcontentloaded",
+        target = self.url_for(path)
+        # Re-navigating to the page the tab is already showing is the single
+        # biggest waste in a patrol: a homework's answer page is opened once to
+        # read its state, then again to fill it, then again to audit it, and
+        # Playwright does not short-circuit ``goto`` to the same URL — each call
+        # is a full SPA reload plus a networkidle wait. Skipping the reload when
+        # the resolved target equals the current URL (ignoring a trailing hash
+        # the SPA may add) turns 2–3 reloads into one, with no behaviour change:
+        # the caller still gets the page it asked for, already loaded.
+        if self._same_document_url(page.url, target):
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+            except PWTimeout:
+                pass
+            return page
+        page.goto(target, wait_until="domcontentloaded",
                   timeout=timeout_ms)
         try:
             page.wait_for_load_state("networkidle", timeout=8000)
         except PWTimeout:
             pass
         time.sleep(0.6)
+        # A navigation that lands off the platform origin leaves a tab whose
+        # ``localStorage.AccessToken`` is not ours, so the next API call must
+        # probe again rather than trust the cached flag.
+        if not utils.is_same_origin(page.url, self.base_url):
+            self._token_probed = False
         return page
+    @staticmethod
+    def _same_document_url(current: str, target: str) -> bool:
+        """True when ``current`` already shows ``target`` (fragment ignored).
+
+        Only the URL fragment (hash) is ignored: the SPA appends route state as
+        a hash on some pages, and a differing hash is still the same document.
+        Scheme, host, path and query are compared exactly, because the answer
+        route encodes the course/task in its path and query
+        (``.../workAnswer/{course}/{task}/true?isPiYue=noPiYue``) — a different
+        task is a different path and must still reload.
+        """
+        if not current or not target:
+            return False
+        try:
+            cur = urlparse(current)
+            tgt = urlparse(target)
+        except Exception:  # noqa: BLE001 - malformed URL: treat as different
+            return False
+        return ((cur.scheme, cur.netloc, cur.path, cur.query)
+                == (tgt.scheme, tgt.netloc, tgt.path, tgt.query))
 
     # ------------------------------------------------------------------ #
     # in-page REST reads
@@ -192,10 +236,17 @@ class BrowserSession:
             self.open("/workbench/index/school")
             page = self.page
         # A stale tab may carry no token yet; land on the workbench once before
-        # reading localStorage.
-        if not self._token_present(page):
-            self.open("/workbench/index/school")
-            page = self.page
+        # reading localStorage. This is a one-time probe: the fetch script
+        # itself re-reads ``localStorage.AccessToken`` on every call, and a
+        # token that goes stale mid-patrol is caught by the 401 recovery branch
+        # below, so probing on every API call only added one ``evaluate``
+        # round-trip per question (30 questions = 30 wasted round-trips). The
+        # probe is re-armed whenever the tab is moved off the platform origin.
+        if not getattr(self, "_token_probed", False):
+            if not self._token_present(page):
+                self.open("/workbench/index/school")
+                page = self.page
+            self._token_probed = True
         script = """
         async (url) => {
             const token = localStorage.getItem('AccessToken') || '';

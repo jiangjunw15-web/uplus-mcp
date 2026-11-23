@@ -486,6 +486,10 @@ class PatrolEngine:
             "requirements": op.collect_requirements(detail)[:6000],
             "downloaded": downloaded,
             "errors": errors,
+            # Tabs whose content could not be read. Previously these failures
+            # were swallowed, so an empty ``manual_links`` was ambiguous: no
+            # manual on the page, or a manual the tool could not reach.
+            "tab_errors": dict(detail.tab_errors),
             "unavailable_attachments": hidden,
             "unavailable_manual_links": hidden_manual,
             "unavailable_materials": unavailable_materials,
@@ -1164,6 +1168,287 @@ class PatrolEngine:
             "incomplete_homeworks": incomplete,
             "takeover": snapshot.takeover,
             "report_path": str(report_path),
+        }
+
+    # ------------------------------------------------------------------ #
+    # two-phase: finish every outstanding homework, then review once
+    # ------------------------------------------------------------------ #
+    def _collect_outstanding(self) -> list[tuple[Course, HomeworkTask]]:
+        """All not-submitted, non-expired homeworks across active courses.
+
+        Course-major and deterministic: a course's tasks are sorted by due date
+        + title (same key as ``patrol``), so the finish phase walks them in the
+        same stable order the user sees in the report. Expired tasks are left
+        out: they cannot be submitted and only slow the finish phase down.
+        """
+        out: list[tuple[Course, HomeworkTask]] = []
+        for course in self._iter_courses():
+            tasks = sorted(
+                self.client.list_homeworks(course.id), key=_homework_sort_key)
+            for task in tasks:
+                self._register(task)
+                if (task.status is HomeworkStatus.NOT_SUBMITTED
+                        and not task.is_expired()):
+                    out.append((course, task))
+        return out
+
+    def finish_then_review(self, answers: dict[str, dict[str, str]] | None = None,
+                           *, submit: bool = False, audit: bool = True,
+                           screenshot: bool = False) -> dict:
+        """Two-phase homework workflow: finish first, review once afterwards.
+
+        Phase 1 — *finish*. Walk every active course in the fixed patrol order
+        and answer each not-submitted, non-expired homework in turn. The caller
+        supplies answers as ``{task_id: {question_id: answer}}``; any objective
+        question left without an answer is collected, never silently skipped,
+        so the review phase can tell exactly what is still outstanding.
+
+        Phase 2 — *review*. Only after the last homework has been attempted do
+        we re-read every homework's real page state and run the same
+        completeness audit ``patrol`` uses, so the verdict ("还有没有未完成的作
+        业") reflects the post-fill state of the whole account rather than a
+        per-task snapshot taken mid-fill. ``screenshot=True`` additionally
+        captures the answer page of each still-incomplete homework so the model
+        (or a human) can see the unfilled boxes before deciding what to do.
+
+        Nothing here changes ``patrol``'s contract: it is a separate orchestration
+        for the "answer everything, then check once" flow. Subjective,
+        programming and attachment items are never answered and are reported
+        under ``takeover`` exactly as ``patrol`` reports them.
+        """
+        supplied = answers or {}
+        finish_log: list[dict] = []
+        takeover: list[dict] = []
+
+        # ---- Phase 1: finish every outstanding homework -------------------- #
+        for course, task in self._collect_outstanding():
+            task_answers = supplied.get(task.task_id, {})
+            try:
+                # Inspect first so the caller (and this method's own log) sees
+                # the full question set; the same questions drive the audit in
+                # phase 2, so this read is not wasted.
+                inspect = self.inspect_homework(task.task_id, course.id)
+            except AuthExpiredError:
+                raise
+            except Exception as exc:  # keep the finish phase going
+                takeover.append({
+                    "course": course.name, "title": task.name,
+                    "phase": "finish",
+                    "detail": f"读取题目失败：{exc}",
+                    "deadline": utils.deadline_label(task.end_ms),
+                })
+                continue
+            questions = inspect.get("brief", {}).get("questions", [])
+            subjective = [q for q in questions
+                          if q.get("type") in ("简答题", "编程题", "附件题", "未知题型")]
+            objective_blank = [q for q in questions
+                               if q.get("type") in ("单选题", "多选题", "判断题", "填空题")
+                               and not q.get("answered")]
+            if subjective:
+                takeover.append({
+                    "course": course.name, "title": task.name,
+                    "phase": "finish",
+                    "detail": f"含 {len(subjective)} 道主观/编程/附件题，需本人完成",
+                    "deadline": utils.deadline_label(task.end_ms),
+                })
+            if not objective_blank:
+                # Nothing objective left to fill here. A homework with only
+                # subjective/programming/attachment items belongs to the human
+                # (already listed under takeover); a homework whose objective
+                # items are all answered needs no answer call at all. Neither
+                # case should reach answer_homework, whose submit gate would
+                # refuse it anyway and whose page open would be wasted time.
+                note = ("无客观题待答（已全部作答，或仅含主观/编程/附件题需本人完成）"
+                        if subjective else
+                        "无客观题待答（可能已全部作答或为材料题）")
+                finish_log.append({
+                    "course_id": course.id, "course_name": course.name,
+                    "task_id": task.task_id, "name": task.name,
+                    "answered": 0, "submitted": False, "note": note,
+                })
+                continue
+            if not task_answers:
+                # Blank objective questions exist but the caller gave no answers
+                # for this task. Calling answer_homework now would re-open the
+                # page and re-fetch every question detail only to skip each one
+                # for "缺少模型答案" — a full page load and N API round-trips
+                # with zero effect. Report what is needed from the inspect data
+                # we already have and leave the homework untouched; the caller
+                # supplies answers and re-runs, or finishes it by hand.
+                needs = [
+                    {"question_id": q.get("question_id"),
+                     "order": q.get("order"),
+                     "type": q.get("type"),
+                     "figure": bool(q.get("images"))}
+                    for q in objective_blank
+                ]
+                finish_log.append({
+                    "course_id": course.id, "course_name": course.name,
+                    "task_id": task.task_id, "homework_id": task.homework_id,
+                    "name": task.name,
+                    "answered": 0, "objective_total": len(objective_blank),
+                    "objective_answered": 0,
+                    "submitted": False,
+                    "needs_answers": needs,
+                    "note": (f"未提供答案，跳过作答：{len(objective_blank)} 道客观题待答。"
+                             "先用 uplus_inspect_homework 取审题包，作答后把 "
+                             "{task_id: {question_id: answer}} 传入再重跑。"),
+                })
+                takeover.append({
+                    "course": course.name, "title": task.name,
+                    "phase": "finish",
+                    "detail": (f"{len(objective_blank)} 道客观题未提供答案，未作答"
+                               "（先用 inspect 取审题包，作答后重跑 finish_then_review）"),
+                    "deadline": utils.deadline_label(task.end_ms),
+                    "needs_answers": needs,
+                })
+                continue
+            try:
+                outcome = self.operator.answer_homework(
+                    task, task_answers, submit=submit,
+                    allow_subjective_skips=True,
+                    course_name=course.name,
+                )
+            except AuthExpiredError:
+                raise
+            except Exception as exc:  # never abort the whole finish phase
+                takeover.append({
+                    "course": course.name, "title": task.name,
+                    "phase": "finish",
+                    "detail": f"作答失败：{exc}",
+                    "deadline": utils.deadline_label(task.end_ms),
+                })
+                finish_log.append({
+                    "course_id": course.id, "course_name": course.name,
+                    "task_id": task.task_id, "homework_id": task.homework_id,
+                    "name": task.name,
+                    "answered": 0, "submitted": False,
+                    "errors": [str(exc)],
+                    "note": f"作答失败：{exc}",
+                })
+                continue
+            finish_log.append({
+                "course_id": course.id, "course_name": course.name,
+                "task_id": task.task_id, "homework_id": task.homework_id,
+                "name": task.name,
+                "answered": outcome.get("answered", 0),
+                "objective_total": outcome.get("objective_total", 0),
+                "objective_answered": outcome.get("objective_answered", 0),
+                "submitted": bool(outcome.get("submitted")),
+                "skipped": outcome.get("skipped", 0),
+                "skipped_questions": outcome.get("skipped_questions", []),
+                "errors": outcome.get("errors", []),
+                "note": outcome.get("note", ""),
+            })
+            if outcome.get("skipped_questions"):
+                for item in outcome["skipped_questions"]:
+                    if item.get("subjective") or item.get("blocking") is False:
+                        continue
+                    takeover.append({
+                        "course": course.name, "title": task.name,
+                        "phase": "finish",
+                        "detail": (f"第{item.get('order')}题未完成："
+                                   f"{item.get('reason', '')}"),
+                        "deadline": utils.deadline_label(task.end_ms),
+                    })
+
+        # ---- Phase 2: review the whole account once ----------------------- #
+        review: list[dict] = []
+        incomplete_count = 0
+        for course in self._iter_courses():
+            tasks = sorted(
+                self.client.list_homeworks(course.id), key=_homework_sort_key)
+            for task in tasks:
+                self._register(task)
+                try:
+                    result = self.audit_homework(
+                        task.task_id, course.id, refresh_page_state=audit)
+                except AuthExpiredError:
+                    raise
+                except Exception as exc:  # keep reviewing the rest
+                    takeover.append({
+                        "course": course.name, "title": task.name,
+                        "phase": "review",
+                        "detail": f"复核失败：{exc}",
+                        "deadline": utils.deadline_label(task.end_ms),
+                    })
+                    continue
+                audit_block = result.get("audit", {})
+                is_incomplete = not audit_block.get("complete", True)
+                screenshot_path = ""
+                if is_incomplete and screenshot:
+                    try:
+                        shot = self.capture_question_image(
+                            task.task_id, course.id, full_page=True)
+                        screenshot_path = shot.get("path", "")
+                    except AuthExpiredError:
+                        raise
+                    except Exception:  # screenshot is best-effort
+                        screenshot_path = ""
+                review.append({
+                    "course_id": course.id,
+                    "course_name": course.name,
+                    "task_id": task.task_id,
+                    "homework_id": task.homework_id,
+                    "name": task.name,
+                    "status": result.get("status"),
+                    "status_label": result.get("status_label"),
+                    "deadline": result.get("deadline"),
+                    "withdrawable": result.get("withdrawable", False),
+                    "complete": audit_block.get("complete", True),
+                    "missing": audit_block.get("missing", []),
+                    "partial": audit_block.get("partial", []),
+                    "wrong": audit_block.get("wrong", []),
+                    "unjudged": audit_block.get("unjudged", []),
+                    "screenshot": screenshot_path,
+                })
+                if is_incomplete:
+                    incomplete_count += 1
+                    parts: list[str] = []
+                    if audit_block.get("missing"):
+                        orders = "、".join(
+                            str(m["order"]) for m in audit_block["missing"][:10])
+                        tail = "…" if len(audit_block["missing"]) > 10 else ""
+                        parts.append(f"漏答 {len(audit_block['missing'])} 题"
+                                     f"（题号 {orders}{tail}）")
+                    if audit_block.get("partial"):
+                        porders = "、".join(
+                            str(m["order"]) for m in audit_block["partial"][:10])
+                        ptail = "…" if len(audit_block["partial"]) > 10 else ""
+                        parts.append(f"多选漏选 {len(audit_block['partial'])} 题"
+                                     f"（题号 {porders}{ptail}）")
+                    takeover.append({
+                        "course": course.name, "title": task.name,
+                        "phase": "review",
+                        "detail": "；".join(parts) if parts else "复核仍有未完成项",
+                        "deadline": utils.deadline_label(task.end_ms),
+                        "withdrawable": result.get("withdrawable", False),
+                    })
+
+        # Persist a compact Markdown review so the user has a file to open.
+        snapshot = report_mod.PatrolReport(generated_at_ms=utils.now_ms())
+        markdown = report_mod.render_markdown(
+            snapshot, warning_hours=self.config.deadline_warning_hours)
+        report_path = report_mod.persist(markdown, self.config)
+        return {
+            "phase": "finish_then_review",
+            "summary": {
+                "finish_attempted": len(finish_log),
+                "finish_submitted": sum(1 for f in finish_log if f.get("submitted")),
+                "review_total": len(review),
+                "review_incomplete": incomplete_count,
+                "takeover_count": len(takeover),
+            },
+            "finish": finish_log,
+            "review": review,
+            "takeover": takeover,
+            "report_path": str(report_path),
+            "note": (
+                "两阶段流程：第一阶段已尝试完成所有未提交作业，第二阶段统一复核"
+                "判断是否仍有未完成。review 中 complete=false 的作业仍需处理；"
+                "带 screenshot 的可用 browse_screenshot / uplus_capture_question_image "
+                "查看未填写空位后补答，再走 uplus_repair_homework。"
+            ),
         }
 
 

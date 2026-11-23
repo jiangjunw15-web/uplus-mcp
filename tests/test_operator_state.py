@@ -48,6 +48,69 @@ def test_page_state_withdraw_takes_priority_over_submit_text():
 
 
 # --------------------------------------------------------------------------- #
+# cheap button probe (submit / withdraw confirmation loops)
+# --------------------------------------------------------------------------- #
+class _ProbePage:
+    """Fake page answering only the button-label probe script."""
+
+    def __init__(self, labels):
+        self._labels = labels
+        self.calls = 0
+
+    def evaluate(self, script, arg=None):
+        if "撤回作业" in str(script) and "querySelectorAll" in str(script):
+            self.calls += 1
+            if "撤回作业" in self._labels:
+                return "withdrawn"
+            if "提交作业" in self._labels:
+                return "submit"
+            return None
+        return None
+
+
+def _operator():
+    from uplus_mcp.operator import HomeworkOperator
+    return object.__new__(HomeworkOperator)
+
+
+def test_probe_submit_button_reads_withdraw_as_pending():
+    from uplus_mcp.models import HomeworkStatus
+    op = _operator()
+    state = op._probe_submit_button(_ProbePage(["撤回作业", "保存草稿"]))
+    assert state is HomeworkStatus.SUBMITTED_PENDING
+
+
+def test_probe_submit_button_reads_submit_as_not_submitted():
+    from uplus_mcp.models import HomeworkStatus
+    op = _operator()
+    state = op._probe_submit_button(_ProbePage(["提交作业", "保存草稿"]))
+    assert state is HomeworkStatus.NOT_SUBMITTED
+
+
+def test_probe_submit_button_returns_none_while_transitioning():
+    op = _operator()
+    assert op._probe_submit_button(_ProbePage(["保存草稿"])) is None
+
+
+def test_probe_submit_button_prefers_withdraw_over_submit():
+    # Same precedence as classify_page_state: a submitted page that also shows
+    # a generic submit control must read as submitted.
+    from uplus_mcp.models import HomeworkStatus
+    op = _operator()
+    state = op._probe_submit_button(_ProbePage(["提交作业", "撤回作业"]))
+    assert state is HomeworkStatus.SUBMITTED_PENDING
+
+
+def test_probe_submit_button_swallows_page_errors():
+    class _Broken(_ProbePage):
+        def evaluate(self, script, arg=None):
+            raise RuntimeError("frame detached")
+
+    op = _operator()
+    assert op._probe_submit_button(_Broken([])) is None
+
+
+# --------------------------------------------------------------------------- #
 # experiment badge
 # --------------------------------------------------------------------------- #
 def test_experiment_flag_text_wins_over_class():

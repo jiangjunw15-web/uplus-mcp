@@ -13,6 +13,60 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.12
+
+A new **two-phase** orchestration separates "answer the homework" from "check
+the homework", so the verdict on outstanding work reflects the whole account
+after everything has been attempted — not a per-task snapshot taken mid-fill.
+`uplus_patrol`'s signature and behaviour are unchanged.
+
+- **`uplus_finish_then_review`** — the "先做作业，全部写完后再总体检索" flow.
+  *Phase 1 (finish)* walks every active course in the fixed patrol order
+  (course → due-date/title) and answers each not-submitted, non-expired
+  homework in turn; answers arrive as `{task_id: {question_id: answer}}`.
+  Graded / submitted / expired homeworks are never touched, and subjective,
+  programming and attachment items go to `takeover` instead of being answered.
+  A single homework's failure never aborts the rest of phase 1.
+  *Phase 2 (review)* runs only after the last homework has been attempted: it
+  re-reads every homework's real page state and runs the same completeness audit
+  `uplus_patrol` uses, so "is anything still incomplete?" answers for the
+  post-fill state of the whole account. `screenshot=True` additionally captures
+  the answer page of each still-incomplete homework (`review[].screenshot`), so
+  you can see the unfilled boxes before deciding whether to top up the answer or
+  call `uplus_repair_homework`. Results carry `summary`, per-homework `finish`
+  and `review` rows (with a `complete` flag), a `phase`-tagged `takeover` list,
+  and a `report_path`.
+  The submit gate is not relaxed: `submit=True` submits only when every
+  objective question is answered with no write error.
+- **No answers, no page open.** When a homework's objective questions have no
+  answer yet, phase 1 records the question numbers it needs (`finish[].needs_answers`
+  and `takeover`) and moves on — it does not open the answer page and fetch every
+  question detail just to skip each one for "缺少模型答案".
+- **Faster retrieval, same verdicts.** A patrol used to load the same homework's
+  answer page 2–3 times (read state → fill → audit), each a full reload. `open`
+  now returns the page it is already on when the resolved target matches
+  (fragment ignored; scheme/host/path/query compared exactly), so one homework
+  costs one reload while a different task or course still reloads. The submit and
+  withdraw confirmation loops use a small button-label probe
+  (`_probe_submit_button`) instead of serialising the whole body each round,
+  falling back to the full read whenever the probe is inconclusive — the verdict
+  is unchanged. `_await_page_state` waits for `domcontentloaded` and polls every
+  150 ms instead of waiting for a `networkidle` that never settles on some course
+  packs. The `api_get` AccessToken probe runs once per session instead of once per
+  call (the fetch itself still reads the token, and 401 recovery still applies).
+  `read_experiments` re-reads only when the first snapshot looks unfinished, and
+  the experiment tab reads drop the sleeps that duplicated `_click_tab`'s own
+  wait.
+- **Experiment tab failures are no longer silent.** When the 实验提交物 / 实验手册 /
+  实验附件 tab cannot be read, the reason is recorded in
+  `ExperimentDetail.tab_errors` (redacted) and returned as `tab_errors` from
+  `uplus_read_experiment_detail` and `uplus_download_experiment_materials`, so an
+  empty `manual_links` no longer means either "no manual" or "manual
+  unreachable".
+- **Tests.** 7 two-phase cases, 8 page-reuse/token-probe cases, 5 button-probe
+  cases and 2 experiment-tab cases; the full suite (435) passes with no
+  regressions.
+
 ## What's new in 0.8.11
 
 A full-source security audit fixed eight classes of vulnerability without
