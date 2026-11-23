@@ -1024,9 +1024,16 @@ class HomeworkOperator:
                     self._click_option(page, code, stem_text=stem,
                                        occurrence=occurrence)
                 reread = self._checked_letters(page, stem, occurrence)
-                if reread is None or reread == target:
+                if reread is None:
+                    # The DOM went away mid-verification. ``None`` is not a
+                    # confirmation of success (the "None == no answer"
+                    # convention elsewhere in the fill path): give it one more
+                    # read before deciding, so a transient detach cannot mask
+                    # an incomplete selection.
+                    reread = self._checked_letters(page, stem, occurrence)
+                if reread == target:
                     return normalized
-                actual = reread
+                actual = reread or set()
             raise UplusError(
                 f"多选题点选后页面显示 {''.join(sorted(actual)) or '空'}"
                 f"，目标 {normalized}，选项未能全部选中"
@@ -1077,7 +1084,8 @@ class HomeworkOperator:
         )
 
     def capture_question(self, page: Page, question: Question, total: int,
-                         output_path: str = "", full_page: bool = False) -> Path:
+                         output_path: str = "", full_page: bool = False,
+                         occurrence: int = 0) -> Path:
         """Screenshot one question block (diagram included) and return the path.
 
         Figure questions (``以下模型是…`` with a picture) cannot be answered
@@ -1085,6 +1093,10 @@ class HomeworkOperator:
         *see* the rendered block. The page is navigated to the question by stem
         first — the same rule the fill loop uses — and the question container
         is captured rather than the whole viewport, so the diagram is readable.
+
+        ``occurrence`` selects the n-th exact duplicate when several questions
+        share the same stem (mirrors ``fill_question``): without it, a list-view
+        page with duplicate stems would always capture the first copy.
         """
         if self._single_question_view(page):
             # Fast path: the page may already show the requested question.
@@ -1101,7 +1113,7 @@ class HomeworkOperator:
                         f"第{question.order}题跳转后题干校验不一致，未截图（避免截到别的题）"
                     )
         path = self._image_output_path(output_path, question.order)
-        scope = self._narrowed_scope(page, question.stem)
+        scope = self._narrowed_scope(page, question.stem, occurrence)
         try:
             if scope is not None and not full_page:
                 scope.scroll_into_view_if_needed(timeout=4000)
@@ -1114,6 +1126,25 @@ class HomeworkOperator:
                 page.screenshot(path=str(path), full_page=True)
         except PWTimeout as exc:
             raise UplusError(f"题目截图失败：{exc}") from exc
+        return path
+
+    def capture_answer_page(self, task: HomeworkTask,
+                            output_path: str = "") -> Path:
+        """Screenshot the whole homework answer page.
+
+        Used by the two-phase flow to "进入页面后截屏审查" an incomplete
+        homework: unlike ``capture_question`` (which navigates to a single
+        question by stem and needs an ``order``), this opens the answer page and
+        captures everything in one full-page shot, so the reviewer can see every
+        unfilled box at once. ``output_path`` is confined to the IO roots, like
+        the question capture path.
+        """
+        page = self.open_homework(task)
+        path = self._image_output_path(output_path, order=0)
+        try:
+            page.screenshot(path=str(path), full_page=True)
+        except PWTimeout as exc:
+            raise UplusError(f"作答页整页截图失败：{exc}") from exc
         return path
 
     def read_current_my_answer(self, page: Page) -> Optional[str]:

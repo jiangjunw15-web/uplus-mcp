@@ -68,6 +68,22 @@ def test_list_courses_sorts_the_live_feed_by_name_then_id():
     assert [row["course_id"] for row in rows] == ["a", "b"]
 
 
+def test_course_name_caches_so_the_live_feed_is_fetched_once_per_course():
+    """In live mode (no configured courses) ``course_name`` falls through to the
+    live feed. It used to call ``get_course`` (→ full ``list_my_courses``) on
+    every invocation, and a patrol calls it several times per homework. The
+    cache keeps it to one fetch per course."""
+    client = Mock()
+    client.get_course.return_value = Course(id="c1", name="课程一")
+    engine = PatrolEngine(Config(), Mock(), client, Mock())
+
+    assert engine.course_name("c1") == "课程一"
+    assert engine.course_name("c1") == "课程一"
+    assert engine.course_name("c1") == "课程一"
+
+    assert client.get_course.call_count == 1
+
+
 def test_list_homeworks_is_course_major_and_due_date_sorted():
     cfg = Config(courses=[Course(id="c2", name="B 课"),
                           Course(id="c1", name="A 课")])

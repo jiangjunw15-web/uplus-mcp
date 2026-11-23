@@ -179,11 +179,19 @@ class BrowserSession:
             return page
         page.goto(target, wait_until="domcontentloaded",
                   timeout=timeout_ms)
+        # Best-effort settle only. ``goto(domcontentloaded)`` already returned;
+        # every workflow caller (``_await_page_state``, ``_await_experiment_cards``,
+        # the materials walk) does its own readiness wait, so waiting for a full
+        # ``networkidle`` here used to cost up to 8 s on every *distinct* page
+        # open when the course pack keeps the network busy (analytics, long-poll)
+        # and never quietens. A short bounded settle keeps a freshly-opened page
+        # from being snapshotted mid-render for the direct ``browse_open`` tool
+        # without taxing a whole patrol.
         try:
-            page.wait_for_load_state("networkidle", timeout=8000)
+            page.wait_for_load_state("networkidle", timeout=2000)
         except PWTimeout:
             pass
-        time.sleep(0.6)
+        time.sleep(0.3)
         # A navigation that lands off the platform origin leaves a tab whose
         # ``localStorage.AccessToken`` is not ours, so the next API call must
         # probe again rather than trust the cached flag.
@@ -695,6 +703,18 @@ class BrowserSession:
         except Exception:  # noqa: BLE001 - page mid-navigation
             return None
 
+    def _body_hint(self, page: Page, limit: int = 300) -> str:
+        """A redacted short body excerpt for failure receipts.
+
+        ``page.inner_text("body")`` can raise when the page is mid-navigation
+        or the frame is closing; a login-failure receipt must never turn into a
+        raised exception, so the read is guarded and degrades to "".
+        """
+        try:
+            return utils.redact_secrets(page.inner_text("body")[:limit])
+        except Exception:  # noqa: BLE001 - mid-navigation / detached frame
+            return ""
+
     def _submit_credentials(self, page: Page, username: str, password: str, *,
                             method: str, wait_ms: int, notes: tuple[str, ...] = ()) -> dict[str, Any]:
         """Fill the account/password boxes, submit, and verify the token."""
@@ -705,7 +725,7 @@ class BrowserSession:
                 "logged_in": False, "method": method,
                 "reason": "未识别到账号/密码输入框，请改用手动登录",
                 "url": utils.redact_secrets(page.url),
-                "body_hint": utils.redact_secrets(page.inner_text("body")[:300]),
+                "body_hint": self._body_hint(page),
             }
         user_box.fill(username)
         pass_box.fill(password)
@@ -726,7 +746,7 @@ class BrowserSession:
             "logged_in": False, "method": method,
             "reason": reason,
             "url": utils.redact_secrets(status["url"]),
-            "body_hint": utils.redact_secrets(page.inner_text("body")[:300]),
+            "body_hint": self._body_hint(page),
         }
 
     def login_by_student_id(self, username: str, password: str, school: str, *,

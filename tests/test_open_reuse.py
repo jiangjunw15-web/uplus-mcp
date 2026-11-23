@@ -78,6 +78,24 @@ def test_open_reloads_when_target_is_a_different_page():
     assert page.gotos[0][0].endswith("task-2/true?isPiYue=noPiYue")
 
 
+def test_open_settle_is_bounded_not_a_full_networkidle_wait():
+    """A fresh page open waits for domcontentloaded and then only a short
+    bounded settle — not the old up-to-8 s networkidle that never quietens on
+    course packs with analytics/long-poll."""
+    page = _Page("https://www.eduplus.net" + TASK_ROUTE)
+    session = _session(page)
+
+    session.open("/course/workAnswer/course-1/task-2/true?isPiYue=noPiYue")
+
+    states = [s for s, _ in page.load_states]
+    # domcontentloaded was the goto wait; networkidle may appear once with a
+    # short (2 s) budget. Any networkidle wait must be bounded well under the
+    # old 8 s.
+    for state, timeout in page.load_states:
+        if state == "networkidle":
+            assert timeout == 2000
+
+
 def test_open_ignores_the_fragment_when_deciding_to_reuse():
     page = _Page("https://www.eduplus.net" + TASK_ROUTE + "#step=3")
     session = _session(page)

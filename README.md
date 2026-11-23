@@ -42,30 +42,56 @@ after everything has been attempted — not a per-task snapshot taken mid-fill.
   answer yet, phase 1 records the question numbers it needs (`finish[].needs_answers`
   and `takeover`) and moves on — it does not open the answer page and fetch every
   question detail just to skip each one for "缺少模型答案".
+- **Corrections to answered questions are not dropped.** Answers the caller
+  supplies for questions the platform already marks answered (a partial
+  multi-select that needs AB, a half-filled blank) reach `answer_homework`,
+  which diffs and refills them. The finish phase used to treat such a homework
+  as "无客观题待答" and silently discard the correction.
+- **Phase 1 reads the API only, never opens the page.** Deciding which
+  questions are blank is done through `list_questions` + `question_detail`
+  (`_homework_question_details`), so the finish phase costs one page load per
+  homework (the fill) instead of two.
+- **The review report is real.** `report_path` points to
+  `reports/review_YYYYmmdd_HHMMSS.md` rendered from the actual finish / review /
+  takeover data (`render_finish_review_markdown`), not an empty snapshot, and
+  carries a second-resolution name so it cannot overwrite a patrol report in
+  the same minute.
 - **Faster retrieval, same verdicts.** A patrol used to load the same homework's
   answer page 2–3 times (read state → fill → audit), each a full reload. `open`
   now returns the page it is already on when the resolved target matches
   (fragment ignored; scheme/host/path/query compared exactly), so one homework
-  costs one reload while a different task or course still reloads. The submit and
-  withdraw confirmation loops use a small button-label probe
-  (`_probe_submit_button`) instead of serialising the whole body each round,
-  falling back to the full read whenever the probe is inconclusive — the verdict
-  is unchanged. `_await_page_state` waits for `domcontentloaded` and polls every
-  150 ms instead of waiting for a `networkidle` that never settles on some course
-  packs. The `api_get` AccessToken probe runs once per session instead of once per
-  call (the fetch itself still reads the token, and 401 recovery still applies).
-  `read_experiments` re-reads only when the first snapshot looks unfinished, and
-  the experiment tab reads drop the sleeps that duplicated `_click_tab`'s own
-  wait.
+  costs one reload while a different task or course still reloads. A fresh page
+  open waits for `domcontentloaded` and then only a short bounded settle —
+  not the old up-to-8-second `networkidle` that never quietens on course packs
+  with analytics/long-poll. The submit and withdraw confirmation loops use a
+  small button-label probe (`_probe_submit_button`) instead of serialising the
+  whole body each round, falling back to the full read whenever the probe is
+  inconclusive — the verdict is unchanged. `_await_page_state` polls every
+  150 ms after `domcontentloaded`. The `api_get` AccessToken probe runs once per
+  session instead of once per call, and `course_name` is cached per course so a
+  live-mode patrol does not re-fetch the whole course feed for every row. The
+  two phases share one account-course read. `read_experiments` re-reads only
+  when the first snapshot looks unfinished, the experiment tab reads drop the
+  sleeps that duplicated `_click_tab`'s own wait, and
+  `download_experiment_materials` picks the template from the 资料 entries it
+  already walked (`find_report_template(walk_materials=False)`) instead of
+  walking and re-downloading the tree a second time.
 - **Experiment tab failures are no longer silent.** When the 实验提交物 / 实验手册 /
   实验附件 tab cannot be read, the reason is recorded in
   `ExperimentDetail.tab_errors` (redacted) and returned as `tab_errors` from
   `uplus_read_experiment_detail` and `uplus_download_experiment_materials`, so an
   empty `manual_links` no longer means either "no manual" or "manual
   unreachable".
-- **Tests.** 7 two-phase cases, 8 page-reuse/token-probe cases, 5 button-probe
-  cases and 2 experiment-tab cases; the full suite (435) passes with no
-  regressions.
+- **Other fixes.** `_prune_empty_sections` no longer deletes a heading that
+  carries its body inline on the same line (实验目的：掌握…). A multi-select
+  re-read that goes `None` mid-verification is retried and must confirm before
+  it counts as filled. Login-failure receipts use a safe `_body_hint` read that
+  degrades to "" instead of raising mid-navigation. `capture_question` /
+  `capture_question_image` accept an optional `occurrence` so a duplicate-stem
+  question can be screenshotted instead of always capturing the first copy.
+- **Tests.** 8 two-phase cases, 9 page-reuse/token-probe cases, 5 button-probe
+  cases, 3 experiment-tab/template cases and 2 login-hint cases among others;
+  the full suite (443) passes with no regressions.
 
 ## What's new in 0.8.11
 

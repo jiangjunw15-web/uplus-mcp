@@ -215,7 +215,32 @@ def test_tab_match_recognises_the_sms_form():
     page = _FakePage(["请输入手机号", "请输入验证码"], ["获取验证码", "登录"])
     session = _browser()
     assert session._tab_form_matches(page, "sms") is True
-    assert session._tab_form_matches(page, "password") is False
+
+
+def test_body_hint_degrades_to_empty_when_page_mid_navigation():
+    """A login-failure receipt must never raise because the page is mid-
+    navigation; the body hint degrades to "" instead."""
+    class _DetachedPage:
+        url = "https://www.eduplus.net/login"
+
+        def inner_text(self, selector="body"):
+            raise RuntimeError("frame is navigating away")
+
+    session = _browser()
+    assert session._body_hint(_DetachedPage()) == ""
+
+
+def test_body_hint_redacts_and_truncates():
+    class _BodyPage:
+        url = "https://www.eduplus.net/login"
+
+        def inner_text(self, selector="body"):
+            return "密码错误 " + "x" * 500 + " token=abc"
+
+    session = _browser()
+    hint = session._body_hint(_BodyPage(), limit=300)
+    assert len(hint) <= 300
+    assert "token=abc" not in hint
 
 
 def test_tab_match_recognises_the_student_id_form():

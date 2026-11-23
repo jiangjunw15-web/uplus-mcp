@@ -12,7 +12,7 @@ from . import report as report_mod
 from .browser import BrowserSession, AuthExpiredError, UplusError
 from .config import Config
 from .experiment import ExperimentOperator
-from .models import Course, Experiment, HomeworkStatus, HomeworkTask, QuestionType
+from .models import Course, Experiment, HomeworkStatus, HomeworkTask, Question, QuestionType
 from .operator import HomeworkOperator, classify_experiment_flag
 from .platform import PlatformClient
 from . import journal, login_flow, solver, utils
@@ -26,16 +26,29 @@ class PatrolEngine:
         self.client = client
         self.operator = operator
         self._task_index: dict[str, HomeworkTask] = {}
+        # Course-name resolution cache. In live mode (no configured courses),
+        # ``course_name`` used to fall through to ``client.get_course`` →
+        # ``list_my_courses()`` — a full feed request per call. A patrol /
+        # finish_then_review can call it several times per homework, so the feed
+        # was re-fetched many times for one course. The cache is filled once per
+        # course and never grows beyond the account's courses.
+        self._course_names: dict[str, str] = {}
 
     # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
     def course_name(self, course_id: str) -> str:
-        hit = next((c.name for c in self.config.courses if c.id == course_id), "")
-        if not hit:
-            course = self.client.get_course(course_id)
-            hit = course.name if course else course_id
-        return hit
+        hit = self._course_names.get(course_id)
+        if hit:
+            return hit
+        for c in self.config.courses:
+            if c.id == course_id:
+                self._course_names[course_id] = c.name
+                return c.name
+        course = self.client.get_course(course_id)
+        name = course.name if course else course_id
+        self._course_names[course_id] = name
+        return name
 
     def _iter_courses(self) -> list:
         """Configured courses, or the live account list when none are configured.
@@ -465,15 +478,38 @@ class PatrolEngine:
                                "source": "资料"})
 
         # ---- pick the best template across all downloaded files ----
-        # The template search already checked 实验附件 → 实验手册 → 资料 in
-        # priority order via find_report_template; reuse its pick so the
-        # reported template is the one the user should read locally.
+        # 实验附件 → 实验手册 are checked first (no tree walk involved); the
+        # 资料 pick reuses the ``entries`` already walked and downloaded above,
+        # so ``find_report_template`` is not called again — it would re-walk the
+        # whole 资料 folder tree and re-download the template (the reported
+        # double walk / double download).
+        template: dict | None = None
         try:
-            template = op.find_report_template(detail)
+            template = op.find_report_template(
+                detail, walk_materials=False)
         except AuthExpiredError:
             raise
         except Exception as exc:  # noqa: BLE001
             errors.append(f"模板选择：{exc}")
+        if template is None and entries:
+            downloadable = [e for e in entries if e.href]
+            if downloadable:
+                downloadable.sort(key=_template_priority)
+                entry = downloadable[0]
+                template = {"name": entry.name, "path": "", "source": "资料"}
+                # The file was already downloaded above; report its local path
+                # by matching name, so the caller knows where to read it.
+                hit = next(
+                    (d for d in downloaded
+                     if d.get("name") == entry.name and d.get("source") == "资料"),
+                    None,
+                )
+                if hit:
+                    template["path"] = hit["path"]
+            elif entries:
+                entries.sort(key=_template_priority)
+                template = {"name": entries[0].name, "path": "",
+                            "source": "资料"}
 
         hidden = [a.name for a in detail.attachments if not a.href]
         hidden_manual = [a.name for a in detail.manual_links if not a.href]
@@ -502,6 +538,20 @@ class PatrolEngine:
                 "unavailable_materials。"
             ),
         }
+
+    def _homework_question_details(self, task: HomeworkTask) -> list[Question]:
+        """Full question details for one homework, API-only (no page open).
+
+        ``inspect_homework`` opens the answer page to read the real button
+        state, which the two-phase finish phase does not need — it only needs to
+        know which questions are blank and which the caller's answers target.
+        Reading the details through the REST layer alone saves one full page
+        load per homework in the finish phase.
+        """
+        return [
+            self.client.question_detail(q.question_id)
+            for q in self.client.list_questions(task.homework_id)
+        ]
 
     def inspect_homework(self, task_id: str, course_id: str) -> dict:
         task = self.resolve_task(task_id, course_id)
@@ -816,12 +866,16 @@ class PatrolEngine:
     def capture_question_image(self, task_id: str, course_id: str, *,
                                order: int = 0, question_id: str = "",
                                output_path: str = "",
-                               full_page: bool = False) -> dict:
+                               full_page: bool = False,
+                               occurrence: int = 0) -> dict:
         """Screenshot one question (figure questions included).
 
         Read-only against the platform: it opens the answer page, navigates to
         the question by stem and saves a PNG of that question's block. Nothing
         is filled or submitted.
+
+        ``occurrence`` selects the n-th exact duplicate when several questions
+        share the same stem (mirrors ``fill_question``); 0 is the first copy.
         """
         task = self.resolve_task(task_id, course_id)
         metas = self.client.list_questions(task.homework_id)
@@ -843,7 +897,7 @@ class PatrolEngine:
         page = self.operator.open_homework(task)
         path = self.operator.capture_question(
             page, detail, len(metas), output_path=output_path,
-            full_page=full_page)
+            full_page=full_page, occurrence=occurrence)
         return {
             "task_id": task.task_id,
             "course_id": course_id,
@@ -1173,16 +1227,20 @@ class PatrolEngine:
     # ------------------------------------------------------------------ #
     # two-phase: finish every outstanding homework, then review once
     # ------------------------------------------------------------------ #
-    def _collect_outstanding(self) -> list[tuple[Course, HomeworkTask]]:
+    def _collect_outstanding(self, courses: list | None = None) -> list[tuple[Course, HomeworkTask]]:
         """All not-submitted, non-expired homeworks across active courses.
 
         Course-major and deterministic: a course's tasks are sorted by due date
         + title (same key as ``patrol``), so the finish phase walks them in the
         same stable order the user sees in the report. Expired tasks are left
         out: they cannot be submitted and only slow the finish phase down.
+
+        ``courses`` may be passed in from ``finish_then_review`` so both phases
+        share one account-course read; when omitted, the course list is read
+        here (as before).
         """
         out: list[tuple[Course, HomeworkTask]] = []
-        for course in self._iter_courses():
+        for course in courses if courses is not None else self._iter_courses():
             tasks = sorted(
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
@@ -1220,14 +1278,24 @@ class PatrolEngine:
         finish_log: list[dict] = []
         takeover: list[dict] = []
 
+        # The active course list is read once and shared by both phases. It is
+        # the same deterministic, course-major feed ``patrol`` walks; phase 2
+        # re-lists each course's *homeworks* (the fill may have submitted some
+        # of them, so their state must be re-read) but not the whole account
+        # feed.
+        courses = self._iter_courses()
+
         # ---- Phase 1: finish every outstanding homework -------------------- #
-        for course, task in self._collect_outstanding():
+        for course, task in self._collect_outstanding(courses=courses):
             task_answers = supplied.get(task.task_id, {})
             try:
-                # Inspect first so the caller (and this method's own log) sees
-                # the full question set; the same questions drive the audit in
-                # phase 2, so this read is not wasted.
-                inspect = self.inspect_homework(task.task_id, course.id)
+                # API-only read (no page open): the finish phase only needs to
+                # know which questions are blank and which the caller's answers
+                # target. ``inspect_homework`` opens the answer page for the
+                # real button state, which is only meaningful once the fill has
+                # happened — opening it here would be a wasted full page load
+                # (answer_homework and the phase-2 audit open it anyway).
+                questions = self._homework_question_details(task)
             except AuthExpiredError:
                 raise
             except Exception as exc:  # keep the finish phase going
@@ -1238,12 +1306,9 @@ class PatrolEngine:
                     "deadline": utils.deadline_label(task.end_ms),
                 })
                 continue
-            questions = inspect.get("brief", {}).get("questions", [])
-            subjective = [q for q in questions
-                          if q.get("type") in ("简答题", "编程题", "附件题", "未知题型")]
-            objective_blank = [q for q in questions
-                               if q.get("type") in ("单选题", "多选题", "判断题", "填空题")
-                               and not q.get("answered")]
+            subjective = [q for q in questions if not q.auto_answerable]
+            objective_questions = [q for q in questions if q.auto_answerable]
+            objective_blank = [q for q in objective_questions if not q.answered]
             if subjective:
                 takeover.append({
                     "course": course.name, "title": task.name,
@@ -1251,35 +1316,53 @@ class PatrolEngine:
                     "detail": f"含 {len(subjective)} 道主观/编程/附件题，需本人完成",
                     "deadline": utils.deadline_label(task.end_ms),
                 })
-            if not objective_blank:
-                # Nothing objective left to fill here. A homework with only
-                # subjective/programming/attachment items belongs to the human
-                # (already listed under takeover); a homework whose objective
-                # items are all answered needs no answer call at all. Neither
-                # case should reach answer_homework, whose submit gate would
-                # refuse it anyway and whose page open would be wasted time.
-                note = ("无客观题待答（已全部作答，或仅含主观/编程/附件题需本人完成）"
-                        if subjective else
-                        "无客观题待答（可能已全部作答或为材料题）")
+            if not objective_questions:
+                # No objective items at all: nothing this tool may fill. A
+                # material-only homework and a homework of purely subjective
+                # items both belong to the human; neither should reach
+                # answer_homework (its page open would be wasted).
+                note = ("无客观题（仅含主观/编程/附件题，需本人完成）"
+                        if subjective else "无客观题（纯材料/附件作业）")
                 finish_log.append({
                     "course_id": course.id, "course_name": course.name,
                     "task_id": task.task_id, "name": task.name,
                     "answered": 0, "submitted": False, "note": note,
                 })
                 continue
-            if not task_answers:
+            # The caller's answers may target *already-answered* questions: a
+            # partial multi-select that needs AB, a half-filled blank. Those are
+            # real gaps this flow exists to close, and answer_homework handles
+            # them (diff and refill). Filtering them out here would silently
+            # drop the caller's correction.
+            objective_qids = {q.question_id for q in objective_questions}
+            objective_orders = {str(q.order) for q in objective_questions}
+            supplied_for_objective = bool(task_answers) and any(
+                str(k) in objective_qids or str(k) in objective_orders
+                for k in task_answers)
+            if not objective_blank and not supplied_for_objective:
+                # Nothing to fill and no correction to apply: skip without
+                # opening the page.
+                note = ("无客观题待答（已全部作答）"
+                        + ("；含主观/编程/附件题需本人完成" if subjective else ""))
+                finish_log.append({
+                    "course_id": course.id, "course_name": course.name,
+                    "task_id": task.task_id, "name": task.name,
+                    "answered": 0, "submitted": False, "note": note,
+                })
+                continue
+            if not supplied_for_objective:
                 # Blank objective questions exist but the caller gave no answers
                 # for this task. Calling answer_homework now would re-open the
                 # page and re-fetch every question detail only to skip each one
                 # for "缺少模型答案" — a full page load and N API round-trips
-                # with zero effect. Report what is needed from the inspect data
-                # we already have and leave the homework untouched; the caller
+                # with zero effect. Report what is needed from the data we
+                # already have and leave the homework untouched; the caller
                 # supplies answers and re-runs, or finishes it by hand.
                 needs = [
-                    {"question_id": q.get("question_id"),
-                     "order": q.get("order"),
-                     "type": q.get("type"),
-                     "figure": bool(q.get("images"))}
+                    {"question_id": q.question_id,
+                     "order": q.order,
+                     "type": q.type.label,
+                     "figure": bool(q.images)}
                     for q in objective_blank
                 ]
                 finish_log.append({
@@ -1355,7 +1438,7 @@ class PatrolEngine:
         # ---- Phase 2: review the whole account once ----------------------- #
         review: list[dict] = []
         incomplete_count = 0
-        for course in self._iter_courses():
+        for course in courses:
             tasks = sorted(
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
@@ -1378,9 +1461,12 @@ class PatrolEngine:
                 screenshot_path = ""
                 if is_incomplete and screenshot:
                     try:
-                        shot = self.capture_question_image(
-                            task.task_id, course.id, full_page=True)
-                        screenshot_path = shot.get("path", "")
+                        # Full answer-page shot, not a single question capture:
+                        # the reviewer needs to see every unfilled box at once.
+                        # ``capture_question_image`` cannot do that (it navigates
+                        # to one question by stem and requires an order).
+                        shot = self.operator.capture_answer_page(task)
+                        screenshot_path = str(shot)
                     except AuthExpiredError:
                         raise
                     except Exception:  # screenshot is best-effort
@@ -1426,10 +1512,15 @@ class PatrolEngine:
                     })
 
         # Persist a compact Markdown review so the user has a file to open.
-        snapshot = report_mod.PatrolReport(generated_at_ms=utils.now_ms())
-        markdown = report_mod.render_markdown(
-            snapshot, warning_hours=self.config.deadline_warning_hours)
-        report_path = report_mod.persist(markdown, self.config)
+        # It is built from the real finish / review / takeover data — an empty
+        # PatrolReport would render an empty table — and written under its own
+        # ``review_…`` name so a patrol report in the same minute is not
+        # overwritten.
+        markdown = report_mod.render_finish_review_markdown(
+            generated_at_ms=utils.now_ms(),
+            finish=finish_log, review=review, takeover=takeover,
+        )
+        report_path = report_mod.persist_review(markdown, self.config)
         return {
             "phase": "finish_then_review",
             "summary": {

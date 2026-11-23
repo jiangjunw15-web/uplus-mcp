@@ -220,9 +220,9 @@ class _FakeOperator:
         return object()
 
     def capture_question(self, page, question, total, output_path="",
-                         full_page=False):
+                         full_page=False, occurrence=0):
         self.calls.append((question.question_id, question.order, total,
-                           output_path, full_page))
+                           output_path, full_page, occurrence))
         return self.path
 
 
@@ -245,7 +245,7 @@ def test_engine_capture_uses_the_order_to_pick_the_question(tmp_path):
     assert result["order"] == 5
     assert result["images"] == ["/stem.png"]
     assert Path(result["path"]).is_file()
-    assert op.calls == [("q5", 5, 3, "", False)]
+    assert op.calls == [("q5", 5, 3, "", False, 0)]
 
 
 def test_engine_capture_passes_full_page_through(tmp_path):

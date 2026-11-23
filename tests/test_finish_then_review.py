@@ -10,11 +10,12 @@ never answered in phase 1, and the review verdict reflects the post-fill state.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import Mock
 
 from uplus_mcp.config import Config
 from uplus_mcp.engine import PatrolEngine
-from uplus_mcp.models import Course, HomeworkTask
+from uplus_mcp.models import Course, HomeworkTask, Question
 
 
 def _task(task_id: str, name: str, end_ms, submit_task=None,
@@ -30,15 +31,31 @@ def _task(task_id: str, name: str, end_ms, submit_task=None,
 
 
 def _question(qid: str, order: int, *, qtype: str = "单选题",
-              answered: bool = False) -> dict:
-    """A bare question dict shaped like ``solver.build_answer_brief`` output."""
+              answered: bool = False) -> Question:
+    """A Question object as the REST layer would build it.
+
+    The finish phase reads question details through ``_homework_question_details``
+    (API only), which returns ``Question`` instances, not the dict-shaped brief
+    entries ``inspect_homework`` produced.
+    """
+    return Question(
+        question_id=qid, order=order, type=question_type_by_label(qtype),
+        stem=f"第{order}题", answered=answered,
+    )
+
+
+def question_type_by_label(label: str):
+    from uplus_mcp.models import QuestionType
     return {
-        "question_id": qid,
-        "order": order,
-        "type": qtype,
-        "stem": f"第{order}题",
-        "answered": answered,
-    }
+        "单选题": QuestionType.SINGLE,
+        "多选题": QuestionType.MULTIPLE,
+        "判断题": QuestionType.JUDGE,
+        "填空题": QuestionType.FILL_BLANK,
+        "简答题": QuestionType.SHORT_ANSWER,
+        "编程题": QuestionType.PROGRAM,
+        "附件题": QuestionType.ATTACHMENT,
+        "未知题型": QuestionType.UNKNOWN,
+    }[label]
 
 
 def _finish_engine(tmp_path, *, tasks=None, audit_complete=True,
@@ -69,12 +86,10 @@ def _finish_engine(tmp_path, *, tasks=None, audit_complete=True,
 
     engine = PatrolEngine(cfg, Mock(), client, operator)
 
-    # inspect_homework drives the brief; audit_homework drives phase 2.
-    def fake_inspect(task_id, course_id):
-        return {
-            "course_id": course_id, "task_id": task_id,
-            "brief": {"questions": [_question("q1", 1)]},
-        }
+    # _homework_question_details drives the question list; audit_homework
+    # drives phase 2.
+    engine._homework_question_details = Mock(
+        return_value=[_question("q1", 1)])
 
     def fake_audit(task_id, course_id, refresh_page_state=True):
         return {
@@ -85,10 +100,9 @@ def _finish_engine(tmp_path, *, tasks=None, audit_complete=True,
                       "partial": [], "wrong": [], "unjudged": []},
         }
 
-    engine.inspect_homework = Mock(side_effect=fake_inspect)
     engine.audit_homework = Mock(side_effect=fake_audit)
-    engine.capture_question_image = Mock(
-        return_value={"path": "reports/shot.png"})
+    # The full answer-page shot lives on the operator now (capture_answer_page).
+    operator.capture_answer_page.return_value = Path("reports/shot.png")
     return engine, client, operator
 
 
@@ -137,13 +151,16 @@ def test_screenshot_captures_incomplete_homework_pages(tmp_path):
     """``screenshot=True`` captures the answer page of each still-incomplete
     homework so the model can see the unfilled boxes."""
     tasks = [_task("t1", "作业一", 4102444800000)]
-    engine, _, _ = _finish_engine(
+    engine, _, operator = _finish_engine(
         tmp_path, tasks=tasks, audit_complete=False)
 
     result = engine.finish_then_review(screenshot=True)
 
-    assert result["review"][0]["screenshot"] == "reports/shot.png"
-    engine.capture_question_image.assert_called_once()
+    # The path may use either separator; compare via Path.
+    assert Path(result["review"][0]["screenshot"]) == Path("reports/shot.png")
+    # The whole answer page is captured (capture_answer_page), not a single
+    # question — that is what lets the reviewer see every unfilled box at once.
+    operator.capture_answer_page.assert_called_once()
 
 
 def test_subjective_questions_go_to_takeover_not_answered(tmp_path):
@@ -165,12 +182,10 @@ def test_subjective_questions_go_to_takeover_not_answered(tmp_path):
         "errors": [], "note": "",
     }
     engine = PatrolEngine(cfg, Mock(), client, operator)
-    engine.inspect_homework = Mock(return_value={
-        "brief": {"questions": [
-            _question("q1", 1, qtype="编程题"),
-            _question("q2", 2, qtype="简答题"),
-        ]},
-    })
+    engine._homework_question_details = Mock(return_value=[
+        _question("q1", 1, qtype="编程题"),
+        _question("q2", 2, qtype="简答题"),
+    ])
     engine.audit_homework = Mock(return_value={
         "status": "not_submitted", "status_label": "未提交",
         "deadline": "", "withdrawable": False,
@@ -233,3 +248,68 @@ def test_missing_answers_skip_page_open_and_report_needs(tmp_path):
     # caller can answer them and re-run without a second inspection.
     finish_takeover = [t for t in result["takeover"] if t.get("phase") == "finish"]
     assert any("needs_answers" in t for t in finish_takeover)
+
+
+def test_correction_answers_for_answered_questions_are_not_dropped(tmp_path):
+    """A caller answer that targets an *already-answered* objective question
+    (e.g. a partial multi-select that needs AB) must reach answer_homework,
+    which diffs and refills it — the finish phase must not filter it out."""
+    course = Course(id="c1", name="课程一")
+    cfg = Config(report_dir=str(tmp_path), courses=[course])
+    client = Mock()
+    client.list_my_courses.return_value = [course]
+    client.list_homeworks.return_value = [_task("t1", "作业一", 4102444800000)]
+    client.list_questions.return_value = []
+    operator = Mock()
+    operator.open_homework.return_value = Mock()
+    operator.read_page_state.return_value = (None, None)
+    operator.read_experiments.return_value = []
+    operator.answer_homework.return_value = {
+        "answered": 1, "objective_total": 1, "objective_answered": 1,
+        "submitted": True, "skipped": 0, "skipped_questions": [],
+        "errors": [], "note": "已提交",
+    }
+    engine = PatrolEngine(cfg, Mock(), client, operator)
+    # The objective question is already answered on the platform (partial
+    # multi-select), but the caller supplies a correction "AB".
+    engine._homework_question_details = Mock(
+        return_value=[_question("q1", 1, answered=True)])
+    engine.audit_homework = Mock(return_value={
+        "status": "submitted_pending", "status_label": "待批改",
+        "deadline": "", "withdrawable": False,
+        "audit": {"complete": True, "missing": [], "partial": [],
+                  "wrong": [], "unjudged": []},
+    })
+    engine.capture_question_image = Mock(return_value={"path": ""})
+
+    result = engine.finish_then_review({"t1": {"q1": "AB"}})
+
+    # The correction reached the answer operator instead of being dropped.
+    operator.answer_homework.assert_called_once()
+    args, kwargs = operator.answer_homework.call_args
+    assert args[1] == {"q1": "AB"}
+    assert result["summary"]["finish_attempted"] == 1
+    # With no correction supplied the same homework would skip without opening.
+    operator.answer_homework.reset_mock()
+    engine.finish_then_review({})
+    operator.answer_homework.assert_not_called()
+
+
+def test_review_report_file_carries_real_data(tmp_path):
+    """The persisted report is built from the review rows, not an empty
+    PatrolReport, and uses the review_… name so it cannot overwrite a patrol
+    report written in the same minute."""
+    tasks = [_task("t1", "作业一", 4102444800000)]
+    engine, _, _ = _finish_engine(
+        tmp_path, tasks=tasks, audit_complete=False)
+
+    result = engine.finish_then_review()
+
+    path = Path(result["report_path"])
+    assert path.name.startswith("review_")
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    # The real review data made it into the file (not an empty report).
+    assert "作业一" in text
+    assert "阶段二 · 统一复核" in text
+    assert "完整" in text

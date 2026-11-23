@@ -421,6 +421,12 @@ def _prune_empty_sections(doc) -> list[str]:
     "实验实现" followed by nothing — the reader sees an unfinished section and
     the layout check has nothing to judge. Removing the empty heading (and its
     blank paragraphs) keeps the document honest.
+
+    A heading is *not* empty when it carries its body inline on the same line
+    (``实验目的：掌握进程同步的基本方法``). ``fill_template`` treats that
+    inline text as filled (it never overwrites a heading that already has
+    content), so pruning it here would delete real content the template author
+    shipped with the heading.
     """
     paragraphs = list(doc.paragraphs)
     pruned: list[str] = []
@@ -429,7 +435,11 @@ def _prune_empty_sections(doc) -> list[str]:
         style_name = paragraph.style.name if paragraph.style else ""
         if not style_name.startswith("Heading"):
             continue
-        if not canonical_section(paragraph.text or ""):
+        canonical = canonical_section(paragraph.text or "")
+        if not canonical:
+            continue
+        # Inline body on the heading line itself counts as filled content.
+        if _inline_after_heading(paragraph.text or "", canonical):
             continue
         body: list[str] = []
         blanks: list = []

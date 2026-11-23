@@ -24,15 +24,27 @@
   - 返回 `summary`、逐份 `finish` 日志、逐份 `review` 行（含 `complete` 标志）、按 `phase`（finish/review）分类的 `takeover` 与 `report_path`。
   - **提交闸门没有放松**：`submit=True` 只在客观题全部答出且无写入错误时提交；主观 / 编程 / 附件题依旧交回本人。
   - **没有答案就不开页**：某份作业的客观题还没答案时，阶段一把待答题号写进 `finish[].needs_answers` 与 `takeover` 就跳过，不再打开作答页、不再逐题抓取题目详情（否则只会让每道题都以「缺少模型答案」被跳过）。
+  - **已答题的修正答案不再被丢弃**：调用方对「平台已标记作答」的客观题给出的答案（如多选漏选补 AB）也会进入作答阶段，由 `answer_homework` 按差异重填——此前这类作业被当成「无客观题待答」直接跳过。
+  - **阶段一只读 API 不开页**：判断「哪些题还没答 / 调用方答了哪些题」改用纯接口读取，不再先打开一次作答页。
+  - **复核报告有真实内容**：`report_path` 指向 `reports/review_YYYYmmdd_HHMMSS.md`，由真实 finish / review / takeover 数据渲染，不再是空快照；文件名带秒级时间戳，不与同分钟 patrol 报告互相覆盖。
 - **检索提速（判定口径与超时预算均不变）**：
   - **同页复用**（`browser.open`）：先比较目标 URL 与当前页（只忽略 `#hash`，协议/主机/路径/查询逐项严格相等），已是这一页就跳过 `goto`。一轮巡检里同一份作业的作答页会被打开 2–3 次（读状态/填写/复核），每次都是整页加载；现在一份作业只付一次。不同作业、不同课程照旧整页加载。
+  - **翻页不再空等 networkidle**（`browser.open`）：`goto(domcontentloaded)` 后原先最多等 8 秒 `networkidle`（统计/长轮询课程包永远静不下来）；改为最多 2 秒的短 settling，就绪判定交给各调用方自己的等待。
   - **提交/撤回确认轮询**（`operator._probe_submit_button`）：用一次小型 DOM 查询读「提交作业 / 撤回作业」按钮标签，替代每轮 `inner_text("body")` 整页序列化；探测不确定（`None`）时仍旧回退到完整读取，判定完全一致。
   - **作答页状态等待**（`operator._await_page_state`）：从「等 networkidle（最多 4 秒）+ 300 ms×10 轮询」改为「等 domcontentloaded + 150 ms×20 轮询，按钮出现即返回」，不再空等永远静不下来的 networkidle。
   - **令牌探测只做一次**（`browser.api_get`）：原先每次调用都探一次 `localStorage`，而 fetch 脚本本身每次都读令牌、401 也有恢复分支；改为会话级只探一次，离开平台域名后重新武装。
+  - **课程名解析缓存**（`engine.course_name`）：live 模式下原来每次调用都走整份课程 feed；改为每课程一次缓存。
+  - **两阶段共享课程列表**（`engine`）：阶段一、阶段二共用一次账号课程读取，阶段二仍逐份重读作业。
   - **实验列表二次轮询**（`operator.read_experiments`）：仅当首读为空或存在标题为空的卡片（尚未画完）时才二次读取，首读完整时每门课省 0.8 秒。
   - **实验标签页重复等待**（`experiment.py`）：删掉调用方在「实验手册」后 `sleep(1.0)`、「实验附件」后 `sleep(0.8)` 的重复等待（`_click_tab` 内部已等待内容加载），每个实验详情少约 1.8 秒。
-- **缺陷修复**：「实验提交物 / 实验手册 / 实验附件」标签页读取失败不再被静默吞掉，原因记入 `ExperimentDetail.tab_errors`（已脱敏），并经 `uplus_read_experiment_detail` 与 `uplus_download_experiment_materials` 的 `tab_errors` 返回——此前 `manual_links` 为空时无法区分「页面没有手册」和「手册没读到」。
-- **测试**：新增 7 个两阶段用例、8 个同页复用/令牌探测用例、5 个按钮探测用例、2 个实验标签页用例；全量 435 项测试通过，原有测试零回归。
+  - **模板不再二次爬资料树**（`engine` + `experiment`）：`download_experiment_materials` 已 walk 并下载全部匹配资料，模板挑选改为复用已下载的 entries（`find_report_template(walk_materials=False)`），不再二次 walk + 二次下载。
+- **缺陷修复**：
+  - 「实验提交物 / 实验手册 / 实验附件」标签页读取失败不再被静默吞掉，原因记入 `ExperimentDetail.tab_errors`（已脱敏），并经 `uplus_read_experiment_detail` 与 `uplus_download_experiment_materials` 的 `tab_errors` 返回——此前 `manual_links` 为空时无法区分「页面没有手册」和「手册没读到」。
+  - **docx 同行正文不再被剪**（`report_generator._prune_empty_sections`）：判定「空节」时先看标题行内联正文（`实验目的：掌握…`），不再把模板自带内容当空节删掉。
+  - **多选回读中途变 None 不再当成功**（`operator`）：点选后回读若中途 DOM 脱离，先按目标重读一次再定论，仍无法确认则报「未能全部选中」。
+  - **登录失败回显不再抛错**（`browser._body_hint`）：`inner_text("body")` 在跳转中途可能抛异常，改为安全降级为空字符串。
+  - **重复题干截图可选择第 N 份**（`operator.capture_question` / `engine.capture_question_image`）：新增可选 `occurrence`（默认 0），列表页同文重复题可截取指定那一份。
+- **测试**：新增 8 个两阶段用例、9 个同页复用/令牌探测用例、5 个按钮探测用例、3 个实验标签页/模板用例、2 个登录回显用例等；全量 443 项测试通过，原有测试零回归。
 
 ## 0.8.11 版本更新（跨源凭据隔离 + 路由参数/命令行注入防护 + 深度脱敏）
 

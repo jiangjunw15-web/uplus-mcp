@@ -455,3 +455,97 @@ def persist(markdown: str, config: Config) -> Path:
     path = folder / f"patrol_{stamp}.md"
     path.write_text(markdown, encoding="utf-8")
     return path
+
+
+def persist_review(markdown: str, config: Config) -> Path:
+    """Persist a two-phase-flow review under its own name.
+
+    The patrol report is keyed to the minute (``patrol_YYYYmmdd_HHMM.md``), so a
+    ``finish_then_review`` run in the same minute would overwrite a patrol report
+    written earlier. Review reports get their own prefix (``review_…``), so the
+    two flows never clobber each other.
+    """
+    folder = config.report_folder
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now(tz=utils.CN_TZ).strftime("%Y%m%d_%H%M%S")
+    path = folder / f"review_{stamp}.md"
+    path.write_text(markdown, encoding="utf-8")
+    return path
+
+
+def render_finish_review_markdown(*, generated_at_ms: int, finish: list[dict],
+                                  review: list[dict], takeover: list[dict]) -> str:
+    """Markdown for the two-phase flow: what phase 1 finished, what phase 2
+    found, and what still needs the human.
+
+    Unlike ``render_markdown`` (the patrol report), this carries the per-question
+    review rows that ``finish_then_review`` produces, so the written file and the
+    returned JSON tell the same story.
+    """
+    now = generated_at_ms
+    ts = datetime.datetime.fromtimestamp(now / 1000, tz=utils.CN_TZ).strftime("%Y-%m-%d %H:%M")
+    lines: list[str] = []
+    lines.append(f"# U+ 两阶段作业复核报告（{ts}）")
+    lines.append("")
+
+    lines.append("## 阶段一 · 作业完成情况")
+    lines.append("")
+    if not finish:
+        lines.append("（没有需要完成的未提交作业）")
+    else:
+        lines.append("| 课程 | 作业 | 已答 | 客观题 | 提交 | 说明 |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for f in finish:
+            done = f"{f.get('answered', 0)}"
+            total = f.get("objective_total")
+            total = "-" if total in (None, "") else str(total)
+            submitted = "已提交" if f.get("submitted") else "未提交"
+            note = (f.get("note") or "").strip().replace("\n", " ")
+            lines.append(
+                f"| {f.get('course_name', '')} | {f.get('name', '')} | {done} | "
+                f"{total} | {submitted} | {note[:80]} |"
+            )
+    lines.append("")
+
+    lines.append("## 阶段二 · 统一复核")
+    lines.append("")
+    if not review:
+        lines.append("（本次没有读到任何作业）")
+    else:
+        lines.append("| 课程 | 作业 | 状态 | 完整 | 漏答 | 多选漏选 | 截图 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for r in review:
+            missing = "、".join(str(m.get("order")) for m in r.get("missing", [])[:12])
+            partial = "、".join(
+                f"{p.get('order')}" + (f"（缺{p.get('missing_letters')}）" if p.get("missing_letters") else "")
+                for p in r.get("partial", [])[:12]
+            )
+            if len(r.get("missing", [])) > 12:
+                missing += "…"
+            if len(r.get("partial", [])) > 12:
+                partial += "…"
+            shot = "有" if r.get("screenshot") else "-"
+            lines.append(
+                f"| {r.get('course_name', '')} | {r.get('name', '')} | "
+                f"{r.get('status_label', '')} | "
+                f"{'否' if r.get('complete') is False else '是'} | "
+                f"{missing or '-'} | {partial or '-'} | {shot} |"
+            )
+    lines.append("")
+
+    if takeover:
+        lines.append("## 需要人工接管")
+        lines.append("")
+        for item in takeover:
+            phase = ("阶段一" if item.get("phase") == "finish" else "阶段二")
+            lines.append(f"- **[{phase}] {item.get('course')} / {item.get('title')}**：{item.get('detail')}")
+            if item.get("deadline"):
+                lines.append(f"  - 截止：{item['deadline']}")
+        lines.append("")
+
+    lines.append(
+        "> 阶段一完成未提交作业的作答；阶段二在全部作答之后统一复核。"
+        "complete=false 的作业仍需处理：可先看截图确认空位，再走 "
+        "uplus_repair_homework 撤回补齐重新提交；主观/编程/附件题由本人完成。"
+    )
+    return "\n".join(lines)

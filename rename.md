@@ -34,19 +34,29 @@
 | 变化 | 具体内容 | AI 该怎么用 |
 | --- | --- | --- |
 | **新增 `uplus_finish_then_review`** | 阶段一（finish）按固定巡检顺序逐份完成**未提交且未截止**的作业；阶段二（review）在最后一份作业都尝试过之后，才回头逐份读真实页面状态并跑与 `uplus_patrol` 相同的完整性核查 | 「先把作业都做完，再看还有没有没写完的作业」就用它；见「第 6.5 步」 |
-| **先做后查的顺序** | 阶段一答案以 `{task_id: {question_id: answer}}` 传入（题目来自 `uplus_inspect_homework`）；已出分 / 已提交 / 已截止的作业不碰；主观 / 编程 / 附件题不代答，进 `takeover` | 对 finish 日志里 `skipped_questions` 的客观题补答案后重跑；主观题交用户本人 |
-| **进入页面后截屏审查** | `screenshot=True` 时，阶段二对每份复核仍不完整的作业截取作答页整页截图，路径随 `review[].screenshot` 返回 | 复核仍有未完成项时，先看截图确认还有哪些空没填，再决定补答或走 `uplus_repair_homework` |
+| **先做后查的顺序** | 阶段一答案以 `{task_id: {question_id: answer}}` 传入；已出分 / 已提交 / 已截止的作业不碰；主观 / 编程 / 附件题不代答，进 `takeover` | 对 finish 日志里 `skipped_questions` 的客观题补答案后重跑；主观题交用户本人 |
+| **已答题的修正答案不丢弃** | 调用方对「平台已标记作答」的客观题给出的答案（如多选漏选补 AB）也会进入作答阶段，由 `answer_homework` 差异重填 | 多选漏选 / 半填空补全时直接带答案重跑，不要手工撤卷 |
+| **阶段一只读 API 不开页** | 判断「哪些题还没答 / 调用方答了哪些题」改用纯接口读取，不再先打开一次作答页 | 无需操作；finish 阶段每份作业只开一次页（填写） |
+| **进入页面后截屏审查** | `screenshot=True` 时，阶段二对每份复核仍不完整的作业截取**作答页整页**截图（新增 `operator.capture_answer_page`），路径随 `review[].screenshot` 返回 | 复核仍有未完成项时，先看截图确认还有哪些空没填，再决定补答或走 `uplus_repair_homework` |
+| **复核报告有真实内容** | `report_path` 指向 `reports/review_YYYYmmdd_HHMMSS.md`，由真实 finish / review / takeover 数据渲染，不再是空快照；文件名带秒级时间戳 | 报告路径可直接打开看复核明细；不会覆盖同分钟的 patrol 报告 |
 | **失败不中断** | 阶段一某一份作业作答失败不会中断其余作业；失败记入 `takeover`（`phase="finish"`）与 `finish` 日志，阶段二失败同理记入 `phase="review"` | 照常看 `takeover`，按 `phase` 区分是哪一段出的问题 |
-| **没有答案就不开页** | 阶段一若某份作业的客观题还没答案，直接依据已读到的审题包把待答题号写进 `finish[].needs_answers` 与 `takeover`，**不再打开作答页、不再逐题抓取题目详情** | 先看 `needs_answers` 里的题号，答好后再带答案重跑；不要反复空跑 |
+| **没有答案就不开页** | 阶段一若某份作业的客观题还没答案，直接依据已读到的题目详情把待答题号写进 `finish[].needs_answers` 与 `takeover`，**不再打开作答页、不再逐题抓取题目详情** | 先看 `needs_answers` 里的题号，答好后再带答案重跑；不要反复空跑 |
 | **提交闸门没有放松** | `submit=True` 只在客观题全部答出且无写入错误时提交；主观 / 编程 / 附件题依旧交回本人 | 与既有 `uplus_answer_homework` 同一套闸门，不得擅自 `force_submit` |
 | **同页复用**（`browser.open`） | 目标 URL 与当前页相同（只忽略 `#hash`，协议/主机/路径/查询严格相等）时跳过 `goto` 直接返回；不同作业/不同课程照旧整页加载 | 无需操作；同一份作业的作答页不再被重复整页加载 |
+| **翻页不再空等 networkidle**（`browser.open`） | `goto(domcontentloaded)` 后原先最多等 8 秒 `networkidle`；改为最多 2 秒短 settling，就绪判定交给各调用方自己的等待 | 无需操作；首次打开每一页也省下最多 6 秒 |
 | **提交/撤回轮询提速**（`operator._probe_submit_button`） | 用一次小型 DOM 查询读「提交作业 / 撤回作业」按钮标签，替代每轮 `inner_text("body")` 整页序列化；探测不确定（`None`）时仍旧回退到完整读取，判定完全一致 | 无需操作 |
 | **作答页等待提速** | `operator._await_page_state` 从「等 networkidle（最多 4 秒）+ 300 ms×10 轮询」改为「等 domcontentloaded + 150 ms×20 轮询，按钮出现即返回」；每次开作业页都走这条热路径，整轮巡检等待明显下降；判定口径与超时预算不变 | 无需操作；作答仍照旧 |
 | **令牌探测只做一次**（`browser.api_get`） | 原先每次调用都探一次 `localStorage` 令牌，而 fetch 脚本本身每次都读令牌、401 也有恢复分支；改为会话级只探一次，离开平台域名后重新武装 | 无需操作；30 道题少 30 次接口往返 |
+| **课程名解析缓存**（`engine.course_name`） | live 模式下原来每次调用都走整份课程 feed；改为每课程一次缓存；两阶段流程的两阶段也共用一次账号课程读取 | 无需操作；live 模式少拉整份课程 feed |
 | **实验读取去重等待** | `read_experiments` 仅当首读为空或存在标题为空的卡片时才二次读取；`experiment.py` 删掉调用方在「实验手册」后 `sleep(1.0)`、「实验附件」后 `sleep(0.8)` 的重复等待（`_click_tab` 内部已等待内容加载） | 无需操作；每门课省约 0.8 秒，每个实验详情省约 1.8 秒 |
+| **模板不再二次爬资料树** | `download_experiment_materials` 已 walk 并下载全部匹配资料，模板挑选改为复用已下载的 entries（`find_report_template(walk_materials=False)`） | 无需操作；少一次整棵资料树爬取 + 一次模板重复下载 |
 | **实验标签页失败不再静默** | 「实验提交物 / 实验手册 / 实验附件」任一标签页读取失败时，原因记入 `ExperimentDetail.tab_errors`（已脱敏），并经 `uplus_read_experiment_detail` / `uplus_download_experiment_materials` 的 `tab_errors` 字段返回 | 返回 `tab_errors` 非空时，用 `browse_*` 工具自己看那一页，别把「没读到」当成「没有」 |
+| **docx 同行正文不再被剪** | `report_generator._prune_empty_sections` 判定「空节」时先看标题行内联正文（`实验目的：掌握…`），不再把模板自带内容当空节删掉 | 无需操作；生成的实验报告 .docx 不会丢标题自带正文 |
+| **多选回读变 None 不再当成功** | 多选题点选后回读若中途 DOM 脱离（`None`），先按目标重读一次再定论，仍无法确认则报「未能全部选中」 | 无需操作；不会再静默把未完成的选择当成成功 |
+| **登录失败回显不再抛错** | `browser._body_hint` 对 `inner_text("body")` 在跳转中途抛异常的情况安全降级为空字符串 | 无需操作 |
+| **重复题干截图可选第 N 份** | `operator.capture_question` / `engine.capture_question_image` 新增可选 `occurrence`（默认 0） | 列表页出现同文重复题时，可传 `occurrence` 截取指定那一份 |
 
-**测试**：新增 6 个两阶段用例（`tests/test_finish_then_review.py`）；全量测试通过，原有测试零回归。
+**测试**：新增 8 个两阶段用例、9 个同页复用/令牌探测用例、5 个按钮探测用例、3 个实验标签页/模板用例、2 个登录回显用例等；全量 443 项测试通过，原有测试零回归。
 
 ## 0.8.11 更新了什么（跨源凭据隔离 + 路由参数/命令行注入防护 + 深度脱敏）
 

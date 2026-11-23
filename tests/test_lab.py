@@ -676,6 +676,29 @@ def test_find_template_returns_none_when_no_match_anywhere(tmp_path):
     assert hit is None
 
 
+def test_find_template_walk_materials_false_stops_after_attachments_and_manual(tmp_path):
+    """``walk_materials=False`` skips the 资料 tree walk entirely: the caller
+    (download_experiment_materials) has already walked and downloaded every
+    matching 资料 file, so a second walk would re-walk the folder tree and
+    re-download the template."""
+    detail = _detail(
+        attachments=[Attachment(name="课程大纲.docx", href="http://x/outline.docx")],
+        manual_links=[Attachment(name="课程说明.docx", href="http://x/readme.docx")],
+    )
+
+    class _NoMaterialSession(_DownloadSession):
+        def open(self, path):
+            raise AssertionError("资料 walk should not run with walk_materials=False")
+
+    session = _NoMaterialSession(tmp_path)
+    op = ExperimentOperator(Config(report_dir=str(tmp_path)), session)
+    # No 资料 walk and no download happen; the method just reports no template
+    # found at the attachment/manual level.
+    hit = op.find_report_template(detail, walk_materials=False)
+    assert hit is None
+    assert session.calls == []
+
+
 def test_find_template_ranks_attachment_by_priority(tmp_path):
     detail = _detail(attachments=[
         Attachment(name="实验一 材料.zip", href="http://x/e1.zip"),
@@ -786,7 +809,7 @@ def test_download_experiment_materials_covers_all_sources(tmp_path):
         def collect_requirements(self, d):
             return ""
 
-        def find_report_template(self, d):
+        def find_report_template(self, d, walk_materials=True):
             return None
 
     class _Session:

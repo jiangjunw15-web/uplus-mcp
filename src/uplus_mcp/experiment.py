@@ -384,13 +384,20 @@ class ExperimentOperator:
         return "\n\n".join(parts).strip()
 
     def find_report_template(self, detail: ExperimentDetail,
-                             max_depth: int = 6) -> Optional[dict]:
+                             max_depth: int = 6,
+                             walk_materials: bool = True) -> Optional[dict]:
         """Locate the best report template across **all** experiment sources.
 
         Search order (first downloadable match wins): 实验附件 → 实验手册 →
         course 资料 (walked recursively into folders). Downloads the file so
         the caller can read it locally; nothing is filled, uploaded or
         submitted here.
+
+        ``walk_materials=False`` stops after the 附件 / 手册 search and returns
+        ``None`` for the 资料 step — the caller (``download_experiment_materials``)
+        has already walked and downloaded every matching 资料 file, so a second
+        walk here would re-walk the folder tree and re-download the template.
+        The caller picks the best 资料 entry from the entries it already holds.
 
         Returns ``{"name", "path", "source"}`` or ``None`` when no downloadable
         template is found. A missing template is not an error.
@@ -409,6 +416,11 @@ class ExperimentOperator:
         if hit:
             hit["source"] = "实验手册"
             return hit
+
+        if not walk_materials:
+            # The caller already walked 资料 and downloaded every match; it
+            # reuses those entries instead of walking the tree again.
+            return None
 
         from . import materials
 

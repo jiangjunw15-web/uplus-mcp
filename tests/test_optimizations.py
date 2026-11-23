@@ -300,6 +300,24 @@ def test_empty_section_heading_is_pruned(tmp_path):
     assert "实验目的" in body
 
 
+def test_inline_heading_body_is_not_pruned(tmp_path):
+    """A heading that carries its body inline on the same line (实验目的：掌握…)
+    is filled content in ``fill_template``; ``_prune_empty_sections`` must not
+    delete it just because the *next paragraph* is empty or a different heading."""
+    skeleton = tmp_path / "skeleton.docx"
+    rg.generate_report("实验三", "", "", [], [], skeleton, cover=COVER)
+    rg.fill_template(
+        skeleton, {"实验目的": "掌握进程同步的基本方法"},
+        tmp_path / "r.docx", "", "")
+    body = rg.extract_body_text(tmp_path / "r.docx")
+    # 实验目的 was filled, so its empty heading is gone — but the other
+    # headings (实验内容 / 实验要求…) have no content and should be pruned,
+    # while 实验目的 itself carries the inline body and must survive.
+    assert "掌握进程同步的基本方法" in body
+    for name in ("实验内容", "实验步骤", "实验实现", "实验结果", "实验总结", "实验要求"):
+        assert name not in body
+
+
 def test_long_body_is_split_at_sentence_boundaries():
     text = "。".join(["这是一句用来测试长段落拆分行为的描述"] * 12) + "。"
     chunks = rg._split_long_text(text, limit=180)
