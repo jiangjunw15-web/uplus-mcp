@@ -84,7 +84,7 @@ class _FlakySession:
         self.fail_times = fail_times
         self.calls = 0
 
-    def open(self, url, timeout_ms=None):
+    def open(self, url, timeout_ms=None, settle=True):
         self.calls += 1
         if self.calls <= self.fail_times:
             raise PWTimeout("Timeout 45000ms exceeded.")

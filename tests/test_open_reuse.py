@@ -135,6 +135,21 @@ def test_same_document_url_treats_blank_urls_as_different():
     assert BrowserSession._same_document_url("not a url", "https://x/") is False
 
 
+def test_open_settle_false_skips_the_bounded_settle():
+    """Callers that do their own readiness wait (the homework answer page) pass
+    settle=False, which skips the networkidle settle and the trailing sleep
+    entirely — the goto still happens for a different page."""
+    page = _Page("https://www.eduplus.net" + TASK_ROUTE)
+    session = _session(page)
+
+    session.open("/course/workAnswer/course-1/task-2/true?isPiYue=noPiYue",
+                 settle=False)
+
+    assert len(page.gotos) == 1
+    # No settle wait at all: neither networkidle nor a load-state probe.
+    assert page.load_states == []
+
+
 # --------------------------------------------------------------------------- #
 # api_get: the AccessToken probe runs once, not on every call
 # --------------------------------------------------------------------------- #

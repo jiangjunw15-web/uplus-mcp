@@ -160,7 +160,18 @@ class BrowserSession:
         # ``file://`` URL must be refused, not silently folded into base_url.
         return utils.safe_navigation_url(path, base_url=self.base_url)
 
-    def open(self, path: str, *, timeout_ms: int = 30_000) -> Page:
+    def open(self, path: str, *, timeout_ms: int = 30_000,
+             settle: bool = True) -> Page:
+        """Open ``path`` in the attached tab and return the page.
+
+        ``settle=True`` (the default) waits a bounded moment for the page to
+        quiet down before returning. ``settle=False`` skips that wait for
+        callers that immediately do their own readiness check — the homework
+        answer page, for instance, is always followed by ``read_page_state``,
+        which waits for ``domcontentloaded`` and polls for the submit button.
+        Skipping the settle there removes a redundant ~2 s per homework page
+        without changing what any caller observes.
+        """
         page = self.page
         target = self.url_for(path)
         # Re-navigating to the page the tab is already showing is the single
@@ -179,19 +190,21 @@ class BrowserSession:
             return page
         page.goto(target, wait_until="domcontentloaded",
                   timeout=timeout_ms)
-        # Best-effort settle only. ``goto(domcontentloaded)`` already returned;
-        # every workflow caller (``_await_page_state``, ``_await_experiment_cards``,
-        # the materials walk) does its own readiness wait, so waiting for a full
-        # ``networkidle`` here used to cost up to 8 s on every *distinct* page
-        # open when the course pack keeps the network busy (analytics, long-poll)
-        # and never quietens. A short bounded settle keeps a freshly-opened page
-        # from being snapshotted mid-render for the direct ``browse_open`` tool
-        # without taxing a whole patrol.
-        try:
-            page.wait_for_load_state("networkidle", timeout=2000)
-        except PWTimeout:
-            pass
-        time.sleep(0.3)
+        if settle:
+            # Best-effort settle only. ``goto(domcontentloaded)`` already
+            # returned; every workflow caller (``_await_page_state``,
+            # ``_await_experiment_cards``, the materials walk) does its own
+            # readiness wait, so waiting for a full ``networkidle`` here used to
+            # cost up to 8 s on every *distinct* page open when the course pack
+            # keeps the network busy (analytics, long-poll) and never quietens.
+            # A short bounded settle keeps a freshly-opened page from being
+            # snapshotted mid-render for the direct ``browse_open`` tool without
+            # taxing a whole patrol.
+            try:
+                page.wait_for_load_state("networkidle", timeout=2000)
+            except PWTimeout:
+                pass
+            time.sleep(0.3)
         # A navigation that lands off the platform origin leaves a tab whose
         # ``localStorage.AccessToken`` is not ours, so the next API call must
         # probe again rather than trust the cached flag.

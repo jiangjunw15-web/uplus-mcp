@@ -383,14 +383,26 @@ class HomeworkOperator:
     # ------------------------------------------------------------------ #
     # navigation
     # ------------------------------------------------------------------ #
-    def open_homework(self, task: HomeworkTask) -> Page:
+    def open_homework(self, task: HomeworkTask, *, settle: bool = False) -> Page:
+        """Open the homework's answer page.
+
+        ``settle=False`` (the default) skips the generic page settle in
+        ``BrowserSession.open``: every caller of this method either reads the
+        page state right away (which waits for ``domcontentloaded`` and polls
+        for the submit button) or drives the page itself. Callers that need the
+        page rendered before they act on it — the screenshot paths — pass
+        ``settle=True``.
+        """
         url = self.session.url_for(
             self.ANSWER_ROUTE.format(
                 course_id=utils.safe_url_segment(task.course_id, "course_id"),
                 task_id=utils.safe_url_segment(task.task_id, "task_id"),
             )
         )
-        page = self.session.open(url)
+        try:
+            page = self.session.open(url, settle=settle)
+        except TypeError:  # a session stub that takes only the URL
+            page = self.session.open(url)
         if "login" in page.url.lower():
             raise AuthExpiredError("U+ 登录态已过期，请重新登录。")
         return page
@@ -1175,7 +1187,7 @@ class HomeworkOperator:
         unfilled box at once. ``output_path`` is confined to the IO roots, like
         the question capture path.
         """
-        page = self.open_homework(task)
+        page = self.open_homework(task, settle=True)
         path = self._image_output_path(output_path, order=0)
         try:
             page.screenshot(path=str(path), full_page=True)

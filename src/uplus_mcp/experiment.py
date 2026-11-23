@@ -153,7 +153,7 @@ class ExperimentOperator:
         last: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                return self.session.open(url, timeout_ms=timeout_ms)
+                return self.session.open(url, timeout_ms=timeout_ms, settle=False)
             except TypeError:  # a session stub that takes only the URL
                 return self.session.open(url)
             except PWTimeout as exc:
