@@ -15,12 +15,22 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from .config import Config
 from . import utils
 
 FILENAME = "answer_journal.json"
+
+#: Guards the in-memory cache so a concurrent reader never sees a torn
+#: snapshot while ``record`` rewrites the file.
+_lock = threading.Lock()
+#: ``path -> (mtime_ns, size, data)``. The journal is read once per audited
+#: homework, so a patrol over N homeworks re-read and re-parsed the same file
+#: N times; the cache makes every read after the first free. The mtime and
+#: size are part of the key, so an external edit is still picked up.
+_cache: dict[str, tuple[int, int, dict]] = {}
 
 
 def journal_path(config: Config) -> Path:
@@ -29,17 +39,34 @@ def journal_path(config: Config) -> Path:
 
 def _load_all(config: Config) -> dict:
     path = journal_path(config)
+    key = str(path)
+    try:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        with _lock:
+            _cache.pop(key, None)
+        return {}
+    with _lock:
+        hit = _cache.get(key)
+        if hit is not None and (hit[0], hit[1]) == stamp:
+            return hit[2]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    with _lock:
+        _cache[key] = (stamp[0], stamp[1], data)
+    return data
+
 
 
 def record(config: Config, *, task_id: str, homework_id: str, name: str,
            answers: dict[str, str]) -> Path:
     """Persist the normalized answers of a successful submission."""
-    data = _load_all(config)
+    data = dict(_load_all(config))
     data[str(task_id)] = {
         "homework_id": str(homework_id),
         "name": name,
@@ -66,6 +93,10 @@ def record(config: Config, *, task_id: str, homework_id: str, name: str,
         except OSError:
             pass
         raise
+    # The file changed under the cache's feet: drop the entry so the next read
+    # parses the new content instead of the pre-write snapshot.
+    with _lock:
+        _cache.pop(str(path), None)
     return path
 
 

@@ -1314,6 +1314,24 @@ class HomeworkOperator:
         # the n-th occurrence selects the right container for each.
         stem_occurrence: dict[str, int] = {}
 
+        # Fetch every question detail up front, in one browser round-trip.
+        # Reading them one at a time inside the loop cost one round-trip per
+        # question, so a 30-question homework paid 30 sequential round-trips
+        # before the first answer was typed. The details are the same data in
+        # the same order — only the round-trips are batched.
+        # Look the batched read up on the *class*, not the instance: a test
+        # double (``Mock``) auto-creates any attribute asked of it, so an
+        # instance lookup would find a stub instead of the real
+        # implementation. The call itself still goes through the instance.
+        if getattr(type(self.client), "question_details", None) is None:
+            details = [
+                self.client.question_detail(q.question_id) for q in questions
+            ]
+        else:
+            details = list(
+                self.client.question_details([q.question_id for q in questions])
+            )
+
         def record_skip(detail: Question, reason: str, *,
                         blocking: bool = True,
                         subjective: bool = False) -> None:
@@ -1337,8 +1355,7 @@ class HomeworkOperator:
                 "reason": reason,
             })
 
-        for meta in questions:
-            detail = self.client.question_detail(meta.question_id)
+        for detail in details:
             occurrence = 0
             if not single_view:
                 key = text_key(detail.stem)

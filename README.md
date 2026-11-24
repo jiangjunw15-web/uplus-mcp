@@ -13,6 +13,53 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.15
+
+Fixes the "MCP is not registered, only the local CLI works" symptom, plus a
+round of speed work. **No tool signature or existing behaviour changes.**
+
+- **The root cause was the registration step, not the server.** The server
+  starts and handshakes fine over stdio (35 tools: 17 `uplus_*` + 18
+  `browse_*`). It was simply absent from every client's MCP config: Claude
+  Desktop's `claude_desktop_config.json`, Cursor's `~/.cursor/mcp.json` and
+  Claude Code's `~/.claude/settings.json` all had no `uplus` entry. The package
+  is also only installed in the project's virtualenv, so a plain
+  `python -m uplus_mcp.server` fails with `ModuleNotFoundError` — the docs'
+  `args` line only works when paired with the venv interpreter.
+- **One command now does the registration.** `scripts/register_mcp.py` writes a
+  correct `mcpServers.uplus` block into all three clients:
+
+  ```powershell
+  python scripts\register_mcp.py            # all detected clients
+  python scripts\register_mcp.py --dry-run  # show what would change
+  ```
+
+  It resolves the venv Python by absolute path (walking up to the project root,
+  so a git worktree finds the real venv), sets `cwd` and `UPLUS_CONFIG`,
+  preserves every other key in the file, refuses to overwrite a file it cannot
+  parse, and is idempotent. Restart the client afterwards. The entry was
+  verified end-to-end: the registered command handshakes and lists all 35 tools.
+- **Reading a homework's questions is now one round-trip.** Fetching the details
+  of N questions used to cost N sequential browser round-trips (30 questions =
+  30). `BrowserSession.api_get_many` issues the same requests in parallel inside
+  the page, so a 30-question homework drops from 30 round-trips to 1 (96.7%
+  fewer) — same URLs, same headers, same order, same parsed data.
+- **Batched reads keep the old error semantics.** If the batched call fails, or
+  any single response is not a plain success (401, non-JSON, HTTP ≥ 400), that
+  URL falls back to the sequential `api_get` path with its original
+  bounce-and-retry behaviour. The all-2xx path never takes the fallback.
+- **The answer journal is parsed once.** It was re-read and re-parsed for every
+  audited homework; it is now cached by `(mtime_ns, size)`, and both writes and
+  external edits invalidate it.
+- **The course feed is fetched once.** `list_my_courses()` was re-requested by
+  every course lookup; the feed is now reused within the session, while
+  `uplus_list_courses` — the tool that shows what is on the account right now —
+  still forces a fresh read.
+- **Version alignment.** `maven-package/pom.xml` was still on 0.8.13 while
+  `pyproject.toml` said 0.8.14, which would have failed the release
+  pipeline's version/tag check. Both are now **0.8.15**.
+- **Tests.** 493 pass (478 existing with no regressions + 15 new).
+
 ## What's new in 0.8.14
 
 Five issues from a full-source review of the 0.8.13 patrol output:

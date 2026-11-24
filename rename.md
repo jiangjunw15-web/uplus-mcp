@@ -272,7 +272,7 @@
 | 0 环境检查 | 确认 Python 版本、项目目录、浏览器 | 三条检查都通过 |
 | 1 安装依赖 | 创建虚拟环境并 `pip install -e .` | 无报错，`uplus-mcp` 入口可导入 |
 | 2 个人配置（可选） | 复制 `courses.example.json` 为 `courses.json` | 文件存在；留空也能用，自动拉在线课程 |
-| 3 注册 MCP 客户端 | 把 stdio 命令填进客户端配置并重启 | 客户端工具列表出现 `uplus_*` / `browse_*` |
+| 3 注册 MCP 客户端 | 跑 `python scripts\register_mcp.py` 写入客户端配置，再重启客户端 | 客户端工具列表出现 `uplus_*` / `browse_*` |
 | 4 启动浏览器会话 | 调用 `browse_launch_edge` | 返回端口号，`uplus_check_login` 可连接 |
 | 5 登录 | **按三窗口逐项问**：自己/代登录 → 登录方式 → 登录信息，再带参数调 `uplus_login` | `stage="done"` 且 `logged_in: true`，能看到工作台 |
 | 6 巡检/逐门检索 | `uplus_list_courses` → 对每门课 `uplus_scan_course`；需要全量报告时 `uplus_patrol` | 一门课的作业+实验读完再进入下一门；返回每门课的作业/实验与统计 |
@@ -372,7 +372,30 @@ python3 -m venv .venv
 
 ## 第 3 步：把插件注册进 AI 客户端（stdio 方式）
 
-### 3.1 注册内容（核心命令）
+### 3.1 首选：一条命令完成注册
+
+**「MCP 未注册、只能用本地 CLI」几乎都是这一步没做完**，不是服务端坏了。
+先直接跑注册脚本，它会把正确的 `uplus` 条目写进本机已装的客户端：
+
+```powershell
+# Windows
+python scripts\register_mcp.py
+```
+
+```bash
+# macOS / Linux
+python3 scripts/register_mcp.py
+```
+
+- `python scripts\register_mcp.py --dry-run` —— 只看将要写入什么，不改文件。
+- `python scripts\register_mcp.py --client claude-desktop` —— 只注册一个客户端
+  （可选值：`claude-desktop` / `cursor` / `claude-code`）。
+
+脚本自动按**绝对路径**定位虚拟环境解释器（向上查找项目根目录的 `.venv`，git
+worktree 场景下也能找到真正的 venv），写好 `cwd` 与 `UPLUS_CONFIG`，保留用户已有
+的每一个配置项，遇到解析不了的 JSON 只跳过不覆盖，可重复执行。
+
+### 3.2 手工注册内容（核心命令，脚本不可用时的备选）
 
 MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块；`cwd` 设为 `<安装目录>`。
 
@@ -408,7 +431,7 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 
 **Linux 示例**：解释器路径把上面的 `.venv/bin/python` 保持为同样形式即可。
 
-### 3.2 安装过 console script 的简化写法
+### 3.3 安装过 console script 的简化写法
 
 完成第 1 步后，`uplus-mcp` 入口已安装；若解释器在 PATH 中，也可直接：
 
@@ -424,18 +447,21 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 }
 ```
 
-### 3.3 各客户端配置文件位置（详见 `docs/mcp-clients.md`）
+### 3.4 各客户端配置文件位置（详见 `docs/mcp-clients.md`）
 
 - Claude Desktop：`%APPDATA%\Claude\claude_desktop_config.json`（Windows）；`~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）。
-- Cursor：项目内 `.cursor/mcp.json`。
+- Cursor：`~/.cursor/mcp.json`（全局）或项目内 `.cursor/mcp.json`。
+- Claude Code：`~/.claude/settings.json` 的 `mcpServers` 段。
 - VS Code：MCP 插件的 `mcp.json`。
 - DSH 等其它客户端：按 stdio 协议注册同一 `command` / `args`。
 
 ### AI 动作
 
-1. 先问用户使用哪个 AI 客户端，给出对应格式与配置文件位置。
-2. 帮用户把 `<安装目录>` 替换成真实绝对路径（JSON 里 Windows 路径反斜杠要写成 `\\`）。
-3. 提示用户**保存后必须重启客户端**，新工具才会加载。
+1. **先跑 `python scripts\register_mcp.py`**（第 3.1 节），这是最不容易出错的方式。
+2. 先问用户使用哪个 AI 客户端；脚本会覆盖 Claude Desktop / Cursor / Claude Code，
+   其它客户端再按第 3.2 节的格式手工写入。
+3. 手工填路径时，把 `<安装目录>` 替换成真实绝对路径（JSON 里 Windows 路径反斜杠要写成 `\\`）。
+4. 提示用户**保存后必须重启客户端**，新工具才会加载。
 
 ### 成功信号
 
@@ -443,8 +469,11 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 
 ### 失败回退
 
-- 工具没出现：核对解释器路径是否存在、`cwd` 是否正确、JSON 是否合法；重启客户端。
-- 启动报错 `ModuleNotFoundError: uplus_mcp`：回到第 1 步确认 `pip install -e .` 成功。
+- 工具没出现：先跑 `python scripts\register_mcp.py --dry-run` 看它写到了哪个文件；
+  核对解释器路径是否存在、`cwd` 是否正确、JSON 是否合法；**重启客户端**。
+- 启动报错 `ModuleNotFoundError: uplus_mcp`：`command` 指向的解释器里没装这个包。
+  必须用虚拟环境的解释器（`<安装目录>\.venv\Scripts\python.exe`），
+  回到第 1 步确认 `pip install -e .` 成功。
 
 ---
 
@@ -690,8 +719,10 @@ MCP 配置里 `command` 指向虚拟环境解释器，`args` 启动服务模块�
 
 1. `uplus_check_login` 是否 `logged_in: true`？否 → 重新登录（第 5 步）。
 2. 浏览器调试端口是否监听？调 `browse_launch_edge` 复核；仍失败 → 手动启动（见 `docs/mcp-clients.md` FAQ）。
-3. 工具是否在客户端工具列表里？否 → 回到第 3 步核对配置并重启客户端。
-4. 依赖是否装好？回到第 1 步重装并重启客户端。
+3. 工具是否在客户端工具列表里？否 → 回到第 3 步：跑 `python scripts\register_mcp.py --dry-run`
+   确认写到了哪个文件，核对解释器路径与 `cwd`，然后**重启客户端**（新工具只在启动时加载）。
+4. 依赖是否装好？回到第 1 步重装并重启客户端。若报错 `ModuleNotFoundError: uplus_mcp`，
+   说明配置里的 `command` 指向的解释器里没装包——必须用虚拟环境的解释器。
 5. 平台接口 401：会话过期，重新登录；前端改版导致选择器失效：用 `browse_snapshot` 读取当前页面结构并对照 `docs/api-mapping.md` 校准。
 
 ---

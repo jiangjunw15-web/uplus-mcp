@@ -4,7 +4,48 @@
 
 > 下文 `<安装目录>` 指包含 `pyproject.toml` 的项目根目录绝对路径。Windows JSON 配置里反斜杠要写成 `\\`。
 
-## 0. 准备工作
+## 0. 一键注册（推荐先做这一步）
+
+包只装在项目虚拟环境里（`pip install -e .`），而**客户端的 MCP 配置里默认没有
+`uplus` 条目**——这就是「MCP 未注册、只能用本地 CLI」的由来：服务端本身能正常
+握手，但没有任何客户端知道要启动它。
+
+先跑一次注册脚本，它会把正确的 `mcpServers.uplus` 写进本机已装的客户端：
+
+```powershell
+# Windows
+python scripts\register_mcp.py
+```
+
+```bash
+# macOS / Linux
+python3 scripts/register_mcp.py
+```
+
+常用参数：
+
+| 参数 | 作用 |
+| --- | --- |
+| （无） | 注册全部检测到的客户端：Claude Desktop、Cursor、Claude Code |
+| `--dry-run` | 只打印将要写入的内容，不修改任何文件 |
+| `--client claude-desktop` | 只注册 Claude Desktop（可选值还有 `cursor`、`claude-code`） |
+| `--use-console-script` | 优先使用 `uplus-mcp` 控制台入口（需要 venv 在 PATH 或已激活） |
+
+脚本会：按**绝对路径**定位虚拟环境解释器（找不到就如实报告）、设置 `cwd` 与
+`UPLUS_CONFIG`、**保留你已有的每一个配置项**、遇到解析不了的 JSON 只跳过不覆盖，
+并且可以重复执行（结果一致）。
+
+写完**重启对应客户端**，工具列表里就会出现 `uplus_*` / `browse_*`。
+
+验证是否真的注册成功：
+
+```bash
+python scripts/register_mcp.py --dry-run
+```
+
+若某个客户端显示「已是最新」，说明配置已经在位；重启客户端即可。
+
+## 0.1 准备工作
 
 **从 GitHub Release 附件 wheel 安装（推荐，无需克隆源码）：**
 
@@ -218,6 +259,18 @@ cd <安装目录>
 登录态过期时退出码为 `2`，可在脚本外层记录告警；运行时故障退出码为 `1`。
 
 ## 6. 常见问题
+
+**Q: 客户端工具列表里没有 `uplus_*` / `browse_*`（MCP 未注册）？**
+A: 客户端配置里没有 `uplus` 条目。先跑 `python scripts/register_mcp.py`
+（见「0. 一键注册」），**然后重启客户端**——新工具只在启动时加载。若仍不出现：
+用 `--dry-run` 确认写入的是哪个文件；确认配置里的 `command` 指向一个真实存在的
+解释器（注册脚本会自动填虚拟环境的绝对路径）；确认 JSON 合法（Windows 反斜杠
+要写成 `\\`）。
+
+**Q: 手动填的配置报 `ModuleNotFoundError: No module named 'uplus_mcp'`？**
+A: `args: ["-m", "uplus_mcp.server"]` 必须搭配**装了包的解释器**。全局解释器里
+没有这个包，命令要写成 `<安装目录>\.venv\Scripts\python.exe`（macOS/Linux 为
+`.venv/bin/python`），或直接用注册脚本自动填好。
 
 **Q: 启动后提示登录态已过期？**
 A: 再调一次 `uplus_login`，按三个窗口答一遍（谁登录 / 怎么登 / 填信息）即可；学号·工号与手机号密码两种方式工具会自动登录，短信验证码方式你自己在浏览器里填手机号和验证码。

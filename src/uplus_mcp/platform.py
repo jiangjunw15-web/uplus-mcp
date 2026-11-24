@@ -48,11 +48,29 @@ class PlatformClient:
     def __init__(self, session: BrowserSession, config: Config) -> None:
         self.session = session
         self.config = config
+        # The course feed changes rarely but was re-requested on every call:
+        # ``get_course`` → ``list_my_courses``, and a patrol resolves a course
+        # name several times per homework. The feed is fetched once and reused;
+        # ``invalidate_courses`` forces a fresh read when the user explicitly
+        # asks what is on the account right now.
+        self._courses_cache: Optional[list[Course]] = None
 
     # ------------------------------------------------------------------ #
     # courses
     # ------------------------------------------------------------------ #
-    def list_my_courses(self) -> list[Course]:
+    def invalidate_courses(self) -> None:
+        """Drop the cached course feed so the next read hits the network."""
+        self._courses_cache = None
+
+    def list_my_courses(self, *, refresh: bool = False) -> list[Course]:
+        """The account's courses, from the cached feed when possible.
+
+        ``refresh=True`` re-requests the feed and replaces the cache.
+        """
+        if refresh:
+            self._courses_cache = None
+        if self._courses_cache is not None:
+            return list(self._courses_cache)
         payload = self.session.api_get(self.COURSES_PATH)
         raw_courses = _unpack_list(payload)
         configured = {c.id: c for c in self.config.courses}
@@ -73,10 +91,12 @@ class PlatformClient:
                 )
             )
         # Keep configured courses even when the study feed omits them.
+        known = {c.id for c in courses}
         for cid, preset in configured.items():
-            if not any(c.id == cid for c in courses):
+            if cid not in known:
                 courses.append(preset)
-        return courses
+        self._courses_cache = courses
+        return list(courses)
 
     def get_course(self, course_id: str) -> Optional[Course]:
         for course in self.list_my_courses():
@@ -113,3 +133,38 @@ class PlatformClient:
             self.QUESTION_DETAIL_PATH.format(question_id=safe_qid)
         )
         return Question.from_detail(_unpack_object(payload))
+
+    def question_details(self, question_ids: list[str]) -> list[Question]:
+        """Full details for several questions, fetched in one round-trip.
+
+        Reading the details one by one cost one browser round-trip per
+        question, so a 30-question homework paid 30 sequential round-trips
+        before the model could even see the questions. The batched read
+        issues the same requests in parallel inside the page and returns the
+        questions in the same order, so the data is identical — only the
+        number of round-trips drops from N to 1.
+
+        Falls back to the per-question path when the client has no batched
+        read (older sessions, test doubles).
+        """
+        if not question_ids:
+            return []
+        # Look the batched read up on the *class*, not the instance: a test
+        # double (``Mock``) auto-creates any attribute asked of it, so an
+        # instance lookup would find a non-callable stub instead of the real
+        # implementation. The call itself still goes through the instance, so
+        # an override or a patched session is honoured.
+        if getattr(type(self.session), "api_get_many", None) is None:
+            return [self.question_detail(qid) for qid in question_ids]
+        paths = [
+            self.QUESTION_DETAIL_PATH.format(
+                question_id=utils.safe_url_segment(qid, "question_id")
+            )
+            for qid in question_ids
+        ]
+        payloads = self.session.api_get_many(paths)
+        return [
+            Question.from_detail(_unpack_object(payload))
+            for payload in payloads
+        ]
+

@@ -250,6 +250,12 @@ class PatrolEngine:
         return result
 
     def list_courses(self) -> list[dict]:
+        # Always read the feed fresh here: this is the tool the user calls to
+        # see what is currently on the account, so the session cache must not
+        # hide a course that was just added or removed.
+        invalidate = getattr(self.client, "invalidate_courses", None)
+        if callable(invalidate):
+            invalidate()
         return [
             {
                 "course_id": c.id,
@@ -580,11 +586,26 @@ class PatrolEngine:
         know which questions are blank and which the caller's answers target.
         Reading the details through the REST layer alone saves one full page
         load per homework in the finish phase.
+
+        The details are fetched in ONE browser round-trip rather than one per
+        question: a 30-question homework used to pay 30 sequential round-trips
+        before the model saw a single question.
         """
-        return [
-            self.client.question_detail(q.question_id)
-            for q in self.client.list_questions(task.homework_id)
-        ]
+        metas = self.client.list_questions(task.homework_id)
+        if not metas:
+            return []
+        question_ids = [q.question_id for q in metas]
+        # Look the batched read up on the *class*, not the instance: a test
+        # double (``Mock``) auto-creates any attribute asked of it, so an
+        # instance lookup would find a stub instead of the real
+        # implementation. The call itself still goes through the instance.
+        if getattr(type(self.client), "question_details", None) is None:
+            return [
+                self.client.question_detail(question_id)
+                for question_id in question_ids
+            ]
+        return list(self.client.question_details(question_ids))
+
 
     def inspect_homework(self, task_id: str, course_id: str) -> dict:
         task = self.resolve_task(task_id, course_id)

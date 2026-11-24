@@ -235,12 +235,13 @@ class BrowserSession:
     # ------------------------------------------------------------------ #
     # in-page REST reads
     # ------------------------------------------------------------------ #
-    def api_get(self, path: str, *, retries: int = 1) -> dict[str, Any]:
-        url = self.url_for(path)
-        if not utils.is_same_origin(url, self.base_url):
-            raise UplusError(
-                f"拒绝向非平台域名发送携带凭据的 API 请求：{utils.redact_secrets(url)}"
-            )
+    def _api_page(self) -> Page:
+        """The page the API reads run in, with the token probe done once.
+
+        Every API read must run inside the platform origin so cookies and
+        CORS apply the same as a human browsing session. This is the shared
+        preamble of :meth:`api_get` and :meth:`api_get_many`.
+        """
         page = self.page
         # Ensure the fetch runs inside the platform origin so cookies and CORS
         # apply the same as a human browsing session.
@@ -268,16 +269,28 @@ class BrowserSession:
                 self.open("/workbench/index/school")
                 page = self.page
             self._token_probed = True
-        script = """
-        async (url) => {
-            const token = localStorage.getItem('AccessToken') || '';
-            const headers = {'Accept': 'application/json'};
-            if (token) { headers['x-access-token'] = token; }
-            const r = await fetch(url, {credentials: 'include', headers: headers});
-            const text = await r.text();
-            return {status: r.status, body: text};
-        }
-        """
+        return page
+
+    #: The in-page fetch used by both the single and the batched API read.
+    _API_FETCH_JS = """
+    async (url) => {
+        const token = localStorage.getItem('AccessToken') || '';
+        const headers = {'Accept': 'application/json'};
+        if (token) { headers['x-access-token'] = token; }
+        const r = await fetch(url, {credentials: 'include', headers: headers});
+        const text = await r.text();
+        return {status: r.status, body: text};
+    }
+    """
+
+    def api_get(self, path: str, *, retries: int = 1) -> dict[str, Any]:
+        url = self.url_for(path)
+        if not utils.is_same_origin(url, self.base_url):
+            raise UplusError(
+                f"拒绝向非平台域名发送携带凭据的 API 请求：{utils.redact_secrets(url)}"
+            )
+        page = self._api_page()
+        script = self._API_FETCH_JS
         last: Optional[dict[str, Any]] = None
         for attempt in range(retries + 1):
             try:
@@ -333,6 +346,82 @@ class BrowserSession:
                 )
             return payload
         return last or {}
+
+    def api_get_many(self, paths: list[str]) -> list[Any]:
+        """Fetch several platform URLs in **one** browser round-trip.
+
+        :meth:`api_get` costs one CDP round-trip per URL: a 30-question
+        homework paid 30 sequential round-trips through the browser before a
+        single answer could be filled. This issues the very same requests
+        *in parallel inside the page* (one ``Promise.all``) and returns the
+        parsed payloads in the same order, so the data observed by the caller
+        is identical — only the number of round-trips drops from N to 1.
+
+        Error handling is delegated to :meth:`api_get` so the retry and
+        recovery behaviour is unchanged: when the batched call itself fails,
+        or when any single response is not a plain success, that one URL is
+        re-read through the sequential path (which bounces to the workbench on
+        a 401 and retries on a bad body). The happy path — every URL returns
+        2xx JSON — never takes the fallback.
+        """
+        if not paths:
+            return []
+        urls = [self.url_for(path) for path in paths]
+        for url in urls:
+            if not utils.is_same_origin(url, self.base_url):
+                raise UplusError(
+                    "拒绝向非平台域名发送携带凭据的 API 请求："
+                    f"{utils.redact_secrets(url)}"
+                )
+        page = self._api_page()
+        script = """
+        async (urls) => {
+            const token = localStorage.getItem('AccessToken') || '';
+            const headers = {'Accept': 'application/json'};
+            if (token) { headers['x-access-token'] = token; }
+            return await Promise.all(urls.map(async (url) => {
+                try {
+                    const r = await fetch(url, {credentials: 'include', headers});
+                    const text = await r.text();
+                    return {status: r.status, body: text};
+                } catch (e) {
+                    return {status: 0, body: '', error: String(e)};
+                }
+            }));
+        }
+        """
+        try:
+            responses = page.evaluate(script, urls)
+        except Exception:  # noqa: BLE001 - fall back to the sequential path
+            return [self.api_get(path) for path in paths]
+        if not isinstance(responses, list) or len(responses) != len(urls):
+            return [self.api_get(path) for path in paths]
+
+        payloads: list[Any] = []
+        for path, resp in zip(paths, responses, strict=True):
+            resp = resp if isinstance(resp, dict) else {}
+            status = int(resp.get("status", 0) or 0)
+            body = str(resp.get("body", ""))
+            if status == 0 and resp.get("error"):
+                # The in-page fetch itself failed for this one URL: re-read it
+                # through the sequential path, which has the retry logic.
+                payloads.append(self.api_get(path))
+                continue
+            if status == 401 or "login" in page.url.lower():
+                # A 401 may be a stale tab rather than an expired session; the
+                # sequential path bounces to the workbench and retries once.
+                payloads.append(self.api_get(path))
+                continue
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payloads.append(self.api_get(path))
+                continue
+            if status >= 400:
+                payloads.append(self.api_get(path))
+                continue
+            payloads.append(payload)
+        return payloads
 
     # ------------------------------------------------------------------ #
     # binary download (no JSON assumption)
