@@ -6,6 +6,7 @@ tools in ``server.py`` are thin wrappers around an ``PatrolEngine`` instance.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Optional
@@ -173,6 +174,47 @@ class PatrolEngine:
             return str(task.sub_status or "").strip() not in {"1", "2", "3"}
         return True
 
+    def _fingerprint_path(self) -> Path:
+        """Ledger binding a configured account to the portal's session id.
+
+        The portal stores no student number in ``localStorage`` on this
+        deployment (only ``userid``, a GUID), so a plain ``2413041236 == stored``
+        comparison can never succeed. The number is bound to the GUID once, at
+        the moment the human typed that account's credentials, and later runs
+        check the GUID against that binding — still catching A/B swaps.
+
+        It sits next to the answer journal (``journal_path``) so a multi-account
+        setup that points ``UPLUS_JOURNAL_PATH`` at one shared file also shares
+        the bindings, instead of each account silently losing them.
+        """
+        return journal.journal_path(self.config).parent / "account_fingerprints.json"
+
+    def _read_fingerprints(self) -> dict:
+        try:
+            raw = self._fingerprint_path().read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001 - missing / corrupt ledger
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _remember_fingerprint(self, expected: str, actual: str) -> None:
+        expected, actual = expected.strip(), actual.strip()
+        if not expected or not actual:
+            return
+        data = self._read_fingerprints()
+        data[expected] = actual
+        try:
+            path = self._fingerprint_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+        except Exception:  # noqa: BLE001 - best-effort, never blocks a login
+            pass
+
+    def _fingerprint_matches(self, expected: str, actual: str) -> bool:
+        recorded = str(self._read_fingerprints().get(expected, "")).strip()
+        return bool(recorded) and recorded == actual.strip()
+
     def _guard_account(self) -> None:
         """Refuse to act when the attached browser belongs to another account.
 
@@ -197,13 +239,27 @@ class PatrolEngine:
         if not result.get("available"):
             return  # signed out / SPA not hydrated: nothing to compare yet
         if not result.get("matched"):
-            raise UplusError(
-                "已拒绝对当前浏览器会话执行操作："
-                f"会话账号「{result.get('actual') or '未知'}」与配置的期望账号"
-                f"「{expected}」不一致。常见原因是配置端口对应的浏览器已关闭、"
-                "工具接入了另一个账号的实例，或同一 profile 被换号登录。"
-                "请关闭/更换浏览器，或修正 account / UPLUS_ACCOUNT 配置后重试。"
-            )
+            # The portal may only expose an opaque id: fall back to the binding
+            # recorded when this account's credentials were last typed.
+            actual = str(result.get("actual") or "").strip()
+            if actual and self._fingerprint_matches(expected, actual):
+                result["matched"] = True
+                result["matched_by"] = "fingerprint"
+            else:
+                hint = (
+                    "这台浏览器上还没有该账号的绑定记录，"
+                    "请对当前窗口调用一次 uplus_login（已登录也可调用，只做登记）。"
+                    if not self._read_fingerprints().get(expected)
+                    else ""
+                )
+                raise UplusError(
+                    "已拒绝对当前浏览器会话执行操作："
+                    f"会话账号「{result.get('actual') or '未知'}」与配置的期望账号"
+                    f"「{expected}」不一致。常见原因是配置端口对应的浏览器已关闭、"
+                    "工具接入了另一个账号的实例，或同一 profile 被换号登录。"
+                    "请关闭/更换浏览器，或修正 account / UPLUS_ACCOUNT 配置后重试。"
+                    + hint
+                )
         self._account_ok = True
 
     @staticmethod
@@ -296,6 +352,13 @@ class PatrolEngine:
             if match is not None:
                 identity = match.get("actual", "")
                 matched = match.get("matched") if match.get("available") else None
+                # Opaque-id deployments: the same binding the guard accepts must
+                # be reflected here, or check_login tells the user "mismatch"
+                # about a session every tool happily accepts.
+                if matched is False and identity and self._fingerprint_matches(
+                        expected, identity):
+                    matched = True
+                    result["matched_by"] = "fingerprint"
             else:
                 try:
                     identity = self.session.account_identity().get("primary", "")
@@ -413,6 +476,15 @@ class PatrolEngine:
             except Exception:  # noqa: BLE001 - identity unavailable this early
                 match = None
             if match and match.get("available"):
+                actual = str(match.get("actual") or "").strip()
+                if actual and not match.get("matched") and (
+                        values["username"].strip().lower() == expected.lower()):
+                    # The human just typed this account's own credentials, so
+                    # this session id is that account: bind it for later guards.
+                    # A login for a *different* account must still mismatch.
+                    self._remember_fingerprint(expected, actual)
+                    match["matched"] = True
+                    match["matched_by"] = "fingerprint_recorded"
                 result["account"] = match.get("actual", "")
                 result["expected_account"] = expected
                 result["account_match"] = bool(match.get("matched"))

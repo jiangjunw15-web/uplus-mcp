@@ -13,6 +13,32 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.19
+
+Live use (account 2413041236) showed two blockers that made auto login and every
+account-bound tool fail outright. Both are fixed, and the whole flow was re-run
+against the real platform.
+
+- **Login entry fallback.** The portal home page exposes its sign-in entry as a
+  bare `登录/注册` text link on some builds, not `.login-button`; the old code
+  clicked nothing and reported "no account/password box". `_enter_login_form`
+  now tries `.login-button` → `a[href*='login']` → `text=登录/注册` →
+  `text=登录`, verifies the landing page after each click, and returns a clear
+  "hand the browser back for one manual click" result when none worked.
+- **Account binding for opaque ids.** This deployment stores no student number
+  in `localStorage` — only `userid`, a GUID — so the 0.8.18 identity guard
+  rejected the correct account right after login. The account is now bound to
+  the portal's session id once, at login, and checked against that binding
+  later. The binding is written only when the typed `username` equals the
+  configured `account`, so logging in as someone else still reports
+  `account_mismatch` and writes nothing. The ledger lives next to the answer
+  journal, so a shared `UPLUS_JOURNAL_PATH` shares bindings too.
+- **Verified live:** login (`account_match=true`, `matched_by=fingerprint`),
+  13 courses / 30 homeworks patrolled, `2026软件构造` 作业3 + 平时作业-3 submitted
+  10/10 from cross-account reuse with page progress `10/10`, five withdrawable
+  homeworks re-checked as complete, pinned port never fell back.
+- **Tests.** 556 pass (544 + 11 new login/binding tests), 1 skipped.
+
 ## What's new in 0.8.18
 
 Fixes the three issues surfaced by the second round of live testing: silent

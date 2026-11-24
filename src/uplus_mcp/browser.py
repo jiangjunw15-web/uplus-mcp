@@ -821,22 +821,49 @@ class BrowserSession:
                 continue
         return None
 
-    def _enter_login_form(self, page: Page) -> None:
-        """The portal home page only shows a ``登录/注册`` entry; click it to
-        bounce to the uc.eduplus.net login form when we are not already there."""
-        if "login" in page.url.lower():
-            return
+    def _on_login_form(self, page: Page) -> bool:
+        """True when this page already carries the sign-in form."""
+        if "login" in (page.url or "").lower():
+            return True
         try:
-            entry = page.locator(".login-button").first
-            if entry.count() and entry.is_visible():
+            return self._first_visible(page, self._PASS_SELECTORS) is not None
+        except Exception:  # noqa: BLE001 - detached frame mid-navigation
+            return False
+
+    def _enter_login_form(self, page: Page) -> bool:
+        """Reach the sign-in form from the portal home page; True when there.
+
+        The home page only exposes a ``登录/注册`` entry and its markup is
+        A/B-tested: it is a ``.login-button`` on some builds and a bare text
+        link on others (the bare-link build made every auto login fail with
+        "未识别到账号/密码输入框"). Try the known shapes in order, verify the
+        landing page after each, and only then report a failure so the caller
+        can hand the browser back to the human instead of blaming the form.
+        """
+        if self._on_login_form(page):
+            return True
+        entries = (
+            lambda: page.locator(".login-button").first,
+            lambda: page.locator("a[href*='login']").first,
+            lambda: page.get_by_text("登录/注册", exact=True).first,
+            lambda: page.get_by_text("登录", exact=True).first,
+        )
+        for make in entries:
+            try:
+                entry = make()
+                if not (entry.count() and entry.is_visible()):
+                    continue
                 entry.click(timeout=5000)
                 try:
                     page.wait_for_url("**/login**", timeout=8000)
                 except PWTimeout:
                     pass
                 time.sleep(0.8)
-        except Exception:  # noqa: BLE001 - entry may already be the form
-            pass
+                if self._on_login_form(page):
+                    return True
+            except Exception:  # noqa: BLE001 - next shape / already the form
+                continue
+        return self._on_login_form(page)
 
     def _select_school(self, page: Page, school: str) -> bool:
         """Fill the optional school remote-search el-select; True when the form
@@ -1060,6 +1087,22 @@ class BrowserSession:
         except Exception:  # noqa: BLE001 - mid-navigation / detached frame
             return ""
 
+    def _login_form_unreachable(self, page: Page, method: str) -> dict[str, Any]:
+        """Fail clearly when the home page never opened the sign-in form.
+
+        Saying "未识别到账号/密码输入框" here pointed the human at the wrong
+        place: the boxes were missing because no form had been opened, not
+        because their markup changed. Keep the browser on the home page and ask
+        for one manual click instead of retrying silently.
+        """
+        return {
+            "logged_in": False, "method": method,
+            "reason": "没能打开登录表单：首页的「登录/注册」入口没有跳转。"
+                      "请在浏览器里手动点一次「登录/注册」，再重试自动登录",
+            "url": utils.redact_secrets(page.url),
+            "body_hint": self._body_hint(page),
+        }
+
     def _submit_credentials(self, page: Page, username: str, password: str, *,
                             method: str, wait_ms: int, notes: tuple[str, ...] = ()) -> dict[str, Any]:
         """Fill the account/password boxes, submit, and verify the token."""
@@ -1105,7 +1148,8 @@ class BrowserSession:
         note = self._session_note(page)
         if note:
             return {"method": "student_id", **note}
-        self._enter_login_form(page)
+        if not self._enter_login_form(page):
+            return self._login_form_unreachable(page, "student_id")
         self.switch_login_tab(page, "student_id")
         school = (school or "").strip()
         if not school:
@@ -1126,7 +1170,8 @@ class BrowserSession:
         note = self._session_note(page)
         if note:
             return {"method": "password", **note}
-        self._enter_login_form(page)
+        if not self._enter_login_form(page):
+            return self._login_form_unreachable(page, "password")
         tab_ok = self.switch_login_tab(page, "password")
         return self._submit_credentials(
             page, username, password, method="password", wait_ms=wait_ms,
