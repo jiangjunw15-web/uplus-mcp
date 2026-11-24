@@ -13,6 +13,23 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.21
+
+The 0.8.20 fixes were published but only on a branch: GitHub's `main` and a
+local checkout still sat on 0.8.19, so a re-check against `main` saw the old
+code again. The fix commit is now on `main`, and this release re-publishes the
+same tree from it, so "latest release = main = fixed code" is literally true.
+
+- **Nine fixes carried over unchanged from 0.8.20** — identifier underscores are
+  not answer boxes, a comma no longer tears a value in two, a zero score reads
+  as `0`, a corrupted answer journal is backed up instead of wiped, a broken
+  config file names the file and the line, a half-filled blank is no longer
+  called a missing multi-select option, plus full-width option letters,
+  `parse_bool("否")` and a page progress written as `12 / 32`.
+- **Verified on `main`:** 575 tests pass there, and the six reported
+  reproductions now show the fixed behaviour.
+- **Tests.** 575 pass.
+
 ## What's new in 0.8.20
 
 A line-by-line code review of 0.8.19 turned up six real defects plus three small
