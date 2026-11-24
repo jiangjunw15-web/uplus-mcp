@@ -34,6 +34,16 @@ _cache: dict[str, tuple[int, int, dict]] = {}
 
 
 def journal_path(config: Config) -> Path:
+    """Where the answer journal lives.
+
+    ``UPLUS_JOURNAL_PATH`` overrides the default ``<report folder>/answer_journal.json``.
+    Multi-account setups are told to keep separate working directories; pointing
+    every account at one shared journal file is what makes cross-account reuse
+    actually visible, instead of each account seeing only its own submissions.
+    """
+    override = os.environ.get("UPLUS_JOURNAL_PATH")
+    if override:
+        return Path(override).expanduser()
     return config.report_folder / FILENAME
 
 
@@ -98,6 +108,59 @@ def record(config: Config, *, task_id: str, homework_id: str, name: str,
     with _lock:
         _cache.pop(str(path), None)
     return path
+
+
+def answer_index(config: Config) -> dict[str, dict]:
+    """Every recorded answer, indexed by ``question_id``.
+
+    Entries are keyed by ``task_id`` in the file, so a homework answered on one
+    account is invisible to another account by exact lookup even when the
+    question bank is identical (``question_id`` is assigned by the platform per
+    question, not per student). This index exposes those answers keyed by the
+    question itself; the newest recording wins when a question was submitted
+    more than once.
+
+    Returns ``question_id -> {answer, task_id, homework_id, name,
+    recorded_at_ms}``. It is a local hint only: the platform hides the standard
+    answer while a homework is pending, so a reused answer is a human-reviewed
+    prior submission, never a proven correct answer.
+    """
+    best: dict[str, tuple[int, dict]] = {}
+    for task_id, entry in _load_all(config).items():
+        if not isinstance(entry, dict):
+            continue
+        answers = entry.get("answers") or {}
+        if not isinstance(answers, dict):
+            continue
+        try:
+            stamp = int(entry.get("recorded_at_ms") or 0)
+        except (TypeError, ValueError):
+            stamp = 0
+        for question_id, answer in answers.items():
+            if answer is None or not str(answer).strip():
+                continue
+            key = str(question_id)
+            current = best.get(key)
+            if current is not None and stamp < current[0]:
+                continue
+            best[key] = (stamp, {
+                "answer": str(answer),
+                "task_id": str(task_id),
+                "homework_id": str(entry.get("homework_id") or ""),
+                "name": str(entry.get("name") or ""),
+                "recorded_at_ms": stamp,
+            })
+    return {question_id: item for question_id, (_, item) in best.items()}
+
+
+def answers_by_question_id(config: Config,
+                           question_ids: list[str] | None = None) -> dict[str, str]:
+    """``question_id -> answer`` for the whole journal, optionally filtered."""
+    index = answer_index(config)
+    if question_ids is None:
+        return {qid: item["answer"] for qid, item in index.items()}
+    wanted = {str(q) for q in question_ids}
+    return {qid: item["answer"] for qid, item in index.items() if qid in wanted}
 
 
 def answers_for(config: Config, task_id: str, homework_id: str = "") -> dict[str, str]:

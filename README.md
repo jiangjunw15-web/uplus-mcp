@@ -13,6 +13,39 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.17
+
+Adds **cross-account answer reuse**. The local answer journal used to be looked
+up by `task_id` only, so a homework answered on one account was invisible to
+another account even when the question bank was identical. The platform assigns
+`question_id` per question, not per student, so a `question_id` index of the
+journal lets one account's reviewed answers fill another account's blanks.
+
+- **On by default, the caller always wins.** `uplus_answer_homework(reuse=True)`
+  only fills objective questions the caller left unanswered;
+  `uplus_repair_homework(reuse=True)` falls back to another account's answer
+  only when this task's own journal entry has none; `uplus_finish_then_review`
+  fills blanks the same way. `reuse=False` restores the 0.8.16 behaviour.
+- **A hint, not an answer key.** `reused_questions` names the source
+  (`source_task_id` / `source_homework_id` / `source_name`) for every reused
+  question and `reuse_note` states how many were reused. `uplus_patrol` exposes
+  `reuse_answers` / `reuse_sources` / `reuse_note` per answer brief, and
+  `uplus_inspect_homework` shows the reusable answers before you decide.
+- **No double filling.** An answer keyed by question order (`"3"`) blocks the
+  `question_id` copy for that same question.
+- **Reuse never blocks work.** A failed index/detail read only adds a
+  `reuse_note`; the caller's answers are still submitted.
+- **One shared journal.** With separate working directories per account, point
+  `UPLUS_JOURNAL_PATH` at one shared journal file so reuse is actually visible;
+  otherwise each account reads only its own `answer_journal.json`.
+- **Platform limits unchanged.** Graded work is never withdrawn, pending
+  multi-selects without a reference stay `unjudged`, and subjective /
+  programming / attachment work stays with the human.
+- **Verified:** 520 tests pass (7 new reuse tests cover newest-wins indexing,
+  caller priority, `reuse=False`, order-key conflicts, read-failure fallback and
+  repair fallback), plus a live patrol on real accounts (phone-password and
+  student-id logins): the journal holds 414 question ids and 作业3 reuses 10/10.
+
 ## What's new in 0.8.16
 
 Fixes the live-read cases where the API said "not submitted" while the answer

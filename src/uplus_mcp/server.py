@@ -280,9 +280,10 @@ async def uplus_inspect_homework(task_id: str, course_id: str) -> dict:
 async def uplus_answer_homework(
     task_id: str,
     course_id: str,
-    answers: dict[str, str],
+    answers: dict[str, str] | None = None,
     submit: bool = True,
     force_submit: bool = False,
+    reuse: bool = True,
 ) -> dict:
     """Fill objective questions and optionally submit.
 
@@ -290,12 +291,19 @@ async def uplus_answer_homework(
     normalized answer: one letter, a sorted letter group, ``true``/``false``, or
     blank text. A fill-blank question with several blanks (``blank_count`` in the
     inspect brief) takes one value per blank, newline-separated in stem order.
+
+    ``reuse=True`` (default) fills objective questions you did not answer from
+    answers recorded for the same ``question_id`` by any account — the patrol
+    result's ``reuse_answers`` block lists exactly what is available. Your own
+    answers always win, and every reused question is named in
+    ``reused_questions``. Reuse is a convenience, not a correctness proof.
+
     Submission is refused while any question is unanswered or failed unless
     ``force_submit=True``.
     """
     return await _thread.run_async(
-        _dispatch("answer_homework", task_id, course_id, answers,
-                  submit=submit, force_submit=force_submit)
+        _dispatch("answer_homework", task_id, course_id, answers or {},
+                  submit=submit, force_submit=force_submit, reuse=reuse)
     )
 
 
@@ -306,6 +314,7 @@ async def uplus_repair_homework(
     answers: dict[str, str] | None = None,
     verify_unjudged: bool = False,
     submit: bool = True,
+    reuse: bool = True,
 ) -> dict:
     """Withdraw a submitted homework, fill its gaps, and resubmit it.
 
@@ -316,6 +325,9 @@ async def uplus_repair_homework(
     one. Answers already stored in the local journal (because this tool
     submitted the homework earlier) are used automatically, so a
     journal-covered partial can be repaired without new model answers.
+    ``reuse=True`` additionally falls back to answers recorded for the same
+    ``question_id`` on another account and reports them in
+    ``reused_questions``.
 
     The tool refuses to withdraw until every known gap has an answer. A graded
     homework cannot be withdrawn and is reported without changing anything.
@@ -327,7 +339,7 @@ async def uplus_repair_homework(
     """
     return await _thread.run_async(
         _dispatch("repair_homework", task_id, course_id, answers or {},
-                  verify_unjudged=verify_unjudged, submit=submit)
+                  verify_unjudged=verify_unjudged, submit=submit, reuse=reuse)
     )
 
 
@@ -460,6 +472,7 @@ async def uplus_finish_then_review(
     submit: bool = False,
     audit: bool = True,
     screenshot: bool = False,
+    reuse: bool = True,
 ) -> dict:
     """Two-phase homework workflow: finish every outstanding homework first,
     then review the whole account once to judge whether anything is still
@@ -476,6 +489,9 @@ async def uplus_finish_then_review(
     answer is collected, never silently skipped. ``submit=True`` submits each
     homework whose objective questions are all answered; keep ``submit=False``
     to fill without submitting, then review before submitting.
+    ``reuse=True`` (default) fills blanks you left out with answers recorded for
+    the same ``question_id`` on any account; the ``finish`` log reports how many
+    answers were reused per homework.
 
     Phase 2 — *review*. Only after the last homework has been attempted does
     this re-read every homework's real page state and run the same completeness
@@ -504,7 +520,7 @@ async def uplus_finish_then_review(
     """
     return await _thread.run_async(
         _dispatch("finish_then_review", answers, submit=submit, audit=audit,
-                  screenshot=screenshot)
+                  screenshot=screenshot, reuse=reuse)
     )
 
 

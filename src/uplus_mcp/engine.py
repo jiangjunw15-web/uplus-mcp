@@ -623,6 +623,44 @@ class PatrolEngine:
             ]
         return list(self.client.question_details(question_ids))
 
+    def _reuse_answers(self, questions: list[Question], *,
+                       skip_answered: bool = True
+                       ) -> tuple[dict[str, str], dict[str, dict]]:
+        """Answers recorded for the same ``question_id`` by *any* account.
+
+        The platform assigns ``question_id`` per question, not per student, so a
+        question bank that was already answered on another account shares ids.
+        Reusing such a recorded answer is a convenience, not a correctness
+        proof: the journal only ever holds answers this tool submitted after a
+        human-reviewed pass, and the platform hides its own answer while a
+        homework is pending.
+
+        Returns ``(answers_map, sources)``; ``sources`` carries provenance
+        (which submission the answer came from) for every reused question.
+        Questions that already carry a real answer are skipped by default.
+        """
+        index = journal.answer_index(self.config)
+        answers: dict[str, str] = {}
+        sources: dict[str, dict] = {}
+        for question in questions:
+            if not question.auto_answerable:
+                continue
+            if skip_answered and question.answered and question.my_answer:
+                continue
+            hit = index.get(question.question_id)
+            if not hit:
+                continue
+            answers[question.question_id] = hit["answer"]
+            sources[question.question_id] = {
+                "question_id": question.question_id,
+                "order": question.order,
+                "answer": hit["answer"],
+                "source_task_id": hit["task_id"],
+                "source_homework_id": hit["homework_id"],
+                "source_name": hit["name"],
+            }
+        return answers, sources
+
 
     def inspect_homework(self, task_id: str, course_id: str) -> dict:
         task = self.resolve_task(task_id, course_id)
@@ -658,6 +696,10 @@ class PatrolEngine:
             else:
                 conflicts.append(
                     "接口显示已提交、页面仍可作答（页面按钮更权威）")
+        # Cross-account hint: before the caller writes fresh answers, show what
+        # the local journal already holds for these very question ids (the
+        # same map uplus_answer_homework would use with its default reuse=True).
+        reuse_answers, reuse_sources = self._reuse_answers(questions)
         result = {
             "course_id": course_id,
             "course_name": self.course_name(course_id),
@@ -674,6 +716,8 @@ class PatrolEngine:
             "api_says_submitted": api_says_submitted,
             "page_says_submitted": page_says_submitted,
             "state_conflicts": conflicts,
+            "reuse_answers": reuse_answers,
+            "reuse_sources": reuse_sources,
             "brief": solver.build_answer_brief(task.name, questions),
         }
         if conflicts:
@@ -803,15 +847,16 @@ class PatrolEngine:
     def repair_homework(self, task_id: str, course_id: str,
                         answers: dict[str, str] | str | None = None,
                         *, verify_unjudged: bool = False,
-                        submit: bool = True) -> dict:
+                        submit: bool = True, reuse: bool = True) -> dict:
         """Withdraw a submitted homework, fill the gaps, and resubmit it.
 
         Only a homework the page reports as ``submitted_pending`` can be
         repaired (a graded one cannot be withdrawn). The withdrawal happens
         only after every known gap has an answer: the caller's ``answers``
         first, then the local journal recorded when this tool submitted the
-        homework. Existing answers are preserved and re-used, so a withdrawal
-        that clears the draft can still be restored.
+        homework, then — with ``reuse=True`` — any answer recorded for the same
+        ``question_id`` by another account. Existing answers are preserved and
+        re-used, so a withdrawal that clears the draft can still be restored.
 
         ``verify_unjudged=True`` additionally re-answers multi-selects whose
         completeness could not be checked before grading (the platform hides
@@ -856,6 +901,17 @@ class PatrolEngine:
         audit = report_mod.audit_questions(questions, expected_answers=expected)
         result["audit"] = audit
 
+        # Cross-account fallback: the exact-task journal is empty on an account
+        # that never submitted this homework, while another account may hold
+        # answers for the very same question ids. Keep the provenance so the
+        # result says where each restored answer came from.
+        reused_map: dict[str, str] = {}
+        reused_sources: dict[str, dict] = {}
+        if reuse:
+            _, reused_sources = self._reuse_answers(questions, skip_answered=False)
+            reused_map = {qid: item["answer"] for qid, item in reused_sources.items()}
+        result["reused_questions"] = []
+
         by_order = {q.order: q for q in questions}
         target_ids: set[str] = set()
         targets: list[tuple[str, object, dict]] = []
@@ -881,7 +937,8 @@ class PatrolEngine:
                 supplied.get(question.question_id)
                 or supplied.get(str(question.order))
             )
-            fallback = expected.get(question.question_id)
+            fallback = (expected.get(question.question_id)
+                        or reused_map.get(question.question_id))
             answer = supplied_answer or fallback
             invalid_reason = ""
             # A partial selection or an unverified multi-select must not be
@@ -939,12 +996,27 @@ class PatrolEngine:
                 supplied.get(question.question_id)
                 or supplied.get(str(question.order))
             )
+            origin = "supplied" if answer else ""
             if answer is None and question.question_id in target_ids:
                 answer = expected.get(question.question_id)
+                origin = "journal" if answer else ""
+            if answer is None and question.question_id in target_ids:
+                # Only a gap that the exact-task journal cannot cover may fall
+                # back to another account's submission of the same question.
+                answer = reused_map.get(question.question_id)
+                origin = "reuse" if answer else ""
             if answer is None:
                 answer = question.my_answer
+                origin = "page" if answer else ""
+            if answer is None:
+                answer = reused_map.get(question.question_id)
+                origin = "reuse" if answer else ""
             if answer:
                 merged[question.question_id] = answer
+                if origin == "reuse":
+                    result["reused_questions"].append(
+                        reused_sources.get(question.question_id)
+                        or {"question_id": question.question_id, "answer": answer})
         uncovered = [
             question.order for question in questions
             if question.auto_answerable and question.question_id not in merged
@@ -1037,13 +1109,49 @@ class PatrolEngine:
     # ------------------------------------------------------------------ #
     def answer_homework(self, task_id: str, course_id: str,
                         answers: dict[str, str] | str, submit: bool = True,
-                        force_submit: bool = False) -> dict:
+                        force_submit: bool = False, reuse: bool = True) -> dict:
         task = self.resolve_task(task_id, course_id)
-        answers = solver.parse_model_answers(answers)
-        return self.operator.answer_homework(
-            task, answers, submit=submit, force_submit=force_submit,
+        supplied = solver.parse_model_answers(answers)
+        merged = dict(supplied)
+        reused: list[dict] = []
+        reuse_note = ""
+        if reuse:
+            # Cross-account reuse: fill objective questions left without a
+            # caller answer from the answers recorded for the same question_id
+            # on any account. The caller's answers always win.
+            try:
+                questions = self._homework_question_details(task)
+                reused_map, sources = self._reuse_answers(questions)
+            except AuthExpiredError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reuse is best-effort
+                reuse_note = f"跨账号答案复用未生效：{exc}"
+            else:
+                by_id = {q.question_id: q for q in questions}
+                for question_id, answer in reused_map.items():
+                    question = by_id.get(question_id)
+                    if question is None:
+                        continue
+                    # A caller may key an answer by question order ("3") rather
+                    # than by question id; filling the id as well would send two
+                    # answers for one question and the id copy would silently win.
+                    if question_id in merged or str(question.order) in merged:
+                        continue
+                    merged[question_id] = answer
+                    reused.append(sources[question_id])
+                if reused:
+                    reuse_note = (
+                        f"已从本地答案簿复用 {len(reused)} 道同题号答案"
+                        "（来源见 reused_questions，属人工复核过的历史提交）")
+        outcome = self.operator.answer_homework(
+            task, merged, submit=submit, force_submit=force_submit,
             course_name=self.course_name(course_id),
         )
+        if reused:
+            outcome["reused_questions"] = reused
+        if reuse_note:
+            outcome["reuse_note"] = reuse_note
+        return outcome
 
     def capture_question_image(self, task_id: str, course_id: str, *,
                                order: int = 0, question_id: str = "",
@@ -1326,15 +1434,21 @@ class PatrolEngine:
                                 guessed = solver.rule_based_answer(q)
                                 if guessed is not None:
                                     rule_answers[q.question_id] = guessed
+                        # Cross-account reuse: answers recorded for the same
+                        # question_id on any account. Reported with provenance so
+                        # the caller can accept or override them one by one.
+                        reuse_answers, reuse_sources = self._reuse_answers(objective)
+                        candidates = {**reuse_answers, **rule_answers}
                         if submit and auto_answer and objective \
-                                and len(rule_answers) == len(objective):
+                                and len(candidates) == len(objective):
                             # Wire the documented contract: only a homework whose
-                            # objective questions ALL carry a rule answer goes to
-                            # the operator, whose own gate still refuses to submit
-                            # when subjective items remain or a fill fails.
+                            # objective questions ALL carry an answer (rule or
+                            # reused) goes to the operator, whose own gate still
+                            # refuses to submit when subjective items remain or a
+                            # fill fails.
                             try:
                                 submission = self.operator.answer_homework(
-                                    task, rule_answers, submit=True,
+                                    task, candidates, submit=True,
                                     course_name=course.name,
                                 )
                                 auto_submissions.append(submission)
@@ -1352,6 +1466,15 @@ class PatrolEngine:
                             "homework_id": task.homework_id,
                             "brief": solver.build_answer_brief(task.name, objective),
                             "rule_answers": rule_answers,
+                            "reuse_answers": reuse_answers,
+                            "reuse_sources": reuse_sources,
+                            "reuse_note": (
+                                f"本地答案簿已覆盖 {len(reuse_answers)}/{len(objective)} 道客观题；"
+                                "reuse_answers 是跨账号同题号的历史提交答案，可原样传给 "
+                                "uplus_answer_homework(answers=...)，也可逐题覆盖。"
+                                if reuse_answers else
+                                "本地答案簿未覆盖该作业的客观题，需要重新作答。"
+                            ),
                         })
                     if not questions:
                         snapshot.takeover.append({
@@ -1460,7 +1583,7 @@ class PatrolEngine:
 
     def finish_then_review(self, answers: dict[str, dict[str, str]] | None = None,
                            *, submit: bool = False, audit: bool = True,
-                           screenshot: bool = False) -> dict:
+                           screenshot: bool = False, reuse: bool = True) -> dict:
         """Two-phase homework workflow: finish first, review once afterwards.
 
         Phase 1 — *finish*. Walk every active course in the fixed patrol order
@@ -1468,6 +1591,8 @@ class PatrolEngine:
         supplies answers as ``{task_id: {question_id: answer}}``; any objective
         question left without an answer is collected, never silently skipped,
         so the review phase can tell exactly what is still outstanding.
+        ``reuse=True`` fills blanks left by the caller from answers recorded for
+        the same ``question_id`` on any account (the caller's answers win).
 
         Phase 2 — *review*. Only after the last homework has been attempted do
         we re-read every homework's real page state and run the same
@@ -1534,6 +1659,24 @@ class PatrolEngine:
                     "answered": 0, "submitted": False, "note": note,
                 })
                 continue
+            # Cross-account reuse fills blanks the caller did not answer. The
+            # caller's own answers always win; reuse is reported per task so the
+            # finish log says where the filled answers came from.
+            reuse_sources: dict[str, dict] = {}
+            if reuse and objective_blank:
+                reuse_map, reuse_sources = self._reuse_answers(objective_blank)
+                if reuse_map:
+                    # An answer keyed by question order in ``task_answers`` is
+                    # already a caller answer for that question; adding the
+                    # question-id copy would fill the same box twice.
+                    blocked = {q.question_id for q in objective_blank
+                               if str(q.order) in task_answers}
+                    if blocked:
+                        reuse_map = {qid: ans for qid, ans in reuse_map.items()
+                                     if qid not in blocked}
+                        reuse_sources = {qid: item for qid, item in reuse_sources.items()
+                                         if qid not in blocked}
+                    task_answers = {**reuse_map, **task_answers}
             # The caller's answers may target *already-answered* questions: a
             # partial multi-select that needs AB, a half-filled blank. Those are
             # real gaps this flow exists to close, and answer_homework handles
@@ -1629,6 +1772,7 @@ class PatrolEngine:
                 "skipped": outcome.get("skipped", 0),
                 "skipped_questions": outcome.get("skipped_questions", []),
                 "errors": outcome.get("errors", []),
+                "reused": len(reuse_sources),
                 "note": outcome.get("note", ""),
             })
             if outcome.get("skipped_questions"):
