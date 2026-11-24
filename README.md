@@ -13,6 +13,45 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.20
+
+A line-by-line code review of 0.8.19 turned up six real defects plus three small
+parsing gaps. The test suite was green and still missed every one of them, so
+each fix ships with its own regression test. Two of the six did not merely
+display wrong — they made a homework unanswerable or submitted a wrong answer,
+and one silently wiped the answer journal.
+
+- **Identifier underscores are not answer boxes.** `Python 中__init__方法的作用是____`
+  was counted as **three** blanks (the `__` of `__init__` included), so every answer
+  was rejected with "填空题有 3 个空，只收到 1 个答案" and the homework stalled.
+  A blank marker must now stand on its own: no letter, digit or underscore next to it.
+- **A comma no longer tears a value in two.** Splitting on newlines is the only
+  primary split; the Chinese / comma separators are a fallback used only when the
+  line split came up short, and only when they yield exactly the expected number
+  of values. `String, Integer` inside one box now stays one value, and an
+  ambiguous answer is reported as a count mismatch instead of being written into
+  the wrong box.
+- **A zero score is a score.** The score lookup used an `or` chain, so `0` fell
+  through and the report printed `-` — a homework graded with zero points looked
+  like it had not been graded yet.
+- **A corrupted answer journal is backed up, not overwritten.** A broken journal
+  used to be replaced by an empty one, losing every recorded answer — the basis of
+  cross-account reuse and of the repair flow. The broken bytes are now copied to
+  `answer_journal.json.corrupt-<timestamp>.bak` first, and the submission result
+  says so.
+- **A broken config file names the file and the line.** A trailing comma no longer
+  raises a bare `JSONDecodeError`; the MCP server refuses to start with
+  "配置文件不是合法 JSON：…（第 3 行第 1 列：…）" and exit code 2 instead of
+  crashing on the first tool call.
+- **A half-filled blank is no longer called a missing option.** The patrol CLI
+  printed every `partial` entry as 「多选漏选」, which mislabels a fill-blank that
+  was not finished. The two kinds are now counted and worded separately
+  (「多选漏选」/「填空漏填」), in the CLI, the patrol report and the two-phase review.
+- **Three small parsing gaps:** full-width option letters (`ＡＣ`) are read as
+  `AC`, `parse_bool("否")` is `False` instead of "unknown", and a page progress of
+  `12 / 32` parses.
+- **Tests.** 575 pass (557 + 18 new regression tests).
+
 ## What's new in 0.8.19
 
 Live use (account 2413041236) showed two blockers that made auto login and every

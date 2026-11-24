@@ -16,7 +16,19 @@ from . import utils
 
 #: Runs of underscores / full-width blanks used as fill-in markers in a stem.
 #: One run == one answer box on the page (e.g. ``____`` or ``＿＿``).
-BLANK_MARKER_RE = re.compile(r"_{2,}|＿{2,}|﹍{2,}|﹎{2,}")
+#:
+#: A marker has to stand on its own: the look-around keeps the underscores of
+#: an identifier out of the count. In 「Python 中__init__方法的作用是____」 the
+#: ``__`` of ``__init__`` belongs to the name, not to an answer box. Counting
+#: it made the question look like it had three blanks, so every answer was
+#: rejected ("填空题有 3 个空，只收到 1 个答案") and the whole homework stalled
+#: on a question that has exactly one box.
+BLANK_MARKER_RE = re.compile(
+    r"(?<![0-9A-Za-z_])_{2,}(?![0-9A-Za-z_])"
+    r"|(?<![0-9A-Za-z_])＿{2,}(?![0-9A-Za-z_])"
+    r"|(?<![0-9A-Za-z_])﹍{2,}(?![0-9A-Za-z_])"
+    r"|(?<![0-9A-Za-z_])﹎{2,}(?![0-9A-Za-z_])"
+)
 
 
 def count_blanks(stem: str) -> int:
@@ -122,6 +134,23 @@ def _as_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first_present(*values: Any) -> Any:
+    """First value that is really there (``0`` counts as present).
+
+    ``a or b`` drops a ``0`` score and keeps looking, so a homework graded
+    with zero points fell through the whole chain and ended up without a
+    score at all — the report then printed "-" and the zero read as "not
+    graded yet".
+    """
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
 
 
 def _is_answered(raw: dict) -> bool:
@@ -351,15 +380,18 @@ class HomeworkTask:
         # in homeworkDTO as userScore, others put it at the top level of the
         # list item, and some use score / totalScore / myScore instead. Try
         # each in order so a graded homework does not show "-" when the score
-        # is actually available under a different key.
-        score = (dto.get("userScore")
-                 or raw.get("userScore")
-                 or dto.get("score")
-                 or raw.get("score")
-                 or dto.get("totalScore")
-                 or raw.get("totalScore")
-                 or dto.get("myScore")
-                 or raw.get("myScore"))
+        # is actually available under a different key. ``0`` is a real score,
+        # so the lookup must not treat it as "missing".
+        score = _first_present(
+            dto.get("userScore"),
+            raw.get("userScore"),
+            dto.get("score"),
+            raw.get("score"),
+            dto.get("totalScore"),
+            raw.get("totalScore"),
+            dto.get("myScore"),
+            raw.get("myScore"),
+        )
         return cls(
             task_id=str(raw.get("id", "")),
             homework_id=str(raw.get("homeworkId", "")),

@@ -1561,14 +1561,12 @@ class PatrolEngine:
                                     f"（题号 {orders}{tail}）"
                                 )
                             if audit_result["partial"]:
-                                porders = "、".join(
-                                    str(m["order"]) for m in audit_result["partial"][:10]
+                                # 多选漏选 and 填空漏填 are different gaps.
+                                partial_detail = report_mod.format_partial_details(
+                                    audit_result["partial"], limit=10
                                 )
-                                ptail = "…" if len(audit_result["partial"]) > 10 else ""
-                                detail_parts.append(
-                                    f"多选漏选 {len(audit_result['partial'])} 题"
-                                    f"（题号 {porders}{ptail}）"
-                                )
+                                if partial_detail:
+                                    detail_parts.append(partial_detail)
                             # The page button and the API answer rows can
                             # disagree: the API reports a blank ``userAnswer``
                             # for questions already filled on the page. When
@@ -2127,11 +2125,11 @@ class PatrolEngine:
                         parts.append(f"漏答 {len(audit_block['missing'])} 题"
                                      f"（题号 {orders}{tail}）")
                     if audit_block.get("partial"):
-                        porders = "、".join(
-                            str(m["order"]) for m in audit_block["partial"][:10])
-                        ptail = "…" if len(audit_block["partial"]) > 10 else ""
-                        parts.append(f"多选漏选 {len(audit_block['partial'])} 题"
-                                     f"（题号 {porders}{ptail}）")
+                        partial_detail = report_mod.format_partial_details(
+                            audit_block["partial"], limit=10
+                        )
+                        if partial_detail:
+                            parts.append(partial_detail)
                     conflicts = result.get("state_conflicts") or []
                     if conflicts:
                         # The interface verdict and the page disagree; say so in
@@ -2182,6 +2180,10 @@ class PatrolEngine:
 def _progress_counts(progress: Optional[str]) -> tuple[Optional[int], Optional[int]]:
     """Explicit unknown counts; ``None`` must never be coerced to zero."""
     answered, separator, total = (progress or "").partition("/")
+    # The page renders "12 / 32" with spaces around the slash; without the
+    # strip the counts did not parse and every progress read came back
+    # unknown.
+    answered, total = answered.strip(), total.strip()
     if not separator or not answered.isdigit() or not total.isdigit():
         return None, None
     return int(answered), int(total)

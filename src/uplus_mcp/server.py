@@ -26,6 +26,7 @@ Or use the installed console script ``uplus-mcp``.
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -33,7 +34,7 @@ from mcp.types import CallToolResult, TextContent
 
 from .browse import BrowseTools
 from .browser import BrowserSession
-from .config import Config, load_config
+from .config import Config, ConfigError, load_config
 from .engine import PatrolEngine
 from .launcher import cdp_alive, launch_browser_with_cdp, first_live_port
 from .operator import HomeworkOperator
@@ -728,6 +729,14 @@ async def browse_act_batch(steps: list[dict], observe: str = "summary") -> dict:
 
 
 def main() -> None:
+    # Fail fast on a broken config file: without this the server started
+    # happily and only blew up on the first tool call, with a raw JSON error
+    # that named neither the file nor the line.
+    try:
+        load_config()
+    except ConfigError as exc:
+        print(f"⚠️ {exc}", file=sys.stderr)
+        raise SystemExit(2)
     mcp.run()
 
 

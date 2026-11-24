@@ -60,6 +60,16 @@ BROWSER_CHOICES = (BROWSER_AUTO, BROWSER_EDGE, BROWSER_CHROME, BROWSER_CHROMIUM)
 DEFAULT_CDP_PORT = 9333
 
 
+class ConfigError(RuntimeError):
+    """The configuration file cannot be used as written.
+
+    Raised instead of a bare ``JSONDecodeError`` so every entry point (CLI,
+    MCP server, library) can report *what* is wrong and *where*: a config
+    file with a trailing comma is a common typo, and the raw traceback
+    pointed at the parser instead of at the file and line.
+    """
+
+
 @dataclass
 class Config:
     base_url: str = "https://www.eduplus.net"
@@ -202,7 +212,24 @@ def load_config(path: Optional[str] = None) -> Config:
 
     data: dict = {}
     if config_file and config_file.exists():
-        data = json.loads(config_file.read_text(encoding="utf-8"))
+        try:
+            raw_text = config_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(
+                f"配置文件读取失败：{config_file}（{exc}）"
+            ) from exc
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(
+                f"配置文件不是合法 JSON：{config_file}"
+                f"（第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}）"
+            ) from exc
+        if not isinstance(data, dict):
+            raise ConfigError(
+                f"配置文件的顶层必须是 JSON 对象：{config_file}"
+                f"（当前为 {type(data).__name__}）"
+            )
 
     # Legacy config files used ``auto_launch_edge``; map it onto the generic
     # ``auto_launch_browser`` flag so old files keep working.

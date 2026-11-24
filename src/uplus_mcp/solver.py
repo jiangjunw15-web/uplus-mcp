@@ -143,6 +143,17 @@ def split_blanks(raw: object, expected: int = 0) -> list[str]:
     used, so a single answer that contains a semicolon is not torn apart.
     With a known count above one the Chinese separators are accepted too.
 
+    The newline split is always the primary one. A value may legitimately
+    contain a comma (a list of type names, an address, a date), and tearing
+    it apart put half a value into one box and the other half into the next
+    one — with the count still lining up, so nothing complained and a wrong
+    answer was submitted. The Chinese / comma separators are therefore only a
+    fallback, used when the newline split did not deliver enough values, and
+    even then only when they deliver *exactly* the expected number: a split
+    that yields more values than there are boxes is ambiguous, so the
+    conservative newline split is kept and the count mismatch is reported
+    instead of writing a wrong box.
+
     The platform's own ``userAnswer`` joins the boxes with a run of ``@``
     (the live record for 「@GetMapping / @PostMapping」 comes back as
     ``@GetMapping@@@@PostMapping``), so that join is accepted as a last resort
@@ -154,6 +165,7 @@ def split_blanks(raw: object, expected: int = 0) -> list[str]:
     if raw is None:
         return []
     text = "" if isinstance(raw, (list, tuple)) else str(raw).strip()
+    loose_allowed = False
     if isinstance(raw, (list, tuple)):
         parts = [str(item) for item in raw]
     elif not text:
@@ -167,18 +179,28 @@ def split_blanks(raw: object, expected: int = 0) -> list[str]:
             parts = [str(item) for item in decoded]
         else:
             parts = [text]
-    elif expected > 1:
+    else:
+        parts = re.split(r"\r?\n", text)
+        loose_allowed = True
+    values = [part.strip() for part in parts if part and part.strip()]
+    if loose_allowed and expected > 1 and len(values) < expected:
         # The brief asks for one value per line, but a model routinely returns
         # them comma-separated instead (``"@GetMapping,@PostMapping"``). Not
         # splitting on the comma left the whole payload as a single value, so
         # ``normalize_answer`` rejected it ("有 2 个空，只收到 1 个答案") and the
         # entire homework stalled on an answer that was actually correct.
-        # Over-splitting is the safe direction: ``_answer_blank`` reports a
-        # count mismatch rather than silently writing a wrong box.
-        parts = re.split(r"\r?\n|；|;|，|,|、|｜|\|", text)
-    else:
-        parts = re.split(r"\r?\n", text)
-    values = [part.strip() for part in parts if part and part.strip()]
+        # The fallback only runs when the line split came up short, and only
+        # its exact-match result is used: a count that lines up may still be
+        # wrong (a value with a comma torn in two), and ``_answer_blank``
+        # cannot detect that. Anything else keeps the line split, so the
+        # count mismatch is reported instead of a wrong box being written.
+        loose = [
+            part.strip()
+            for part in re.split(r"\r?\n|；|;|，|,|、|｜|\|", text)
+            if part and part.strip()
+        ]
+        if len(loose) == expected:
+            values = loose
     if expected > 1 and len(values) < expected and _BLANK_JOIN_RE.search(text):
         # The platform joins several boxes into one string with a run of ``@``
         # (the live record for 「@GetMapping / @PostMapping」 is

@@ -26,6 +26,7 @@ from .config import load_config
 from .engine import PatrolEngine
 from .operator import HomeworkOperator
 from .platform import PlatformClient
+from . import report as report_mod
 
 
 def build_engine(config_path: str = "") -> PatrolEngine:
@@ -34,6 +35,28 @@ def build_engine(config_path: str = "") -> PatrolEngine:
     client = PlatformClient(session, cfg)
     operator = HomeworkOperator(session, client, cfg)
     return PatrolEngine(cfg, session, client, operator)
+
+
+def incomplete_details(item: dict) -> str:
+    """What is missing in one submitted-but-incomplete homework.
+
+    漏答 (no answer at all), 多选漏选 (a multi-select missing options) and
+    填空漏填 (a blank that was not filled) are different gaps, so they are
+    named separately: calling a half-filled blank a 「多选漏选」 points the
+    user at the wrong question type.
+    """
+    parts: list[str] = []
+    missing = item.get("missing") or []
+    if missing:
+        orders = "、".join(str(n["order"]) for n in missing[:10])
+        tail = "…" if len(missing) > 10 else ""
+        parts.append(f"漏答 {len(missing)} 题（题号 {orders}{tail}）")
+    partial = item.get("partial") or []
+    if partial:
+        partial_detail = report_mod.format_partial_details(partial, limit=10)
+        if partial_detail:
+            parts.append(partial_detail)
+    return "；".join(parts) if parts else "存在未完成项"
 
 
 def main() -> int:
@@ -77,20 +100,7 @@ def main() -> int:
         if result.get("incomplete_homeworks"):
             print("\n=== 已提交但不完整 ===")
             for item in result["incomplete_homeworks"]:
-                parts: list[str] = []
-                if item["missing"]:
-                    orders = "、".join(str(n["order"]) for n in item["missing"][:10])
-                    tail = "…" if len(item["missing"]) > 10 else ""
-                    parts.append(f"漏答 {len(item['missing'])} 题（题号 {orders}{tail}）")
-                if item.get("partial"):
-                    porders = "、".join(
-                        str(n["order"]) + (
-                            f"缺{n.get('missing_letters')}" if n.get("missing_letters") else ""
-                        )
-                        for n in item["partial"][:10]
-                    )
-                    ptail = "…" if len(item["partial"]) > 10 else ""
-                    parts.append(f"多选漏选 {len(item['partial'])} 题（题号 {porders}{ptail}）")
+                parts = incomplete_details(item)
                 # ``withdrawable`` is None (not False) when the page state was
                 # never read: "cannot tell" must not be printed as "已出分无法撤回".
                 if item.get("withdrawable"):
@@ -99,7 +109,7 @@ def main() -> int:
                     hint = "，可否撤回需开页确认"
                 else:
                     hint = "，已出分无法撤回"
-                print(f"- [{item['course_name']}] {item['name']}：{'；'.join(parts)}{hint}")
+                print(f"- [{item['course_name']}] {item['name']}：{parts}{hint}")
         audit_summary = result.get("audit_summary") or {}
         if audit_summary.get("checked") and audit_summary.get("unjudged_multiselect"):
             print(f"\n另有 {audit_summary['unjudged_multiselect']} 道多选题因平台尚未公布"

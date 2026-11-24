@@ -1548,13 +1548,17 @@ class HomeworkOperator:
             self.submit_homework(page, task, outcome)
             if outcome["submitted"]:
                 try:
+                    journal_notes: list[str] = []
                     journal.record(
                         self.config, task_id=task.task_id,
                         homework_id=task.homework_id, name=task.name,
-                        answers=submitted_answers,
+                        answers=submitted_answers, notes=journal_notes,
                     )
                 except OSError as exc:
                     outcome["note"] += f"（本地答案记录写入失败：{exc}，不影响提交）"
+                else:
+                    for journal_note in journal_notes:
+                        outcome["note"] += f"（{journal_note}）"
         else:
             reasons = []
             if blocking_skips:

@@ -8,15 +8,24 @@ the repair flow restore those answers after a withdrawal.
 
 The file lives in the report folder (gitignored) and contains only question
 ids and answer strings; it never stores credentials or page data.
+
+A journal that cannot be parsed is never overwritten silently: the broken
+bytes are copied to ``<name>.corrupt-<stamp>.bak`` before the file is
+rewritten, so a corrupted journal can be repaired by hand instead of
+silently losing every recorded answer.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import shutil
+import sys
 import tempfile
 import threading
 from pathlib import Path
+from typing import Optional
 
 from .config import Config
 from . import utils
@@ -47,7 +56,14 @@ def journal_path(config: Config) -> Path:
     return config.report_folder / FILENAME
 
 
-def _load_all(config: Config) -> dict:
+def _read_all(config: Config) -> tuple[dict, Optional[str]]:
+    """Read the journal.
+
+    Returns ``(data, problem)``. ``problem`` is ``None`` for a healthy or
+    missing journal and a short description of what is wrong otherwise. A
+    broken file is never repaired or truncated by a read: the bytes stay on
+    disk until :func:`record` copies them aside.
+    """
     path = journal_path(config)
     key = str(path)
     try:
@@ -56,27 +72,75 @@ def _load_all(config: Config) -> dict:
     except OSError:
         with _lock:
             _cache.pop(key, None)
-        return {}
+        return {}, None
     with _lock:
         hit = _cache.get(key)
         if hit is not None and (hit[0], hit[1]) == stamp:
-            return hit[2]
+            return hit[2], None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, f"读取失败：{exc}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {}, f"不是合法 JSON（第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}）"
     if not isinstance(data, dict):
-        return {}
+        return {}, f"顶层不是 JSON 对象（当前为 {type(data).__name__}）"
     with _lock:
         _cache[key] = (stamp[0], stamp[1], data)
+    return data, None
+
+
+def _load_all(config: Config) -> dict:
+    """The recorded answers, or an empty map when the journal is unusable."""
+    data, _ = _read_all(config)
     return data
 
 
+def _backup_corrupt(path: Path) -> Path:
+    """Copy a broken journal aside so its bytes are never lost.
+
+    The copy happens *before* the journal is rewritten. If it fails the
+    error is raised: overwriting the original then would throw away the
+    recorded answers, which are the basis of the cross-account reuse and of
+    the repair flow.
+    """
+    stamp = datetime.datetime.now(tz=utils.CN_TZ).strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.corrupt-{stamp}.bak")
+    counter = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.corrupt-{stamp}-{counter}.bak")
+        counter += 1
+    shutil.copy2(path, backup)
+    return backup
+
 
 def record(config: Config, *, task_id: str, homework_id: str, name: str,
-           answers: dict[str, str]) -> Path:
-    """Persist the normalized answers of a successful submission."""
-    data = dict(_load_all(config))
+           answers: dict[str, str], notes: Optional[list[str]] = None) -> Path:
+    """Persist the normalized answers of a successful submission.
+
+    A journal that cannot be parsed is not silently overwritten: the broken
+    bytes are copied to ``<name>.corrupt-<stamp>.bak`` first, so the recorded
+    answers can be restored by hand. The new journal then holds the current
+    submission only, and the caller is told about the recovery through
+    ``notes`` (or on stderr when no list is given).
+    """
+    data, problem = _read_all(config)
+    # Work on a copy: the cached snapshot must not change when the write
+    # below fails half-way.
+    data = dict(data)
+    path = journal_path(config)
+    if problem:
+        backup = _backup_corrupt(path)
+        message = (
+            f"答案簿损坏（{problem}），原文件已备份为 {backup.name}；"
+            "本次记录只含当前提交，旧记录请从备份恢复"
+        )
+        if notes is None:
+            print(f"⚠️ {message}", file=sys.stderr)
+        else:
+            notes.append(message)
     data[str(task_id)] = {
         "homework_id": str(homework_id),
         "name": name,
@@ -87,7 +151,6 @@ def record(config: Config, *, task_id: str, homework_id: str, name: str,
             if value is not None and str(value).strip()
         },
     }
-    path = journal_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     fd, tmp_name = tempfile.mkstemp(

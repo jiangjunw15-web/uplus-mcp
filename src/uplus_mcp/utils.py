@@ -19,6 +19,15 @@ CN_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 # can never turn a navigation step into a local-file read.
 ALLOWED_URL_SCHEMES = ("http", "https")
 
+#: Full-width Latin letters (Ａ-Ｚ / ａ-ｚ) folded onto their ASCII form.
+#: A Chinese IME leaves the keyboard in full-width mode by accident, so an
+#: answer can arrive as 「ＡＣ」; the plain letter scan would find nothing in it.
+#: ``str.translate`` looks the ordinals up, so the keys are code points.
+_FULLWIDTH_LETTERS = {
+    **{0xFF21 + i: chr(0x41 + i) for i in range(26)},
+    **{0xFF41 + i: chr(0x61 + i) for i in range(26)},
+}
+
 
 def safe_navigation_url(raw: str, *, base_url: str = "") -> str:
     """Validate a URL before the session navigates to it.
@@ -246,9 +255,9 @@ def parse_bool(value: Any) -> Optional[bool]:
     except (TypeError, ValueError):
         pass
     text = str(value).strip().lower()
-    if text in ("true", "yes", "y", "1", "正确", "对"):
+    if text in ("true", "yes", "y", "1", "正确", "对", "是"):
         return True
-    if text in ("false", "no", "n", "0", "错误", "错"):
+    if text in ("false", "no", "n", "0", "错误", "错", "否"):
         return False
     return None
 
@@ -268,10 +277,15 @@ def normalize_letters(raw: object) -> str:
     non-string scalar for ``userAnswer`` (a number, a list), and calling
     ``.upper()`` on it would raise ``AttributeError`` mid-answer instead of
     degrading to "no letters".
+
+    Full-width Latin letters are folded to their ASCII form first: a model
+    that answered 「ＡＣ」 (the IME's full-width Latin) meant "AC", but the
+    plain letter scan found nothing and the answer was rejected as empty.
     """
     if raw is None:
         return ""
-    letters = re.findall(r"[A-Za-z]", str(raw).upper())
+    text = str(raw).upper().translate(_FULLWIDTH_LETTERS)
+    letters = re.findall(r"[A-Za-z]", text)
     return "".join(sorted(set(letters)))
 
 
@@ -283,9 +297,9 @@ def normalize_bool(raw: Optional[str]) -> Optional[bool]:
     if raw is None:
         return None
     text = str(raw).strip().lower()
-    if text in ("true", "1", "yes", "y", "正确", "对", "√", "t"):
+    if text in ("true", "1", "yes", "y", "正确", "对", "√", "t", "是"):
         return True
-    if text in ("false", "0", "no", "n", "错误", "错", "×", "f"):
+    if text in ("false", "0", "no", "n", "错误", "错", "×", "f", "否"):
         return False
     return None
 

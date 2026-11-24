@@ -198,7 +198,8 @@ def test_partial_section_renders_orders_and_omitted_letters():
         "withdrawable": False,
     })
     md = render_markdown(snap)
-    assert "| 操作系统 | 第三章作业 | 0 | 1 | 漏选 4（缺CD） | 已出分不可撤回 |" in md
+    # The cell names the kind of gap: a multi-select that misses options.
+    assert "| 操作系统 | 第三章作业 | 0 | 1 | 多选漏选 1 题（题号 4（缺CD）） | 已出分不可撤回 |" in md
 
 
 def test_unjudged_multiselects_render_a_note():

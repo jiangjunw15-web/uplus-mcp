@@ -140,6 +140,43 @@ def _normalized(question: Question, raw: Optional[str]) -> Optional[str]:
         return None
 
 
+def _is_blank_gap(hit: dict) -> bool:
+    """True when a ``partial`` entry is a half-filled blank, not a 漏选."""
+    if hit.get("type") == QuestionType.FILL_BLANK.label:
+        return True
+    return "missing_blanks" in hit and not hit.get("missing_letters")
+
+
+def format_partial_details(partial: list[dict], limit: int = 10) -> str:
+    """Describe the partial items of one homework, split by kind.
+
+    ``partial`` carries two different gaps: a multi-select that is missing
+    options (``missing_letters``) and a fill-blank whose boxes are not all
+    filled (``missing_blanks``). Printing them all as 「多选漏选」 mislabels a
+    half-filled blank, so the two kinds are counted and listed separately.
+    """
+    multi = [hit for hit in partial if not _is_blank_gap(hit)]
+    blanks = [hit for hit in partial if _is_blank_gap(hit)]
+    parts: list[str] = []
+    if multi:
+        orders = "、".join(
+            f"{hit.get('order')}"
+            + (f"（缺{hit.get('missing_letters')}）" if hit.get("missing_letters") else "")
+            for hit in multi[:limit]
+        )
+        tail = "…" if len(multi) > limit else ""
+        parts.append(f"多选漏选 {len(multi)} 题（题号 {orders}{tail}）")
+    if blanks:
+        orders = "、".join(
+            f"{hit.get('order')}"
+            + (f"（缺{hit.get('missing_blanks')}空）" if hit.get("missing_blanks") else "")
+            for hit in blanks[:limit]
+        )
+        tail = "…" if len(blanks) > limit else ""
+        parts.append(f"填空漏填 {len(blanks)} 题（题号 {orders}{tail}）")
+    return "；".join(parts)
+
+
 def audit_questions(questions: list[Question],
                     expected_answers: Optional[dict[str, str]] = None) -> dict:
     """Read-only completeness check over one homework's questions.
@@ -425,23 +462,20 @@ def render_markdown(report: PatrolReport, *, warning_hours: int = 72) -> str:
         lines.append("## 提交完整性核查")
         lines.append("")
         if report.incomplete:
-            lines.append("| 课程 | 作业 | 漏答 | 多选漏选 | 题号 | 可否撤回 |")
+            lines.append("| 课程 | 作业 | 漏答 | 不完整 | 题号 | 可否撤回 |")
             lines.append("| --- | --- | --- | --- | --- | --- |")
             for item in report.incomplete:
                 orders = "、".join(str(n) for n in item.get("missing_orders", [])[:12])
                 if len(item.get("missing_orders", [])) > 12:
                     orders += "…"
-                partial_parts: list[str] = []
-                for hit in item.get("partial", [])[:12]:
-                    miss = hit.get("missing_letters")
-                    partial_parts.append(
-                        f"{hit.get('order')}" + (f"（缺{miss}）" if miss else "")
-                    )
-                if len(item.get("partial", [])) > 12:
-                    partial_parts.append("…")
-                if partial_parts:
+                # 多选漏选 and 填空漏填 are different gaps; listing both as
+                # 「漏选」 hid the half-filled blanks.
+                partial_detail = format_partial_details(
+                    item.get("partial", []), limit=12
+                )
+                if partial_detail:
                     orders = "；".join(
-                        part for part in (orders, "漏选 " + "、".join(partial_parts)) if part
+                        part for part in (orders, partial_detail) if part
                     )
                 # None (page state never read) means "unknown", not "cannot".
                 if item.get("withdrawable"):
@@ -570,14 +604,11 @@ def render_finish_review_markdown(*, generated_at_ms: int, finish: list[dict],
     if not review:
         lines.append("（本次没有读到任何作业）")
     else:
-        lines.append("| 课程 | 作业 | 状态 | 完整 | 漏答 | 多选漏选 | 截图 |")
+        lines.append("| 课程 | 作业 | 状态 | 完整 | 漏答 | 不完整 | 截图 |")
         lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for r in review:
             missing = "、".join(str(m.get("order")) for m in r.get("missing", [])[:12])
-            partial = "、".join(
-                f"{p.get('order')}" + (f"（缺{p.get('missing_letters')}）" if p.get("missing_letters") else "")
-                for p in r.get("partial", [])[:12]
-            )
+            partial = format_partial_details(r.get("partial", []), limit=12)
             if len(r.get("missing", [])) > 12:
                 missing += "…"
             if len(r.get("partial", [])) > 12:
