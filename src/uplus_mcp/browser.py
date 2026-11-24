@@ -132,6 +132,18 @@ class BrowserSession:
         except Exception:  # noqa: BLE001 - detached / mid-navigation
             return False
 
+    @staticmethod
+    def _token_value(page: Page) -> str:
+        """Read the token when available; tolerate a boolean probe test double."""
+        try:
+            value = page.evaluate(
+                "() => localStorage.getItem('AccessToken') || ''")
+            # Legacy page doubles return bool from this probe. Preserve the
+            # presence signal, but never expose a token value in tool results.
+            return "present" if isinstance(value, bool) and value else str(value or "")
+        except Exception:  # noqa: BLE001 - detached / mid-navigation
+            return ""
+
     @property
     def page(self) -> Page:
         if not self._started:
@@ -266,8 +278,20 @@ class BrowserSession:
         # probe is re-armed whenever the tab is moved off the platform origin.
         if not getattr(self, "_token_probed", False):
             if not self._token_present(page):
-                self.open("/workbench/index/school")
-                page = self.page
+                # The SPA writes the token after navigation. Give that write a
+                # bounded chance before concluding the session is logged out.
+                deadline = time.monotonic() + 4.0
+                while time.monotonic() < deadline:
+                    time.sleep(0.15)
+                    page = self.page
+                    if self._token_present(page):
+                        break
+                if not self._token_present(page):
+                    self.open(WORKBENCH_PATH)
+                    page = self.page
+            # The page-side fetch performs the definitive token/401 check.
+            # Cache the completed probe even when the local value is blank so
+            # steady-state API reads keep their one-round-trip cost.
             self._token_probed = True
         return page
 
@@ -520,24 +544,160 @@ class BrowserSession:
     # ------------------------------------------------------------------ #
     # login health check
     # ------------------------------------------------------------------ #
-    def is_logged_in(self) -> bool:
+    def _session_status(self, page: Page) -> dict[str, Any]:
+        """One token/URL snapshot; never persists or echoes the token value."""
         try:
-            self.open("/workbench/index/school")
-            if "login" in self.page.url.lower():
-                return False
-            # The SPA hydration order can leave an empty body on first navigation;
-            # a non-empty AccessToken proves the session before we inspect text.
-            if self._token_present(self.page):
-                return True
-            content = self.page.inner_text("body")
-            # A signed-in workbench renders course cards and the user name block.
-            return "课程" in content and ("工作台" in content)
+            url = page.url
+            token = self._token_value(page)
+            logged_in = bool(token) and "login" not in url.lower()
+            if logged_in and token == "present":
+                # Boolean probe doubles retain the old one-time probe contract.
+                self._token_probed = True
+            return {
+                "logged_in": logged_in,
+                "token_len": len(token), "url": url, "title": page.title(),
+            }
+        except Exception:  # noqa: BLE001 - SPA redirect / detached frame
+            return {"logged_in": False, "token_len": 0,
+                    "url": getattr(page, "url", ""), "title": ""}
+
+    def is_logged_in(self, *, timeout_ms: int = 8000) -> bool:
+        """Wait for a just-finished SPA login instead of judging its first URL.
+
+        Login writes ``AccessToken`` before the redirect has always completed.
+        A single workbench navigation can cancel that redirect and race the
+        subsequent token read, producing a false "logged out" immediately after
+        ``login(stage=done)``. This bounded wait checks token + URL together;
+        only a genuine login page triggers one workbench navigation retry.
+        """
+        deadline = time.monotonic() + max(timeout_ms, 0) / 1000
+        bounced = False
+        try:
+            page = self.page
+            if "login" not in page.url.lower():
+                self.open(WORKBENCH_PATH)
+            while True:
+                page = self.page
+                status = self._session_status(page)
+                if status["logged_in"]:
+                    try:
+                        # A rendered workbench shell is not proof of a session.
+                        # Validate the token/cookie against a protected read too.
+                        self.api_get(
+                            "/api/course/athena/courses/study?types=Theory%2CTrain",
+                            retries=0,
+                        )
+                    except AuthExpiredError:
+                        return False
+                    self._token_probed = True
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                if "login" in page.url.lower() and not bounced:
+                    self.open(WORKBENCH_PATH)
+                    bounced = True
+                time.sleep(0.2)
         except AuthExpiredError:
             return False
         except UplusError:
             raise  # surface attach failures with the help text
-        except Exception:
+        except Exception:  # page closed or permanently mid-navigation
             return False
+
+    # ------------------------------------------------------------------ #
+    # sign-out: use the platform's own action, never fabricate a local logout
+    # ------------------------------------------------------------------ #
+    def logout(self, *, timeout_ms: int = 15_000) -> dict[str, Any]:
+        """Click the current profile's 退出登录 and verify the session ends.
+
+        Only this attached profile is acted on. Cookies are never selectively
+        edited or deleted, so signing out one U+ profile cannot destroy an
+        unrelated browser profile's login. Failure is explicit; localStorage
+        removal alone is never called "logged out".
+        """
+        self.open(WORKBENCH_PATH)
+        page = self.page
+        initial = self._session_status(page)
+        if not initial["logged_in"] and not self._token_present(page):
+            try:
+                self.api_get(
+                    "/api/course/athena/courses/study?types=Theory%2CTrain",
+                    retries=0,
+                )
+            except AuthExpiredError:
+                self._token_probed = False
+                return {"logged_out": True, "method": "already_logged_out",
+                        "message": "当前 profile 没有有效 U+ 登录态，无需退出",
+                        "url": utils.redact_secrets(initial["url"])}
+            # Cookies may still hold a valid session without localStorage;
+            # continue through the real platform sign-out instead of guessing.
+        clicked = None
+        try:
+            clicked = page.evaluate(r"""
+        () => {
+          const seen = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+          const controls = [...document.querySelectorAll(
+            'button, a, [role="button"], .el-dropdown, .user-name, .user-info, .avatar'
+          )].filter(seen);
+          const exact = (el, text) => (el.innerText || el.textContent || '').trim() === text;
+          for (const el of controls) {
+            if (exact(el, '退出登录') || exact(el, '退出') || exact(el, '注销')) {
+              el.click(); return {action: 'logout'};
+            }
+          }
+          for (const el of controls) {
+            const text = (el.innerText || el.getAttribute('aria-label') || '').trim();
+            if (el.matches('.el-dropdown, .user-name, .user-info, .avatar') ||
+                /个人中心|用户|我的/.test(text)) {
+              el.click(); return {action: 'profile_menu'};
+            }
+          }
+          return {action: 'none'};
+        }
+        """)
+        except Exception:  # noqa: BLE001 - report a failed sign-out below
+            clicked = None
+        if isinstance(clicked, dict) and clicked.get("action") == "profile_menu":
+            time.sleep(0.3)
+            try:
+                logout = page.locator("text=/^\\s*(退出登录|退出|注销)\\s*$/").last
+                if logout.count() and logout.is_visible():
+                    logout.click(timeout=5000)
+            except Exception:  # noqa: BLE001 - keep the failure receipt explicit
+                pass
+        if not isinstance(clicked, dict) or clicked.get("action") == "none":
+            return {"logged_out": False,
+                    "message": "未找到平台「退出登录」入口，未删除本地令牌；请手动退出",
+                    "url": utils.redact_secrets(page.url)}
+        # Element Plus confirmation is part of the real sign-out flow.
+        try:
+            confirm = page.locator(".el-message-box__btns .el-button--primary")
+            if confirm.count() and confirm.is_visible():
+                confirm.first.click(timeout=5000)
+        except Exception:  # noqa: BLE001 - no confirmation on some layouts
+            pass
+        deadline = time.monotonic() + max(timeout_ms, 0) / 1000
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            status = self._session_status(page)
+            if "login" in status["url"].lower() and not self._token_present(page):
+                # The protected request proves cookies did not preserve a
+                # still-valid session behind a redirect-only sign-out.
+                try:
+                    self.api_get(
+                        "/api/course/athena/courses/study?types=Theory%2CTrain",
+                        retries=0,
+                    )
+                except AuthExpiredError:
+                    self._token_probed = False
+                    return {"logged_out": True, "method": "platform_ui",
+                            "message": "已退出当前浏览器 profile 的 U+ 账号", "url": status["url"]}
+                return {"logged_out": False,
+                        "message": "平台退出后受保护接口仍可读，未报告退出成功；请手动核对",
+                        "url": utils.redact_secrets(status["url"])}
+        return {"logged_out": False,
+                "message": "未能确认平台退出登录；本地令牌没有被单独删除，请手动点击「退出登录」",
+                "url": utils.redact_secrets(page.url)}
 
     # ------------------------------------------------------------------ #
     # sign-in: manual takeover or assisted auto fill
@@ -675,24 +835,18 @@ class BrowserSession:
         The password and account are never echoed back here; only token length,
         URL and title are reported.
         """
-        deadline = time.time() + timeout_ms / 1000
+        deadline = time.monotonic() + max(timeout_ms, 0) / 1000
         status: dict[str, Any] = {"logged_in": False, "token_len": 0, "url": "", "title": ""}
-        while time.time() < deadline:
-            page = self.page
-            try:
-                url = page.url
-                token = str(page.evaluate("() => localStorage.getItem('AccessToken') || ''") or "")
-                status = {
-                    "logged_in": bool(token) and "login" not in url.lower(),
-                    "token_len": len(token),
-                    "url": url,
-                    "title": page.title(),
-                }
-                if status["logged_in"]:
-                    return status
-            except Exception:  # noqa: BLE001 - detached frame / mid-navigation
-                pass
-            time.sleep(1.0)
+        while time.monotonic() <= deadline:
+            status = self._session_status(self.page)
+            if status["logged_in"]:
+                # A successful login is the fresh session boundary: the next
+                # API read must not bounce back to the previous login tab.
+                self._token_probed = True
+                return status
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
         return status
 
     def open_login_page(self) -> Page:

@@ -326,6 +326,29 @@ _MARK_QUESTION_GENERIC_JS = r"""
 """
 
 
+def extract_page_progress(text: str) -> Optional[str]:
+    """Read an explicit answered/total pair from the answer-card text.
+
+    Different course packs render the card as ``答题卡(n/N)``, ``答题卡：n/N``
+    or ``已作答：n/N``. A missing pair means *unavailable*, never zero answered.
+    Only recognised answer/progress labels are accepted, so ordinary course
+    text containing two unrelated numbers cannot manufacture a completion claim.
+    """
+    patterns = (
+        r"答题卡\s*[\(（:：]?\s*(\d+)\s*/\s*(\d+)\s*[\)）]?",
+        r"答题进度\s*[\(（:：]?\s*(\d+)\s*/\s*(\d+)\s*[\)）]?",
+        r"已作答\s*[\(（:：]\s*(\d+)\s*/\s*(\d+)\s*[\)）]?",
+        r"已完成\s*(\d+)\s*题\s*[,，、]?\s*共\s*(\d+)\s*题",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text or "")
+        if match:
+            answered, total = (int(value) for value in match.groups())
+            if total > 0 and answered <= total:
+                return f"{answered}/{total}"
+    return None
+
+
 def classify_page_state(text: str) -> Optional[HomeworkStatus]:
     """Map answer-page body text to a submission state.
 
@@ -436,16 +459,42 @@ class HomeworkOperator:
 
     def read_page_state(self, page: Page) -> tuple[Optional[HomeworkStatus], Optional[str]]:
         text = self._await_page_state(page)
-        progress = None
-        m = re.search(r"答题卡\s*\((\d+\s*/\s*\d+)\)", text)
-        if m:
-            progress = m.group(1).replace(" ", "")
-            # A 0/0 progress means the answer card did not load the question
-            # count — the progress is not usable. Report None instead of a
-            # misleading "0/0" that the audit would treat as "nothing filled".
-            num, _, den = progress.partition("/")
-            if num == "0" and den == "0":
-                progress = None
+        progress = extract_page_progress(text)
+        if progress is None:
+            # Some layouts render the counters as separate nodes / aria values,
+            # so body text never contains the n/N pair. Read only explicit
+            # progress-card values; absent counters remain None, not 0/N.
+            try:
+                counters = page.evaluate(r"""
+                () => {
+                  const labels = ['答题卡', '答题进度', '已作答', '已完成'];
+                  const roots = [...document.querySelectorAll('[class*="answer"], [class*="progress"], [aria-label]')]
+                    .filter(el => labels.some(label => (el.innerText || el.getAttribute('aria-label') || '').includes(label)));
+                  const source = roots.length ? roots : [document.body];
+                  const getAttribute = (el, name) => el.getAttribute(name);
+                  for (const root of source) {
+                    const text = root.getAttribute('aria-label') || root.innerText || '';
+                    const m = text.match(/(\d+)\s*\/\s*(\d+)/);
+                    if (m) return {answered: Number(m[1]), total: Number(m[2])};
+                    const answered = root.getAttribute('data-answered') || root.getAttribute('data-finished');
+                    const total = root.getAttribute('data-total') || root.getAttribute('aria-valuemax');
+                    if (answered !== null && total !== null) {
+                      return {answered: Number(answered), total: Number(total)};
+                    }
+                  }
+                  return null;
+                }
+                """)
+            except Exception:  # noqa: BLE001 - progress is supplementary
+                counters = None
+            if isinstance(counters, dict):
+                try:
+                    answered = int(counters["answered"])
+                    total = int(counters["total"])
+                    if 0 <= answered <= total and total > 0:
+                        progress = f"{answered}/{total}"
+                except (KeyError, TypeError, ValueError):
+                    pass
         return classify_page_state(text), progress
 
     def read_page_score(self, page: Page) -> Optional[float]:

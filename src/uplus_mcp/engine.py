@@ -7,6 +7,7 @@ tools in ``server.py`` are thin wrappers around an ``PatrolEngine`` instance.
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from . import report as report_mod
 from .browser import BrowserSession, AuthExpiredError, UplusError
@@ -120,8 +121,11 @@ class PatrolEngine:
         # page read overwrites ``task.status``; fall back to the current
         # status when no page read has happened yet.
         api_status_value = task.raw.get("_api_status_value") or task.status.value
-        page_says_submitted = task.page_status in (
-            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        page_says_submitted = (
+            None if task.page_status is None
+            else task.page_status in (
+                HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        )
         api_says_submitted = api_status_value in (
             HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
         state_conflicts: list[str] = []
@@ -145,6 +149,11 @@ class PatrolEngine:
             "question_count": task.question_count,
             "score": task.score,
             "progress": task.page_progress,
+            "progress_status": "available" if task.page_progress else "unavailable",
+            "answered_count": _progress_counts(task.page_progress)[0],
+            "question_total_on_page": _progress_counts(task.page_progress)[1],
+            "progress_note": ("" if task.page_progress else
+                              "页面未提供可识别的答题计数；这不是未作答或0题，提交状态以按钮为准"),
             "page_error": task.raw.get("page_error", ""),
             "api_says_submitted": api_says_submitted,
             "page_says_submitted": page_says_submitted,
@@ -172,7 +181,21 @@ class PatrolEngine:
             logged = False
         return {"logged_in": logged, "base_url": self.config.base_url,
                 "message": "登录有效" if logged else
-                "登录态已过期：请在插件启动的浏览器窗口中打开 eduplus.net 重新登录，然后重试本工具。"}
+                "等待后仍未检测到有效登录态：请在当前浏览器 profile 中重新登录，然后重试。"}
+
+    def logout(self, *, confirm: bool = False) -> dict:
+        """Sign out only the attached profile after an explicit confirmation."""
+        if not confirm:
+            return {"logged_out": False, "confirmation_required": True,
+                    "message": "退出当前 U+ 账号需明确确认；确认后以 confirm=true 重新调用。"}
+        result = self.session.logout()
+        if result.get("logged_out"):
+            self._task_index.clear()
+            self._course_names.clear()
+            invalidate = getattr(self.client, "invalidate_courses", None)
+            if callable(invalidate):
+                invalidate()
+        return result
 
     def login(self, owner: str = "", method: str = "", username: str = "",
               password: str = "", school: str = "",
@@ -289,9 +312,7 @@ class PatrolEngine:
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
                 self._register(task)
-                if (refresh_page_state
-                        and task.status is HomeworkStatus.NOT_SUBMITTED
-                        and not task.is_expired()):
+                if refresh_page_state:
                     error = self._read_task_page_state(task)
                     if error:
                         task.raw["page_error"] = error
@@ -360,12 +381,10 @@ class PatrolEngine:
                     verify_experiments: bool = False) -> dict:
         """Read one course end-to-end: all homeworks first, then experiments.
 
-        This is the efficient course-by-course retrieval path. For the named
-        course it calls the homework feed once, opens each *unsubmitted*
-        homework's answer page once (only when ``refresh_page_state``), then
-        opens the experiment list page once. No other course is touched, so the
-        browser never jumps between courses; call it for the next course only
-        after this one has been read.
+        This is the course-by-course retrieval path. For the named course it
+        calls the homework feed once; when ``refresh_page_state`` is on, every
+        answer page is read once to reconcile page truth with the API flag.
+        No other course is touched, so the browser never jumps between courses.
 
         ``verify_experiments=True`` additionally opens every experiment detail
         page to confirm its submitted state; the default ``False`` keeps the
@@ -379,9 +398,7 @@ class PatrolEngine:
         homeworks: list[dict] = []
         for task in tasks:
             self._register(task)
-            if (refresh_page_state
-                    and task.status is HomeworkStatus.NOT_SUBMITTED
-                    and not task.is_expired()):
+            if refresh_page_state:
                 error = self._read_task_page_state(task)
                 if error:
                     task.raw["page_error"] = error
@@ -723,17 +740,22 @@ class PatrolEngine:
         api_says_submitted = api_status in (
             HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
         page_read_failed = page_state_note.startswith("页面状态读取失败")
-        page_says_submitted = final_status in (
-            HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        page_says_submitted = (
+            None if page_read_failed or not refresh_page_state
+            else final_status in (
+                HomeworkStatus.SUBMITTED_PENDING, HomeworkStatus.SUBMITTED_GRADED)
+        )
         conflicts: list[str] = []
-        if not page_read_failed and api_says_submitted != page_says_submitted:
+        if (not page_read_failed and refresh_page_state
+                and api_says_submitted != page_says_submitted):
             if page_says_submitted:
                 conflicts.append(
                     "接口显示未提交、页面已显示提交（页面按钮更权威）")
             else:
                 conflicts.append(
                     "接口显示已提交、页面仍可作答（页面按钮更权威）")
-        if audit_result["missing"] and page_says_submitted and not page_read_failed:
+        if (audit_result["missing"] and page_says_submitted
+                and not page_read_failed and refresh_page_state):
             conflicts.append(
                 f"接口记录 {audit_result['missing_count']} 道客观题为空，但页面已提交；"
                 "平台答案行可能滞后，请以作答页实际内容为准")
@@ -750,6 +772,11 @@ class PatrolEngine:
             "page_state_note": page_state_note,
             "deadline": utils.deadline_label(task.end_ms),
             "progress": task.page_progress,
+            "progress_status": "available" if task.page_progress else "unavailable",
+            "answered_count": _progress_counts(task.page_progress)[0],
+            "question_total_on_page": _progress_counts(task.page_progress)[1],
+            "progress_note": ("" if task.page_progress else
+                              "答题计数不可用，不等于未作答；提交状态以页面按钮为准"),
             "score": task.score,
             # ``withdrawable`` follows the page's real button state. When the
             # page was not read (``refresh_page_state=False`` or the read
@@ -757,9 +784,10 @@ class PatrolEngine:
             # flag alone is unreliable (the API keeps ``submitTask=0`` for work
             # already handed in), and reporting False would tell the caller
             # "cannot withdraw" when the truth is "cannot tell".
-            "withdrawable": (None if page_read_failed else
+            "withdrawable": (None if page_read_failed or not refresh_page_state else
                              final_status is HomeworkStatus.SUBMITTED_PENDING),
-            "withdrawable_source": ("unknown" if page_read_failed else "page"),
+            "withdrawable_source": (
+                "unknown" if page_read_failed or not refresh_page_state else "page"),
             "journal_answers": len(expected),
             "api_says_submitted": api_says_submitted,
             "page_says_submitted": page_says_submitted,
@@ -1142,39 +1170,14 @@ class PatrolEngine:
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
                 self._register(task)
-                # The page button is the authoritative status. Read it for
-                # open homeworks as before, and for audited submitted ones so
-                # a graded homework is not misreported as withdrawable.
-                should_read_page = (
-                    (task.status is HomeworkStatus.NOT_SUBMITTED
-                     and not task.is_expired())
-                    or (audit and task.status in (
-                        HomeworkStatus.SUBMITTED_PENDING,
-                        HomeworkStatus.SUBMITTED_GRADED,
-                    ))
-                )
-                if should_read_page:
-                    try:
-                        page = self.operator.open_homework(task)
-                        status, progress = self.operator.read_page_state(page)
-                        if status is not None:
-                            task.page_status = status
-                        if progress is not None:
-                            task.page_progress = progress
-                        # Read the score from the graded page when the API
-                        # omitted it, so the report shows the real score.
-                        if (status is HomeworkStatus.SUBMITTED_GRADED
-                                and task.score is None):
-                            page_score = self.operator.read_page_score(page)
-                            if page_score is not None:
-                                task.score = page_score
-                    except AuthExpiredError:
-                        raise
-                    except Exception as exc:
-                        snapshot.takeover.append({
-                            "course": course.name, "title": task.name,
-                            "detail": f"页面状态读取失败：{exc}",
-                        })
+                # Reconcile every row, including expired homeworks: expired
+                # only disables writes, not the read-only page status check.
+                error = self._read_task_page_state(task)
+                if error:
+                    snapshot.takeover.append({
+                        "course": course.name, "title": task.name,
+                        "detail": f"页面状态读取失败：{error}",
+                    })
                 report_mod.add_homework(snapshot, course, task)
 
                 if audit and task.status in (
@@ -1217,9 +1220,6 @@ class PatrolEngine:
                                     f"多选漏选 {len(audit_result['partial'])} 题"
                                     f"（题号 {porders}{ptail}）"
                                 )
-                            hint = ("，可撤回后补齐再提交"
-                                    if task.status is HomeworkStatus.SUBMITTED_PENDING
-                                    else "，已出分无法撤回")
                             # The page button and the API answer rows can
                             # disagree: the API reports a blank ``userAnswer``
                             # for questions already filled on the page. When
@@ -1447,7 +1447,15 @@ class PatrolEngine:
                 self._register(task)
                 if (task.status is HomeworkStatus.NOT_SUBMITTED
                         and not task.is_expired()):
-                    out.append((course, task))
+                    # The REST flag under-reports handed-in work. Never start
+                    # the finish phase from that flag alone: read the real
+                    # button before deciding whether an answer is necessary.
+                    error = self._read_task_page_state(task)
+                    if error:
+                        task.raw["page_error"] = error
+                        continue
+                    if task.status is HomeworkStatus.NOT_SUBMITTED:
+                        out.append((course, task))
         return out
 
     def finish_then_review(self, answers: dict[str, dict[str, str]] | None = None,
@@ -1489,12 +1497,9 @@ class PatrolEngine:
         for course, task in self._collect_outstanding(courses=courses):
             task_answers = supplied.get(task.task_id, {})
             try:
-                # API-only read (no page open): the finish phase only needs to
-                # know which questions are blank and which the caller's answers
-                # target. ``inspect_homework`` opens the answer page for the
-                # real button state, which is only meaningful once the fill has
-                # happened — opening it here would be a wasted full page load
-                # (answer_homework and the phase-2 audit open it anyway).
+                # ``_collect_outstanding`` has already read the page button.
+                # Only after that reconciliation do we read question details;
+                # a merely API-unsubmitted row must never trigger an answer.
                 questions = self._homework_question_details(task)
             except AuthExpiredError:
                 raise
@@ -1786,6 +1791,14 @@ class PatrolEngine:
                 "查看未填写空位后补答，再走 uplus_repair_homework。"
             ),
         }
+
+
+def _progress_counts(progress: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    """Explicit unknown counts; ``None`` must never be coerced to zero."""
+    answered, separator, total = (progress or "").partition("/")
+    if not separator or not answered.isdigit() or not total.isdigit():
+        return None, None
+    return int(answered), int(total)
 
 
 # --------------------------------------------------------------------------- #

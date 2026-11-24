@@ -141,6 +141,18 @@ async def uplus_login(
 
 
 @mcp.tool()
+async def uplus_logout(confirm: bool = False) -> dict:
+    """Sign out the attached browser profile after explicit confirmation.
+
+    Call with ``confirm=True`` only when the user has asked to end the current
+    U+ session. Uses the platform's own sign-out action and verifies the result;
+    it does not silently discard a local token or close other browser profiles.
+    Use independent profiles and CDP ports for separate accounts.
+    """
+    return await _thread.run_async(_dispatch("logout", confirm=confirm))
+
+
+@mcp.tool()
 async def uplus_list_courses() -> list[dict]:
     """List every course attached to the signed-in account."""
     return await _thread.run_async(_dispatch("list_courses"))
@@ -156,9 +168,11 @@ async def uplus_list_homeworks(course_id: str = "", refresh_page_state: bool = F
     per-course read (homeworks then experiments) use ``uplus_scan_course``
     instead of mixing this tool with the experiment tools.
 
-    ``refresh_page_state=True`` opens each *unsubmitted* answer page once to read
-    the real submit button, because the REST status can lag behind the page.
-    """
+    ``refresh_page_state=True`` opens every answer page, including expired and
+    API-submitted rows, to reconcile the real button with the REST flag. The
+    page is read-only; expiry still prevents all answer/submit operations.
+    ``progress=None`` means the counter is unavailable, never "unanswered".
+"""
     return await _thread.run_async(
         _dispatch("list_homeworks", course_id, refresh_page_state=refresh_page_state)
     )
@@ -190,9 +204,9 @@ async def uplus_scan_course(
     stays on the current course and does not jump between courses; homeworks are
     sorted by due date/title and experiments by 实验一/二/… order.
 
-    ``refresh_page_state`` (default True) opens each *unsubmitted* homework's
-    answer page once for the real submit-button state. ``verify_experiments``
-    (default False) keeps the fast list badge for experiments; set it True to
+    ``refresh_page_state`` (default True) reads every homework's answer button
+    and reconciles it with the API, including API-submitted and expired rows.
+    ``verify_experiments``(default False) keeps the fast list badge for experiments; set it True to
     open every experiment detail page and confirm its submitted state.
     """
     return await _thread.run_async(

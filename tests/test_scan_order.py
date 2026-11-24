@@ -16,7 +16,7 @@ from uplus_mcp.engine import (
     PatrolEngine,
     experiment_number,
 )
-from uplus_mcp.models import Course, Experiment, HomeworkTask
+from uplus_mcp.models import Course, Experiment, HomeworkStatus, HomeworkTask
 
 
 def _task(task_id: str, name: str, end_ms, submit_task=None) -> HomeworkTask:
@@ -141,9 +141,9 @@ def test_scan_course_reads_one_course_homeworks_then_experiments(tmp_path):
         "submitted", "early", "late"]
     assert [row["name"] for row in result["experiments"]] == [
         "实验一 进程", "实验二 调度", "实验十 动态规划"]
-    # Only the unsubmitted homework pages are opened, in sorted order.
+    # Page/API reconciliation reads every row, including an API-submitted row.
     assert [call.args[0].task_id for call in operator.open_homework.call_args_list] == [
-        "early", "late"]
+        "submitted", "early", "late"]
     client.list_homeworks.assert_called_once_with("c1")
     operator.read_experiments.assert_called_once()
     # No experiment detail pages are opened in the fast path.
@@ -172,20 +172,21 @@ class _ExpOp:
         return _Detail()
 
 
-def test_scan_course_skips_expired_homework_pages(tmp_path):
-    """An expired homework cannot be answered; opening its page only costs a
-    navigation. The API row is still returned for the report."""
+def test_scan_course_reads_expired_page_without_enabling_writes(tmp_path):
+    """Expiry disables answer/submit, not the read-only status reconciliation.
+    A late API flag must not turn a submitted expired task into an outstanding one."""
     engine, client, operator = _scan_engine(tmp_path)
     client.list_homeworks.return_value = [
         _task("expired", "已截止作业", 1000),
         _task("open", "未截止作业", 4102444800000),
     ]
 
+    operator.read_page_state.return_value = (HomeworkStatus.SUBMITTED_PENDING, None)
     result = engine.scan_course("c1", refresh_page_state=True)
 
     assert [call.args[0].task_id for call in operator.open_homework.call_args_list] == [
-        "open"]
-    assert result["summary"]["homework_outstanding"] == 2
+        "expired", "open"]
+    assert result["summary"]["homework_outstanding"] == 0
 
 
 def test_scan_course_can_verify_experiment_details_in_the_same_pass(tmp_path):
@@ -213,5 +214,5 @@ def test_patrol_writes_homeworks_and_experiments_in_course_major_order(tmp_path)
     assert report.index("实验一 进程") < report.index("实验二 调度")
     assert report.index("实验二 调度") < report.index("实验十 动态规划")
     assert [call.args[0].task_id for call in operator.open_homework.call_args_list] == [
-        "early", "late"]
+        "submitted", "early", "late"]
     client.list_homeworks.assert_called_once_with("c1")

@@ -13,6 +13,38 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.16
+
+Fixes the live-read cases where the API said "not submitted" while the answer
+page already offered **撤回作业**, plus the login check that raced the SPA's
+token write and redirect.
+
+- **Page truth now reaches every read path.** With `refresh_page_state=True`,
+  `uplus_list_homeworks` and `uplus_scan_course` reconcile every row, not just
+  API-unsubmitted/non-expired ones. `uplus_patrol` does the same, and
+  `uplus_finish_then_review` refreshes the button before phase 1, so a
+  submitted assignment is never treated as outstanding work. Expiry still
+  blocks every write; reading an expired page is safe.
+- **A truthful login check.** `uplus_check_login` waits for the token + redirect
+  to settle, then validates a protected read. It no longer treats a transient
+  login URL or a rendered workbench shell as proof of a session. The API token
+  probe remains cached for speed.
+- **Progress unknown is not zero.** More answer-card layouts and explicit DOM
+  counters are supported. `progress=null` is now accompanied by
+  `progress_status="unavailable"`, nullable `answered_count` /
+  `question_total_on_page`, and a note: use the submit/withdraw button for
+  submission state, not a missing counter.
+- **Explicit `uplus_logout(confirm=True)`.** Uses the platform's sign-out UI,
+  verifies the protected session has ended, and clears account caches only on
+  success. Without confirmation it changes nothing. Separate accounts should
+  still use separate profiles, CDP ports and working directories/report files.
+- **Platform limits remain platform limits.** A graded assignment is never
+  withdrawn. Pending grading without a reference answer remains `unjudged`;
+  a local answer journal is not promoted to an answer key. Identical
+  `question_id` values across accounts are not treated as proof of correctness.
+- **Validation.** 513 tests pass; focused Ruff F/B checks are clean. The
+  real-account UI/logout flow is not exercised by these mocked regression tests.
+
 ## What's new in 0.8.15
 
 Fixes the "MCP is not registered, only the local CLI works" symptom, plus a
@@ -285,10 +317,10 @@ and stopped opening pages for expired homework:
   control characters and leading/trailing dots/spaces, prefixes Windows device
   names (`CON`, `NUL`, `COM1` …) with `_`, and caps the length at 120. It is
   used for attachments, handbook files, course materials and templates.
-- **Expired homework pages are skipped.** `uplus_list_homeworks(refresh_page_state=True)`,
-  `uplus_scan_course` and `uplus_patrol` open the answer page only for
-  unsubmitted, not-yet-expired homework; expired tasks still appear in the
-  report and takeover list from the API state.
+- **Expired homework pages are skipped (0.8.10–0.8.15).** These releases open
+  answer pages only for API-unsubmitted, non-expired homework to save time.
+  **From 0.8.16, refreshed page state reads every task, including expired ones,
+  read-only, to correct API under-reporting; expiry still blocks all writes.**
 - **Launcher audit.** The CDP probe uses a fixed loopback URL with an `int()`
   port; `subprocess.Popen` uses an argv list with `shell=False`. Bandit reports
   no MEDIUM/HIGH findings.
@@ -314,15 +346,15 @@ and adds a single-course scan:
   (实验一 → 实验二 → 实验十); unnumbered titles go last.
 - **New `uplus_scan_course(course_id, refresh_page_state=True,
   verify_experiments=False)`.** It reads exactly one course: one homework feed
-  call, one answer-page load per *unsubmitted* homework, then one experiment
-  list page. It returns `homeworks`, `experiments` and `summary`; no other
+  call, one answer-page load per *unsubmitted* homework (0.8.9–0.8.15; 0.8.16
+  reconciles all tasks when refresh is enabled), then one experiment list page. It returns `homeworks`, `experiments` and `summary`; no other
   course is touched. With `verify_experiments=True` it also opens each
   experiment detail page in the same pass; the default keeps the fast list
   badge.
 - **Faster/clearer list tools.** `uplus_list_experiments` gains an optional
   `verify` flag (`False` reads the list badge only, one page load for the whole
-  course). `uplus_list_homeworks(refresh_page_state=True)` still opens only
-  unsubmitted homework pages. `uplus_patrol` is now explicitly course-major:
+  course). `uplus_list_homeworks(refresh_page_state=True)` opens only
+  unsubmitted homework pages in 0.8.9–0.8.15; 0.8.16 reconciles every row. `uplus_patrol` is now explicitly course-major:
   all of one course's homeworks, then its experiments, then the next course.
 - **Recommended retrieval flow.** Follow the order returned by
   `uplus_list_courses` and call `uplus_scan_course` once per course; finish that
@@ -1208,7 +1240,8 @@ Code examples.
 | Tool | Description |
 | --- | --- |
 | `uplus_login` | Three-dialog sign-in: owner (self / on behalf) → method (student ID / SMS / phone+password) → credentials; student ID and password methods auto-fill and submit, SMS parks the page for the human |
-| `uplus_check_login` | Verify whether the attached browser session is signed in |
+| `uplus_check_login` | Wait for login readiness and validate a protected read |
+| `uplus_logout` | Explicit `confirm=True` sign-out via the platform UI, with verification |
 | `uplus_list_courses` | List courses under the signed-in account |
 | `uplus_list_homeworks` | List homework status; open answer pages to verify button truth on demand |
 | `uplus_list_experiments` | List experiments with `exp_id` / `stu_exp_id` and submission state (submitted / outstanding / unknown) |
@@ -1318,10 +1351,9 @@ pip install -e ".[dev]"
 pytest
 ```
 
-- 165 unit tests cover model parsing, config loading, answer normalization, page
-  state rules, experiment classification, the two-mode login flow, the batch
-  action receipt, cross-platform browser detection, config compatibility and
-  the security hardening of 0.7.0 / 0.7.1.
+- 513 unit/regression tests cover models, configuration, answer normalization,
+  page/API reconciliation, login readiness, sign-out orchestration, experiment
+  retrieval and security hardening. They do not use real account credentials.
 - Browser and platform interactions are exercised against a real session in
   read-only patrol mode; write actions require the authorized account and an
   active course deadline.
