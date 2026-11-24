@@ -7,6 +7,7 @@ tools in ``server.py`` are thin wrappers around an ``PatrolEngine`` instance.
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional
 
 from . import report as report_mod
@@ -34,6 +35,16 @@ class PatrolEngine:
         # was re-fetched many times for one course. The cache is filled once per
         # course and never grows beyond the account's courses.
         self._course_names: dict[str, str] = {}
+        # Page-state cache: one answer-page load is the dominant cost of a
+        # patrol (31 homeworks ≈ 2.5 min). A short-lived cache lets a patrol,
+        # an inspect/audit and a repair within the same session reuse the read
+        # instead of loading the same SPA again. Entries are dropped whenever a
+        # write (answer/withdraw/submit) or a login/logout changes the truth.
+        # ``task_id -> (monotonic stamp, status, progress)``
+        self._page_state_cache: dict[str, tuple[float, HomeworkStatus, Optional[str]]] = {}
+        # Set once the attached session is proven to belong to
+        # ``config.expected_account``; reset on login/logout.
+        self._account_ok = False
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -86,17 +97,40 @@ class PatrolEngine:
             task.raw["_api_status_value"] = task.status.value
         self._task_index[task.task_id] = task
 
-    def _read_task_page_state(self, task: HomeworkTask) -> str:
+    PAGE_STATE_TTL_S = 120.0
+
+    def _invalidate_page_state(self, task_id: str | None = None) -> None:
+        """Drop cached page truth after a write, login or logout."""
+        if task_id is None:
+            self._page_state_cache.clear()
+        else:
+            self._page_state_cache.pop(task_id, None)
+
+    def _read_task_page_state(self, task: HomeworkTask, *,
+                              use_cache: bool = True) -> str:
         """Read the real submit-button state for one task; return an error text.
 
-        Empty string means the page was read (or not needed). This is the one
-        page navigation per open homework, kept inside the current course.
+        Empty string means the page was read (or a fresh cached read was
+        reused). ``task.raw["_page_state_source"]`` records whether the value
+        came from a live page, the cache, or nothing at all.
         """
+        cached = self._page_state_cache.get(task.task_id)
+        if use_cache and cached is not None:
+            stamp, status, progress = cached
+            if time.monotonic() - stamp <= self.PAGE_STATE_TTL_S:
+                task.page_status = status
+                if progress is not None:
+                    task.page_progress = progress
+                task.raw["_page_state_source"] = "page_cache"
+                return ""
         try:
             page = self.operator.open_homework(task)
             status, progress = self.operator.read_page_state(page)
             if status is not None:
                 task.page_status = status
+                task.raw["_page_state_source"] = "page"
+                self._page_state_cache[task.task_id] = (
+                    time.monotonic(), status, progress)
             if progress is not None:
                 task.page_progress = progress
             # Pick up the score from a graded page when the API omitted it.
@@ -110,6 +144,67 @@ class PatrolEngine:
         except Exception as exc:  # noqa: BLE001 - keep the listing alive
             return utils.redact_secrets(str(exc))
         return ""
+
+    @staticmethod
+    def _api_status_value(task: HomeworkTask) -> str:
+        return str(task.raw.get("_api_status_value") or task.status.value)
+
+    def _should_read_page(self, task: HomeworkTask) -> bool:
+        """Whether this row needs a live answer-page read.
+
+        One page load per homework is the dominant patrol cost. A read is only
+        necessary where the API cannot be trusted for the verdict this tool
+        acts on:
+
+        * API-unsubmitted, non-expired homeworks — the interface under-reports
+          submissions, and these are the rows the answer flow may act on;
+        * API-submitted rows whose ``subStatus`` is absent/unrecognised — the
+          page is the only way to tell 待批改 from 已出分 (withdrawable).
+
+        Expired rows and submitted rows with a recognised ``subStatus`` keep the
+        API status, marked ``status_source="api"``; ``uplus_audit_homework``
+        still opens the page for an authoritative per-homework answer.
+        """
+        api_status = self._api_status_value(task)
+        if api_status == HomeworkStatus.NOT_SUBMITTED.value:
+            return not task.is_expired()
+        if api_status in (HomeworkStatus.SUBMITTED_PENDING.value,
+                          HomeworkStatus.SUBMITTED_GRADED.value):
+            return str(task.sub_status or "").strip() not in {"1", "2", "3"}
+        return True
+
+    def _guard_account(self) -> None:
+        """Refuse to act when the attached browser belongs to another account.
+
+        A pinned CDP port already prevents silent port fallback, but a port can
+        still be *user* switched by logging in as someone else in the same
+        profile. When ``config.expected_account`` is configured, the session is
+        checked once; a mismatch raises before any read or write, which also
+        protects the cross-account answer reuse path from filling one account's
+        answers into another account's homework.
+        """
+        expected = str(getattr(self.config, "expected_account", "") or "").strip()
+        if not expected or self._account_ok:
+            return
+        try:
+            result = self.session.account_matches(expected)
+        except AuthExpiredError:
+            return  # a login flow follows; identity is checked after it
+        except UplusError:
+            raise
+        except Exception:  # noqa: BLE001 - identity is best-effort on odd tabs
+            return
+        if not result.get("available"):
+            return  # signed out / SPA not hydrated: nothing to compare yet
+        if not result.get("matched"):
+            raise UplusError(
+                "已拒绝对当前浏览器会话执行操作："
+                f"会话账号「{result.get('actual') or '未知'}」与配置的期望账号"
+                f"「{expected}」不一致。常见原因是配置端口对应的浏览器已关闭、"
+                "工具接入了另一个账号的实例，或同一 profile 被换号登录。"
+                "请关闭/更换浏览器，或修正 account / UPLUS_ACCOUNT 配置后重试。"
+            )
+        self._account_ok = True
 
     @staticmethod
     def _homework_row(course: Course, task: HomeworkTask) -> dict:
@@ -155,6 +250,14 @@ class PatrolEngine:
             "progress_note": ("" if task.page_progress else
                               "页面未提供可识别的答题计数；这不是未作答或0题，提交状态以按钮为准"),
             "page_error": task.raw.get("page_error", ""),
+            "status_source": (
+                "page" if task.page_status is not None
+                and task.raw.get("_page_state_source") != "page_cache"
+                else "page_cache" if task.page_status is not None
+                else "api"),
+            "status_note": ("" if task.page_status is not None else
+                            "该行状态取自接口、未核对页面按钮；"
+                            "可用 uplus_audit_homework 获取页面权威状态"),
             "api_says_submitted": api_says_submitted,
             "page_says_submitted": page_says_submitted,
             "state_conflicts": state_conflicts,
@@ -179,9 +282,37 @@ class PatrolEngine:
             logged = self.session.is_logged_in()
         except AuthExpiredError:
             logged = False
-        return {"logged_in": logged, "base_url": self.config.base_url,
-                "message": "登录有效" if logged else
-                "等待后仍未检测到有效登录态：请在当前浏览器 profile 中重新登录，然后重试。"}
+        result: dict = {"logged_in": logged, "base_url": self.config.base_url,
+                        "message": "登录有效" if logged else
+                        "等待后仍未检测到有效登录态：请在当前浏览器 profile 中重新登录，然后重试。"}
+        expected = str(getattr(self.config, "expected_account", "") or "").strip()
+        identity = ""
+        matched = None
+        if logged:
+            try:
+                match = self.session.account_matches(expected) if expected else None
+            except Exception:  # noqa: BLE001 - identity is supplementary here
+                match = None
+            if match is not None:
+                identity = match.get("actual", "")
+                matched = match.get("matched") if match.get("available") else None
+            else:
+                try:
+                    identity = self.session.account_identity().get("primary", "")
+                except Exception:  # noqa: BLE001
+                    identity = ""
+        result["account"] = identity
+        result["expected_account"] = expected
+        if expected and matched is not None:
+            result["account_match"] = matched
+            if not matched:
+                result["message"] = (
+                    f"当前会话属于账号「{identity or '未知'}」，"
+                    f"与配置的期望账号「{expected}」不一致；"
+                    "账号相关工具会拒绝执行，请换回正确浏览器或修正配置。")
+            else:
+                self._account_ok = True
+        return result
 
     def logout(self, *, confirm: bool = False) -> dict:
         """Sign out only the attached profile after an explicit confirmation."""
@@ -189,6 +320,8 @@ class PatrolEngine:
             return {"logged_out": False, "confirmation_required": True,
                     "message": "退出当前 U+ 账号需明确确认；确认后以 confirm=true 重新调用。"}
         result = self.session.logout()
+        self._account_ok = False
+        self._invalidate_page_state()
         if result.get("logged_out"):
             self._task_index.clear()
             self._course_names.clear()
@@ -270,9 +403,30 @@ class PatrolEngine:
             "method": method_key,
             "stage": "done" if result.get("logged_in") else "login_failed",
         })
+        # A fresh login is a new identity: re-check it before any tool acts.
+        self._account_ok = False
+        self._invalidate_page_state()
+        expected = str(getattr(self.config, "expected_account", "") or "").strip()
+        if result.get("logged_in") and expected:
+            try:
+                match = self.session.account_matches(expected)
+            except Exception:  # noqa: BLE001 - identity unavailable this early
+                match = None
+            if match and match.get("available"):
+                result["account"] = match.get("actual", "")
+                result["expected_account"] = expected
+                result["account_match"] = bool(match.get("matched"))
+                if not match.get("matched"):
+                    result["stage"] = "account_mismatch"
+                    result["message"] = (
+                        f"登录成功，但会话账号「{match.get('actual') or '未知'}」"
+                        f"与配置的期望账号「{expected}」不一致；账号相关工具将拒绝执行。")
+                else:
+                    self._account_ok = True
         return result
 
     def list_courses(self) -> list[dict]:
+        self._guard_account()
         # Always read the feed fresh here: this is the tool the user calls to
         # see what is currently on the account, so the session cache must not
         # hide a course that was just added or removed.
@@ -291,6 +445,7 @@ class PatrolEngine:
         ]
 
     def list_homeworks(self, course_id: str = "", refresh_page_state: bool = False) -> list[dict]:
+        self._guard_account()
         targets = [c for c in self._iter_courses() if not course_id or c.id == course_id]
         if course_id and not targets:
             # A named course that does not exist (or is filtered out as expired)
@@ -312,7 +467,7 @@ class PatrolEngine:
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
                 self._register(task)
-                if refresh_page_state:
+                if refresh_page_state and self._should_read_page(task):
                     error = self._read_task_page_state(task)
                     if error:
                         task.raw["page_error"] = error
@@ -330,6 +485,7 @@ class PatrolEngine:
         ``verify=False`` reads the list page only — one page load for the whole
         course instead of one per experiment.
         """
+        self._guard_account()
         course = self._course_by_id(course_id)
         if course is None:
             raise UplusError(f"未找到课程 {course_id}，请先确认课程 ID")
@@ -390,6 +546,7 @@ class PatrolEngine:
         page to confirm its submitted state; the default ``False`` keeps the
         list badge and costs one page load for the whole course.
         """
+        self._guard_account()
         course = self._course_by_id(course_id)
         if course is None:
             raise UplusError(f"未找到课程 {course_id}，请先确认课程 ID")
@@ -398,7 +555,7 @@ class PatrolEngine:
         homeworks: list[dict] = []
         for task in tasks:
             self._register(task)
-            if refresh_page_state:
+            if refresh_page_state and self._should_read_page(task):
                 error = self._read_task_page_state(task)
                 if error:
                     task.raw["page_error"] = error
@@ -458,6 +615,7 @@ class PatrolEngine:
         under ``reports/experiment_materials/`` so the caller can read the
         requirements locally before authoring the report.
         """
+        self._guard_account()
         op = self._experiment_operator()
         detail = op.read_detail(course_id, exp_id, stu_exp_id)
         folder = self.config.report_folder / "experiment_materials"
@@ -663,6 +821,7 @@ class PatrolEngine:
 
 
     def inspect_homework(self, task_id: str, course_id: str) -> dict:
+        self._guard_account()
         task = self.resolve_task(task_id, course_id)
         api_status = task.status
         page = self.operator.open_homework(task)
@@ -741,6 +900,7 @@ class PatrolEngine:
         real button state when ``refresh_page_state`` is on, and falls back to the
         API status only if that read fails.
         """
+        self._guard_account()
         task = self.resolve_task(task_id, course_id)
         api_status = task.status
         page_state_note = ""
@@ -863,6 +1023,7 @@ class PatrolEngine:
         its standard answer while a submission is pending). Supplying an answer
         for such a question is what makes the re-check meaningful.
         """
+        self._guard_account()
         task = self.resolve_task(task_id, course_id)
         supplied = solver.parse_model_answers(answers or {})
         page = self.operator.open_homework(task)
@@ -1059,6 +1220,7 @@ class PatrolEngine:
                 allow_subjective_skips=True,
                 course_name=self.course_name(course_id),
             )
+            self._invalidate_page_state(task.task_id)
             result["repair"] = outcome
             result["submitted"] = bool(outcome.get("submitted"))
         except AuthExpiredError:
@@ -1110,6 +1272,7 @@ class PatrolEngine:
     def answer_homework(self, task_id: str, course_id: str,
                         answers: dict[str, str] | str, submit: bool = True,
                         force_submit: bool = False, reuse: bool = True) -> dict:
+        self._guard_account()
         task = self.resolve_task(task_id, course_id)
         supplied = solver.parse_model_answers(answers)
         merged = dict(supplied)
@@ -1147,6 +1310,8 @@ class PatrolEngine:
             task, merged, submit=submit, force_submit=force_submit,
             course_name=self.course_name(course_id),
         )
+        # A fill/submit changes the real button state: never serve stale cache.
+        self._invalidate_page_state(task.task_id)
         if reused:
             outcome["reused_questions"] = reused
         if reuse_note:
@@ -1167,6 +1332,7 @@ class PatrolEngine:
         ``occurrence`` selects the n-th exact duplicate when several questions
         share the same stem (mirrors ``fill_question``); 0 is the first copy.
         """
+        self._guard_account()
         task = self.resolve_task(task_id, course_id)
         metas = self.client.list_questions(task.homework_id)
         if not metas:
@@ -1205,6 +1371,7 @@ class PatrolEngine:
         }
 
     def upload_attachment(self, task_id: str, course_id: str, file_path: str) -> dict:
+        self._guard_account()
         task = self.resolve_task(task_id, course_id)
         return self.operator.upload_attachment(task, file_path)
 
@@ -1264,6 +1431,7 @@ class PatrolEngine:
 
     def patrol(self, *, auto_answer: bool = False, submit: bool = False,
                audit: bool = True) -> dict:
+        self._guard_account()
         snapshot = report_mod.PatrolReport(generated_at_ms=utils.now_ms())
         answer_briefs: list[dict] = []
         repair_briefs: list[dict] = []
@@ -1278,9 +1446,10 @@ class PatrolEngine:
                 self.client.list_homeworks(course.id), key=_homework_sort_key)
             for task in tasks:
                 self._register(task)
-                # Reconcile every row, including expired homeworks: expired
-                # only disables writes, not the read-only page status check.
-                error = self._read_task_page_state(task)
+                # Only rows whose verdict needs page truth are opened; other
+                # rows keep the API status and say so in ``status_source``.
+                error = (self._read_task_page_state(task)
+                         if self._should_read_page(task) else "")
                 if error:
                     snapshot.takeover.append({
                         "course": course.name, "title": task.name,
@@ -1607,6 +1776,7 @@ class PatrolEngine:
         programming and attachment items are never answered and are reported
         under ``takeover`` exactly as ``patrol`` reports them.
         """
+        self._guard_account()
         supplied = answers or {}
         finish_log: list[dict] = []
         takeover: list[dict] = []

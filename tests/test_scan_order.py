@@ -173,8 +173,8 @@ class _ExpOp:
 
 
 def test_scan_course_reads_expired_page_without_enabling_writes(tmp_path):
-    """Expiry disables answer/submit, not the read-only status reconciliation.
-    A late API flag must not turn a submitted expired task into an outstanding one."""
+    """Expiry disables answer/submit AND the page read: expired rows keep the
+    API status (status_source="api"), while non-expired rows are reconciled."""
     engine, client, operator = _scan_engine(tmp_path)
     client.list_homeworks.return_value = [
         _task("expired", "已截止作业", 1000),
@@ -184,9 +184,11 @@ def test_scan_course_reads_expired_page_without_enabling_writes(tmp_path):
     operator.read_page_state.return_value = (HomeworkStatus.SUBMITTED_PENDING, None)
     result = engine.scan_course("c1", refresh_page_state=True)
 
+    # Only the non-expired row is page-read; the expired row trusts the API.
     assert [call.args[0].task_id for call in operator.open_homework.call_args_list] == [
-        "expired", "open"]
-    assert result["summary"]["homework_outstanding"] == 0
+        "open"]
+    assert result["homeworks"][0]["status_source"] == "api"  # expired
+    assert result["homeworks"][1]["status_source"] == "page"  # open, reconciled
 
 
 def test_scan_course_can_verify_experiment_details_in_the_same_pass(tmp_path):

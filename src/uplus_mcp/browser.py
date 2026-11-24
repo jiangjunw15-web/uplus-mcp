@@ -27,6 +27,7 @@ from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, 
 from .config import Config
 from .launcher import (
     attach_help_text,
+    cdp_alive,
     default_ports,
     ensure_browser_ready,
 )
@@ -38,6 +39,30 @@ ATTACH_HELP = attach_help_text()
 # login domain; a signed-in session renders the workbench SPA.
 HOME_PATH = "/home/index"
 WORKBENCH_PATH = "/workbench/index/school"
+
+
+def connection_ports(config: Config, *, alive=None) -> tuple[int, ...]:
+    """Ports this session may attach to, in order.
+
+    A *pinned* port (``cdp_port`` from the config file or ``UPLUS_CDP_PORT``)
+    never falls back. Falling back to 9222 or another port would silently
+    attach to whichever browser happens to be listening there — in a
+    multi-account setup that is another account's session, and the tool would
+    then read and fill *that* account's homework. Failing loudly is the only
+    safe behaviour. The implicit default port keeps the historic fallback.
+    """
+    check = alive or cdp_alive
+    port = int(config.cdp_port)
+    if getattr(config, "cdp_port_explicit", False):
+        if not check(port):
+            raise UplusError(
+                f"配置的 CDP 端口 {port} 未在监听。该账号的浏览器可能已被关闭；"
+                "为避免接入另一个账号的会话，工具不会回退到其它端口。\n"
+                f"请先启动该端口对应的浏览器（browse_launch_edge(port={port})），"
+                "或修正 UPLUS_CDP_PORT / cdp_port / UPLUS_PROFILE_DIR 配置。"
+            )
+        return (port,)
+    return default_ports(port)
 
 
 class UplusError(RuntimeError):
@@ -71,14 +96,18 @@ class BrowserSession:
     def start(self) -> None:
         if self._started:
             return
-        ports = default_ports(self.config.cdp_port)
-        # Prefer an already-open debug port; otherwise try to bring a browser up.
-        ensure_browser_ready(
-            port=ports[0],
-            auto_launch=self.config.auto_launch_browser,
-            profile_root=self.config.profile_dir or None,
-            kind=self.config.browser,
-        )
+        ports = connection_ports(self.config)
+        if not getattr(self.config, "cdp_port_explicit", False):
+            # Prefer an already-open debug port; otherwise bring a browser up.
+            # A pinned port never takes this path: auto-launch would reopen a
+            # browser the user deliberately closed, and the fallback lookup
+            # could attach to a different account.
+            ensure_browser_ready(
+                port=ports[0],
+                auto_launch=self.config.auto_launch_browser,
+                profile_root=self.config.profile_dir or None,
+                kind=self.config.browser,
+            )
         last_exc: Optional[Exception] = None
         for port in ports:
             try:
@@ -540,6 +569,66 @@ class BrowserSession:
         safe_dest.parent.mkdir(parents=True, exist_ok=True)
         safe_dest.write_bytes(data)
         return safe_dest
+
+    # ------------------------------------------------------------------ #
+    # account identity (anti-cross-account guard)
+    # ------------------------------------------------------------------ #
+    #: localStorage keys the portal uses for the signed-in identity. Only these
+    #: are read: a broad scan could pick up a token under a key like
+    #: ``loginToken`` and echo it back in a tool result.
+    _ACCOUNT_KEYS = (
+        "studentId", "studentNo", "student_id", "studentno",
+        "userid", "userId", "user_id", "username", "userName",
+        "loginName", "account", "phone", "mobile",
+    )
+
+    def account_identity(self, page: Page | None = None) -> dict[str, Any]:
+        """The identifiers the signed-in portal stores, without echoing secrets."""
+        try:
+            page = page or self.page
+            raw = page.evaluate(
+                """(keys) => {
+                  const out = {};
+                  for (const k of keys) {
+                    const v = localStorage.getItem(k);
+                    if (v !== null && String(v).trim() !== '') out[k] = String(v).trim();
+                  }
+                  return out;
+                }""",
+                list(self._ACCOUNT_KEYS),
+            )
+        except Exception:  # noqa: BLE001 - page closed / mid-navigation
+            raw = None
+        identifiers = {
+            str(k): str(v) for k, v in (raw or {}).items() if str(v).strip()
+        }
+        primary = next(
+            (identifiers[k] for k in self._ACCOUNT_KEYS if k in identifiers), "")
+        return {
+            "available": bool(identifiers),
+            "primary": primary,
+            "keys": sorted(identifiers),
+            # Kept for matching only; callers should not print the whole map.
+            "identifiers": identifiers,
+        }
+
+    def account_matches(self, expected: str) -> dict[str, Any]:
+        """Compare the attached session's account with ``expected``.
+
+        Comparison is case-insensitive and whitespace-tolerant so a config
+        written as ``2413041221`` matches the portal's stored value even if it
+        carries padding. A missing identity is reported as ``available=False``
+        rather than "mismatch": a signed-out tab has no identity to compare.
+        """
+        wanted = (expected or "").strip().lower()
+        identity = self.account_identity()
+        values = {str(v).strip().lower() for v in identity["identifiers"].values()}
+        return {
+            "expected": (expected or "").strip(),
+            "actual": identity["primary"],
+            "available": identity["available"],
+            "matched": bool(wanted) and wanted in values,
+        }
 
     # ------------------------------------------------------------------ #
     # login health check

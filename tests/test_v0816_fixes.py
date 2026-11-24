@@ -47,9 +47,9 @@ def _engine(tmp_path, tasks: list[HomeworkTask]):
     ("patrol", {"audit": False}),
 ])
 def test_every_page_refresh_corrects_api_underreporting(tmp_path, method, kwargs):
-    """Even expired tasks are reconciled: read-only page access is still safe,
-    while the answer/submit paths remain closed by the deadline gate."""
-    engine, operator = _engine(tmp_path, [_task("expired", end_ms=1)])
+    """A non-expired API-unsubmitted task is reconciled with the page button;
+    the answer/submit paths remain closed by the deadline gate."""
+    engine, operator = _engine(tmp_path, [_task("open")])
     result = getattr(engine, method)(**kwargs)
     operator.open_homework.assert_called_once()
     if method == "patrol":

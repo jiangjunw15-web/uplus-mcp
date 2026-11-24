@@ -13,6 +13,38 @@ MCP server for the QingSoft U+ learning platform **with a built-in generic brows
 See [README.zh.md](README.zh.md) for the full Chinese guide, and [rename.md](rename.md)
 for the step-by-step script an AI agent follows when onboarding a new user.
 
+## What's new in 0.8.18
+
+Fixes the three issues surfaced by the second round of live testing: silent
+port fallback that could cross accounts, slow patrol, and missing account
+identity verification.
+
+- **Pinned CDP port.** A `cdp_port` from the config file or `UPLUS_CDP_PORT`
+  is now *pinned*: if it is not listening the session fails loudly instead of
+  falling back to 9222 or another live port. In a multi-account setup the
+  fallback could attach to a different account's browser and fill that
+  account's homework. Only the implicit default port keeps the historic
+  fallback. `browse_launch_edge` reports `pinned: true/false` accordingly.
+- **Account identity guard.** New config `account` / `UPLUS_ACCOUNT` (defaults
+  to `student_id`). Every account-bound tool verifies the attached browser
+  session belongs to it before acting; a mismatch raises with both the actual
+  and expected account. `uplus_check_login` returns `account` and
+  `account_match`. This also protects the v0.8.17 cross-account reuse path.
+- **Patrol speed.** Page reads are limited to rows whose verdict needs them
+  (API-unsubmitted + non-expired, or API-submitted with unrecognised
+  `subStatus`). Other rows keep the API status with `status_source="api"`.
+  A 120-second page-state cache prevents patrol → audit → repair from
+  reloading the same SPA. Writes invalidate the cache for that task.
+- **Already-graded limits.** A graded homework with missing options (87/100,
+  questions 86/88 each missing D) is platform-locked: `withdrawable=false`
+  is reported, no withdrawal attempted. Pending grading without a reference
+  answer stays `unjudged`.
+- **Multi-account setup.** Each account: independent `cdp_port`,
+  `profile_dir`, `account`, and working directory/report folder. Shared
+  `UPLUS_JOURNAL_PATH` for cross-account reuse. The port pin + identity guard
+  make silent cross-account operation impossible.
+- **Tests.** 544 pass (520 + 24 new); Ruff F/B clean on touched files.
+
 ## What's new in 0.8.17
 
 Adds **cross-account answer reuse**. The local answer journal used to be looked

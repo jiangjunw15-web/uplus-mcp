@@ -35,7 +35,7 @@ from .browse import BrowseTools
 from .browser import BrowserSession
 from .config import Config, load_config
 from .engine import PatrolEngine
-from .launcher import launch_browser_with_cdp, first_live_port
+from .launcher import cdp_alive, launch_browser_with_cdp, first_live_port
 from .operator import HomeworkOperator
 from .platform import PlatformClient
 from .worker import BrowserThread
@@ -99,7 +99,13 @@ def _dispatch(name: str, *args: Any, **kwargs: Any):
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def uplus_check_login() -> dict:
-    """Check whether the attached browser session is signed into U+."""
+    """Check whether the attached browser session is signed into U+.
+
+    Waits for a just-finished login to settle, validates a protected read, and
+    reports the attached ``account``. When the personal config sets
+    ``account`` / ``UPLUS_ACCOUNT``, ``account_match`` says whether the session
+    belongs to it; a mismatch makes every account-bound tool refuse to act.
+    """
     return await _thread.run_async(_dispatch("check_login"))
 
 
@@ -168,10 +174,14 @@ async def uplus_list_homeworks(course_id: str = "", refresh_page_state: bool = F
     per-course read (homeworks then experiments) use ``uplus_scan_course``
     instead of mixing this tool with the experiment tools.
 
-    ``refresh_page_state=True`` opens every answer page, including expired and
-    API-submitted rows, to reconcile the real button with the REST flag. The
-    page is read-only; expiry still prevents all answer/submit operations.
-    ``progress=None`` means the counter is unavailable, never "unanswered".
+    ``refresh_page_state=True`` opens the answer page for API-unsubmitted,
+    non-expired homework (the rows the interface under-reports and the answer
+    flow may act on). Expired rows and API-submitted rows with a known
+    ``subStatus`` keep the API status and carry ``status_source="api"``;
+    ``uplus_audit_homework`` remains the authoritative per-homework page read.
+    Page reads are cached briefly, so a patrol followed by an audit does not
+    reload the same page. ``progress=None`` means the counter is unavailable,
+    never "unanswered".
 """
     return await _thread.run_async(
         _dispatch("list_homeworks", course_id, refresh_page_state=refresh_page_state)
@@ -299,7 +309,9 @@ async def uplus_answer_homework(
     ``reused_questions``. Reuse is a convenience, not a correctness proof.
 
     Submission is refused while any question is unanswered or failed unless
-    ``force_submit=True``.
+    ``force_submit=True``. If the personal config pins ``account`` /
+    ``UPLUS_ACCOUNT`` and the attached browser session belongs to another
+    account, the tool refuses to fill or submit anything.
     """
     return await _thread.run_async(
         _dispatch("answer_homework", task_id, course_id, answers or {},
@@ -448,7 +460,11 @@ async def uplus_patrol(auto_answer: bool = False, submit: bool = False,
     Lists homework and experiments, separates submitted / pending / outstanding /
     takeover items, and collects answer briefs for outstanding objective
     questions. ``submit=True`` only submits homework that received valid answers;
-    subjective, programming and file items are never auto-submitted.
+    subjective, programming and file items are never auto-submitted. Page reads
+    are limited to rows whose verdict needs them (API-unsubmitted, non-expired
+    homework, plus rows whose API ``subStatus`` cannot classify them) and are
+    cached for the session; each row says which side its status came from in
+    ``status_source``.
 
     ``audit`` is on by default: every already-submitted homework is re-checked
     for unanswered objective questions (漏答) and for multi-selects submitted
@@ -552,7 +568,11 @@ async def browse_launch_edge(port: int = 0, refresh_profile: bool = False) -> di
     The tool name keeps the original ``browse_launch_edge`` spelling for
     compatibility; it launches whichever engine the config ``browser`` field
     selects (``auto`` picks the first installed Edge or Chrome). ``port`` of
-    ``0`` means "use the configured CDP port" (default 9333, fallback 9222).
+    ``0`` means "use the configured CDP port". A port given explicitly (or a
+    ``cdp_port`` from the config / ``UPLUS_CDP_PORT``) is pinned: the tool
+    reports whether *that* port is listening and never answers with a
+    different live port, which in a multi-account setup could belong to
+    another account. Only the implicit default keeps the 9222 fallback.
     Needed because Chromium 136+ ignores ``--remote-debugging-port`` on the
     default profile directory. Login cookies survive the copy, so U+ stays
     signed in.
@@ -560,15 +580,32 @@ async def browse_launch_edge(port: int = 0, refresh_profile: bool = False) -> di
     def work() -> dict:
         cfg = _config()
         target_port = port if port > 0 else cfg.cdp_port
+        pinned = port > 0 or bool(getattr(cfg, "cdp_port_explicit", False))
+        if pinned:
+            alive = cdp_alive(target_port)
+            if alive:
+                return {"already_running": True, "port": target_port,
+                        "profile_dir": cfg.profile_dir or "",
+                        "pinned": True}
+            info = launch_browser_with_cdp(
+                port=target_port,
+                refresh_profile=refresh_profile,
+                kind=cfg.browser,
+                profile_root=cfg.profile_dir or None,
+            )
+            info["pinned"] = True
+            return info
         live = first_live_port(target_port)
         if live:
-            return {"already_running": True, "port": live}
-        return launch_browser_with_cdp(
+            return {"already_running": True, "port": live, "pinned": False}
+        info = launch_browser_with_cdp(
             port=target_port,
             refresh_profile=refresh_profile,
             kind=cfg.browser,
             profile_root=cfg.profile_dir or None,
         )
+        info["pinned"] = False
+        return info
 
     return await _thread.run_async(work)
 

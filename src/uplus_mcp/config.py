@@ -78,6 +78,15 @@ class Config:
     browser: str = BROWSER_AUTO
     # Preferred CDP port; a free fallback port is tried when this one is busy.
     cdp_port: int = DEFAULT_CDP_PORT
+    # True when the port came from config / UPLUS_CDP_PORT rather than the
+    # built-in default. An explicitly configured port is *pinned*: if it is not
+    # listening the session must fail instead of falling back to another port,
+    # because another port may hold a different account's browser session.
+    cdp_port_explicit: bool = False
+    # The account this working directory may operate on. When set, every
+    # account-bound tool verifies the attached browser session belongs to it
+    # and refuses to act on a mismatch. Personal config only; never shipped.
+    expected_account: str = ""
     # Dedicated browser profile directory; empty means "use the platform default
     # under the user home" (see launcher.dedicated_profile_dir).
     profile_dir: str = ""
@@ -199,6 +208,7 @@ def load_config(path: Optional[str] = None) -> Config:
     # ``auto_launch_browser`` flag so old files keep working.
     auto_launch = data.get("auto_launch_browser", data.get("auto_launch_edge", True))
     cdp_port = data.get("cdp_port", DEFAULT_CDP_PORT)
+    cdp_port_explicit = "cdp_port" in data
     browser_raw = data.get("browser", data.get("browser_engine", BROWSER_AUTO))
     report_dir = str(data.get("report_dir", "reports"))
 
@@ -211,6 +221,11 @@ def load_config(path: Optional[str] = None) -> Config:
         auto_launch_browser=utils.coerce_bool(auto_launch, True),
         browser=_normalize_browser(browser_raw),
         cdp_port=_normalize_port(cdp_port),
+        cdp_port_explicit=cdp_port_explicit,
+        # The account guard: explicit ``account`` wins, else the personal
+        # ``student_id`` (same person, already gitignored) is a safe fallback.
+        expected_account=str(
+            data.get("account") or data.get("student_id") or "").strip(),
         profile_dir=str(data.get("profile_dir", "")),
         include_expired_courses=utils.coerce_bool(
             data.get("include_expired_courses", False), False),
@@ -229,6 +244,10 @@ def load_config(path: Optional[str] = None) -> Config:
     env_port = os.environ.get("UPLUS_CDP_PORT")
     if env_port and env_port.strip().isdigit():
         cfg.cdp_port = _normalize_port(env_port, cfg.cdp_port)
+        cfg.cdp_port_explicit = True
+    env_account = os.environ.get("UPLUS_ACCOUNT")
+    if env_account and env_account.strip():
+        cfg.expected_account = env_account.strip()
     env_browser = os.environ.get("UPLUS_BROWSER")
     if env_browser:
         cfg.browser = _normalize_browser(env_browser)
